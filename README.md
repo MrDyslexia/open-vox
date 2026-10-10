@@ -14,9 +14,12 @@ model download, or sherpa-onnx.
    child sessions and malformed data are rejected.
 3. `src/speech-text.ts` strips Markdown (code, links, tables, headings) and
    detects Spanish or English.
-4. `src/speech-sink.ts` speaks the text with an installed voice for that
-   language (one PowerShell process per message, text via stdin), queued
-   serially. A new user turn or a session error stops the current speech.
+4. `src/piper-engine.ts` synthesizes with [Piper](https://github.com/rhasspy/piper)
+   neural voices (local ONNX models) and plays the WAV. Default voices:
+   `es_MX-claude-high` and `en_US-lessac-high`. If Piper is not installed, the
+   sink falls back to Windows SAPI voices.
+5. `src/speech-sink.ts` queues messages serially. A new user turn or a session
+   error stops the current speech.
 
 ## Install
 
@@ -29,8 +32,23 @@ export { AgentVozPlugin } from "file:///C:/Users/pc/Documents/agentVoz/src/index
 Remove that file to uninstall. Set `AGENTVOZ_DISABLED=1` to mute without
 uninstalling. Set `AGENTVOZ_LOG=<file>` to write a small diagnostic log.
 
-Requirements: Windows, and at least one installed SAPI voice per language
-(Spanish and English voices ship with Windows; see Settings > Speech).
+### Neural voices (Piper)
+
+Everything lives under `%LOCALAPPDATA%\agentVoz` (override with `AGENTVOZ_HOME`):
+
+```
+agentVoz\piper\piper.exe            # piper_windows_amd64.zip from rhasspy/piper 2023.11.14-2
+agentVoz\voices\es_MX-claude-high.onnx(.json)
+agentVoz\voices\en_US-lessac-high.onnx(.json)
+```
+
+Voices come from `huggingface.co/rhasspy/piper-voices`. Use a different voice by
+putting its files in `voices\` and setting `AGENTVOZ_VOICE_ES` / `AGENTVOZ_VOICE_EN`
+to the model name without `.onnx`. Set `AGENTVOZ_ENGINE=sapi` to force the
+built-in Windows voices. Piper runs on CPU; a sentence takes about 1 second.
+
+Without Piper, the plugin needs one installed SAPI voice per language (Spanish
+and English voices ship with Windows).
 
 ## Verify locally
 

@@ -4,8 +4,12 @@ import { detectLanguage, prepareSpeech, type Language } from "./speech-text";
 
 export type SpeechProcess = { exited: Promise<number>; kill(): void };
 export type Spawn = (args: string[], stdin: string) => SpeechProcess;
+export type Engine = (text: string, language: Language) => SpeechProcess;
 export type SpeechSink = ((selection: Selection) => Promise<void>) & { stop(): void };
 export type SpeechSinkOptions = {
+  /** Preferred: a full engine (e.g. Piper). Takes precedence over `spawn`. */
+  engine?: Engine;
+  /** Windows SAPI fallback, driven through PowerShell. */
   spawn?: Spawn;
   enabled?: boolean;
   maxPending?: number;
@@ -47,6 +51,8 @@ type Job = { text: string; language: Language; done: () => void };
 
 export function createSpeechSink(options: SpeechSinkOptions = {}): SpeechSink {
   const spawn = options.spawn ?? windowsSpawn;
+  const engine: Engine = options.engine ??
+    ((text, language) => spawn(["-NoProfile", "-NonInteractive", "-Command", script(language)], text));
   const maxPending = options.maxPending ?? 2;
   const timeoutMs = options.timeoutMs ?? 120_000;
   const report = (error: unknown) => { try { options.onError?.(error); } catch {} };
@@ -64,7 +70,7 @@ export function createSpeechSink(options: SpeechSinkOptions = {}): SpeechSink {
         const mine = generation;
         let timer: ReturnType<typeof setTimeout> | undefined;
         try {
-          const proc = spawn(["-NoProfile", "-NonInteractive", "-Command", script(job.language)], job.text);
+          const proc = engine(job.text, job.language);
           current = proc;
           timer = setTimeout(() => { try { proc.kill(); } catch {} }, timeoutMs);
           const code = await proc.exited;

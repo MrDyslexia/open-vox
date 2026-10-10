@@ -1,6 +1,7 @@
 import { appendFileSync } from "node:fs";
 import type { Hooks, Plugin } from "@opencode-ai/plugin";
 import { selectFinalResponse, validID, type MessageData, type Selection } from "./final-response";
+import { defaultPiperEngine } from "./piper-engine";
 import { createSpeechSink, type SpeechSink } from "./speech-sink";
 
 type Result<T> = { data?: T; error?: unknown };
@@ -130,8 +131,12 @@ function debugLog(file: string | undefined) {
 export const AgentVozPlugin: Plugin = async ({ client, directory }) => {
   const log = debugLog(process.env.AGENTVOZ_LOG);
   const enabled = process.env.AGENTVOZ_DISABLED !== "1" && process.platform === "win32";
+  const wanted = (process.env.AGENTVOZ_ENGINE ?? "auto").toLowerCase();
+  const piper = enabled && wanted !== "sapi" ? defaultPiperEngine() : undefined;
+  log(`engine=${piper ? "piper" : "sapi"} requested=${wanted}`);
   const sink = createSpeechSink({
     enabled,
+    engine: piper,
     onError: (error) => log(`speech error: ${error instanceof Error ? error.message : String(error)}`),
   });
   log(`plugin ready enabled=${enabled}`);
