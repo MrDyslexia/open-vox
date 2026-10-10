@@ -23,11 +23,9 @@ function Block(props: { api: TuiPluginApi }) {
   const toggle = () => setConfig(writeConfig({ paused: !paused() }))
 
   const chooseVoice = () => {
-    const current = config().voices
     props.api.ui.dialog.replace(() => (
       <props.api.ui.DialogSelect
         title="agentVoz voice"
-        current={`${current.es}|${current.en}`}
         options={KOKORO_VOICES.map((v) => ({
           title: `${v.label}`,
           value: v.id,
@@ -48,12 +46,16 @@ function Block(props: { api: TuiPluginApi }) {
     ))
   }
 
-  const button = (text: () => string, onClick: () => void, active?: () => boolean) => (
+  // `onRelease` buttons act on mouse-up. A button that opens a dialog must do this: the host
+  // dialog backdrop dismisses itself on mouse-up, so opening on mouse-down makes the
+  // dialog appear under the pointer and be closed by the very same click.
+  const button = (text: () => string, onClick: () => void, active?: () => boolean, onRelease = false) => (
     <box
       paddingLeft={1}
       paddingRight={1}
       backgroundColor={active?.() ? theme().warning : theme().backgroundElement}
-      onMouseDown={onClick}
+      onMouseDown={onRelease ? undefined : onClick}
+      onMouseUp={onRelease ? onClick : undefined}
     >
       <text fg={active?.() ? theme().background : theme().text}>{text()}</text>
     </box>
@@ -67,7 +69,7 @@ function Block(props: { api: TuiPluginApi }) {
       </text>
       <box flexDirection="row" gap={1}>
         {button(() => (paused() ? "Resume" : "Pause"), toggle, paused)}
-        {button(() => "Voice", chooseVoice)}
+        {button(() => "Voice", chooseVoice, undefined, true)}
       </box>
       <text fg={theme().textMuted}>
         {`ES ${label(config().voices.es)} / EN ${label(config().voices.en)}`}
@@ -90,3 +92,4 @@ const tui: TuiPlugin = async (api) => {
 const plugin = { id, tui }
 
 export default plugin
+
