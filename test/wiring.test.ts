@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createAgentVoz } from "../src/plugin";
+import { chooseEngine, createAgentVoz } from "../src/plugin";
 import type { SpeechSink } from "../src/speech-sink";
 
 function fakeSink() {
@@ -47,5 +47,23 @@ describe("agentVoz wiring", () => {
     f.sink.stop = () => { throw new Error("x"); };
     const hooks = createAgentVoz(client, "/d", f.sink);
     await hooks.event!({ event: user("msg_1", 1) });
+  });
+});
+
+describe("chooseEngine", () => {
+  const kokoro = () => ({ exited: Promise.resolve(0), kill() {} });
+  const mk = (k: boolean, p: boolean) => ({ kokoro: () => (k ? kokoro : undefined), piper: () => (p ? kokoro : undefined) });
+  test("auto prefers kokoro, then piper, then sapi", () => {
+    expect(chooseEngine("auto", true, mk(true, true)).name).toBe("kokoro");
+    expect(chooseEngine("auto", true, mk(false, true)).name).toBe("piper");
+    expect(chooseEngine("auto", true, mk(false, false)).name).toBe("sapi");
+  });
+  test("an explicit engine is honored and falls back when missing", () => {
+    expect(chooseEngine("piper", true, mk(true, true)).name).toBe("piper");
+    expect(chooseEngine("kokoro", true, mk(false, true)).name).toBe("piper");
+    expect(chooseEngine("sapi", true, mk(true, true)).name).toBe("sapi");
+  });
+  test("disabled never builds an engine", () => {
+    expect(chooseEngine("auto", false, mk(true, true)).engine).toBeUndefined();
   });
 });

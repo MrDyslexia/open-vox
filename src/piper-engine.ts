@@ -44,15 +44,24 @@ export function resolvePiper(
 const quote = (value: string) => value.replace(/'/g, "''");
 let counter = 0;
 
-/** Synthesizes a WAV with Piper (text on stdin), then plays it. Killable at either step. */
-export function piperEngine(config: PiperConfig): Engine {
+export type WavConfig = {
+  /** Builds the synthesis command; the text is delivered on stdin. */
+  commandFor: (language: Language, wav: string) => { cmd: string; args: string[] };
+  run: Runner;
+  tmpDir: string;
+  unlink: (file: string) => void;
+};
+
+/** Synthesizes a WAV (text on stdin), then plays it. Killable at either step. */
+export function wavEngine(config: WavConfig): Engine {
   return (text, language) => {
     const wav = win32.join(config.tmpDir, `agentvoz-${process.pid}-${Date.now()}-${counter++}.wav`);
     let killed = false;
     let active: SpeechProcess | undefined;
     const exited = (async () => {
       try {
-        active = config.run(config.exe, ["-m", config.models[language], "-f", wav, "-q"], text);
+        const command = config.commandFor(language, wav);
+        active = config.run(command.cmd, command.args, text);
         const code = await active.exited;
         if (killed) return 1;
         if (code !== 0) return code;
@@ -65,6 +74,15 @@ export function piperEngine(config: PiperConfig): Engine {
     })();
     return { exited, kill: () => { killed = true; try { active?.kill(); } catch {} } };
   };
+}
+
+export function piperEngine(config: PiperConfig): Engine {
+  return wavEngine({
+    run: config.run,
+    tmpDir: config.tmpDir,
+    unlink: config.unlink,
+    commandFor: (language, wav) => ({ cmd: config.exe, args: ["-m", config.models[language], "-f", wav, "-q"] }),
+  });
 }
 
 export function defaultPiperEngine(env: Record<string, string | undefined> = process.env): Engine | undefined {

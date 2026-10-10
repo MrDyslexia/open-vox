@@ -1,8 +1,9 @@
 import { appendFileSync } from "node:fs";
 import type { Hooks, Plugin } from "@opencode-ai/plugin";
 import { selectFinalResponse, validID, type MessageData, type Selection } from "./final-response";
+import { defaultKokoroEngine } from "./kokoro-engine";
 import { defaultPiperEngine } from "./piper-engine";
-import { createSpeechSink, type SpeechSink } from "./speech-sink";
+import { createSpeechSink, type Engine, type SpeechSink } from "./speech-sink";
 
 type Result<T> = { data?: T; error?: unknown };
 export type Client = {
@@ -128,15 +129,36 @@ function debugLog(file: string | undefined) {
   };
 }
 
+/** auto = Kokoro, then Piper, then Windows SAPI (engine left undefined). */
+export function chooseEngine(
+  wanted: string,
+  enabled: boolean,
+  factories: { kokoro: () => Engine | undefined; piper: () => Engine | undefined } = {
+    kokoro: () => defaultKokoroEngine(),
+    piper: () => defaultPiperEngine(),
+  },
+): { name: "kokoro" | "piper" | "sapi"; engine: Engine | undefined } {
+  if (!enabled || wanted === "sapi") return { name: "sapi", engine: undefined };
+  if (wanted === "kokoro" || wanted === "auto") {
+    const kokoro = factories.kokoro();
+    if (kokoro) return { name: "kokoro", engine: kokoro };
+  }
+  if (wanted === "piper" || wanted === "auto" || wanted === "kokoro") {
+    const piper = factories.piper();
+    if (piper) return { name: "piper", engine: piper };
+  }
+  return { name: "sapi", engine: undefined };
+}
+
 export const AgentVozPlugin: Plugin = async ({ client, directory }) => {
   const log = debugLog(process.env.AGENTVOZ_LOG);
   const enabled = process.env.AGENTVOZ_DISABLED !== "1" && process.platform === "win32";
   const wanted = (process.env.AGENTVOZ_ENGINE ?? "auto").toLowerCase();
-  const piper = enabled && wanted !== "sapi" ? defaultPiperEngine() : undefined;
-  log(`engine=${piper ? "piper" : "sapi"} requested=${wanted}`);
+  const choice = chooseEngine(wanted, enabled);
+  log(`engine=${choice.name} requested=${wanted}`);
   const sink = createSpeechSink({
     enabled,
-    engine: piper,
+    engine: choice.engine,
     onError: (error) => log(`speech error: ${error instanceof Error ? error.message : String(error)}`),
   });
   log(`plugin ready enabled=${enabled}`);
