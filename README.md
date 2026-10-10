@@ -14,10 +14,11 @@ model download, or sherpa-onnx.
    child sessions and malformed data are rejected.
 3. `src/speech-text.ts` strips Markdown (code, links, tables, headings) and
    detects Spanish or English.
-4. `src/piper-engine.ts` synthesizes with [Piper](https://github.com/rhasspy/piper)
-   neural voices (local ONNX models) and plays the WAV. Default voices:
-   `es_MX-claude-high` and `en_US-lessac-high`. If Piper is not installed, the
-   sink falls back to Windows SAPI voices.
+4. Engines, chosen in this order (override with `AGENTVOZ_ENGINE=kokoro|piper|sapi`):
+   - `src/kokoro-engine.ts` + `scripts/kokoro_say.py`: [Kokoro](https://github.com/thewh1teagle/kokoro-onnx)
+     (82M ONNX model, CPU). Default voices `ef_dora` (es) and `af_heart` (en).
+   - `src/piper-engine.ts`: [Piper](https://github.com/rhasspy/piper) neural voices.
+   - Windows SAPI voices as the last resort.
 5. `src/speech-sink.ts` queues messages serially. A new user turn or a session
    error stops the current speech.
 
@@ -32,7 +33,22 @@ export { AgentVozPlugin } from "file:///C:/Users/pc/Documents/agentVoz/src/index
 Remove that file to uninstall. Set `AGENTVOZ_DISABLED=1` to mute without
 uninstalling. Set `AGENTVOZ_LOG=<file>` to write a small diagnostic log.
 
-### Neural voices (Piper)
+### Neural voices (Kokoro, preferred)
+
+```powershell
+$root = "$env:LOCALAPPDATA\agentVoz"
+python -m venv "$root\kokoro-venv"
+& "$root\kokoro-venv\Scripts\python.exe" -m pip install kokoro-onnx soundfile
+# Download into $root\kokoro\ from github.com/thewh1teagle/kokoro-onnx releases (model-files-v1.0):
+#   kokoro-v1.0.onnx (310 MB) and voices-v1.0.bin (27 MB)
+```
+
+Voices: `AGENTVOZ_KOKORO_VOICE_ES` (`ef_dora`, `em_alex`, `em_santa`) and
+`AGENTVOZ_KOKORO_VOICE_EN` (`af_heart`, `am_adam`, ...). Speed: `AGENTVOZ_SPEED`
+(0.5 to 2, default 1). A short sentence synthesizes in under a second on CPU;
+each message also loads the model (about 1 s).
+
+### Neural voices (Piper, fallback)
 
 Everything lives under `%LOCALAPPDATA%\agentVoz` (override with `AGENTVOZ_HOME`):
 
