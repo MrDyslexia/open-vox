@@ -12,5 +12,8 @@
     "@types/node": "24.12.2",
     "bun-types": "1.3.14",
     "typescript": "5.8.2"
+  },
+  "bin": {
+    "agentvoz": "src/cli.ts"
   }
 }
