@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { chooseEngine, createAgentVoz } from "../src/plugin";
+import { chooseEngine, createAgentVoz, withPause } from "../src/plugin";
 import type { SpeechSink } from "../src/speech-sink";
 
 function fakeSink() {
@@ -67,3 +67,36 @@ describe("chooseEngine", () => {
     expect(chooseEngine("auto", false, mk(true, true)).engine).toBeUndefined();
   });
 });
+
+describe("pause", () => {
+  test("pausing stops current speech once and later events do not stop again", async () => {
+    const f = fakeSink();
+    let paused = false;
+    const hooks = createAgentVoz(client, "/d", f.sink, () => paused);
+    await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "ses_a" } } as any });
+    expect(f.stops()).toBe(0);
+    paused = true;
+    await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "ses_a" } } as any });
+    await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "ses_a" } } as any });
+    expect(f.stops()).toBe(1);
+    paused = false;
+    await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "ses_a" } } as any });
+    paused = true;
+    await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "ses_a" } } as any });
+    expect(f.stops()).toBe(2);
+  });
+
+  test("withPause skips speaking while paused and passes through otherwise", async () => {
+    const f = fakeSink();
+    let paused = true;
+    const sink = withPause(f.sink, () => paused);
+    await sink({ sessionID: "s", messageID: "m", text: "hola" });
+    expect(f.spoken).toEqual([]);
+    paused = false;
+    await sink({ sessionID: "s", messageID: "m", text: "hola" });
+    expect(f.spoken).toEqual(["hola"]);
+    sink.stop();
+    expect(f.stops()).toBe(1);
+  });
+});
+

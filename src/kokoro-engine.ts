@@ -2,6 +2,7 @@ import { existsSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { win32 } from "node:path";
 import { fileURLToPath } from "node:url";
+import { DEFAULT_CONFIG, createConfigReader, kokoroLanguageCode } from "./config";
 import { windowsRunner, wavEngine, type Runner } from "./piper-engine";
 import type { Engine } from "./speech-sink";
 import type { Language } from "./speech-text";
@@ -15,14 +16,15 @@ export type KokoroPaths = {
 };
 export type KokoroConfig = KokoroPaths & {
   script: string;
+  /** Read on every utterance so voice and speed changes apply immediately. */
+  settings?: () => KokoroSettings;
   run: Runner;
   tmpDir: string;
   unlink: (file: string) => void;
 };
 
-export const DEFAULT_KOKORO_VOICES: Record<Language, string> = { es: "ef_dora", en: "af_heart" };
-// Kokoro's phonemizer language codes.
-const LANGUAGE_CODE: Record<Language, string> = { es: "es", en: "en-us" };
+export type KokoroSettings = { voices: Record<Language, string>; speed: number };
+export const DEFAULT_KOKORO_VOICES: Record<Language, string> = DEFAULT_CONFIG.voices;
 
 /** Locates the Kokoro venv, model and voices under `root`; undefined when anything is missing. */
 export function resolveKokoro(
@@ -50,22 +52,29 @@ export function kokoroEngine(config: KokoroConfig): Engine {
     run: config.run,
     tmpDir: config.tmpDir,
     unlink: config.unlink,
-    commandFor: (language, wav) => ({
-      cmd: config.python,
-      args: [
-        config.script,
-        "--model", config.modelPath,
-        "--voices", config.voicesPath,
-        "--voice", config.voices[language],
-        "--lang", LANGUAGE_CODE[language],
-        "--speed", String(config.speed),
-        "--out", wav,
-      ],
-    }),
+    commandFor: (language, wav) => {
+      const live = config.settings?.() ?? config;
+      const voice = live.voices[language];
+      return {
+        cmd: config.python,
+        args: [
+          config.script,
+          "--model", config.modelPath,
+          "--voices", config.voicesPath,
+          "--voice", voice,
+          "--lang", kokoroLanguageCode(voice),
+          "--speed", String(live.speed),
+          "--out", wav,
+        ],
+      };
+    },
   });
 }
 
-export function defaultKokoroEngine(env: Record<string, string | undefined> = process.env): Engine | undefined {
+export function defaultKokoroEngine(
+  env: Record<string, string | undefined> = process.env,
+  getConfig: () => import("./config").Config = createConfigReader(),
+): Engine | undefined {
   const root = env.AGENTVOZ_HOME?.trim() || win32.join(env.LOCALAPPDATA ?? "", "agentVoz");
   const paths = resolveKokoro(root, env);
   if (!paths) return undefined;
@@ -73,6 +82,17 @@ export function defaultKokoroEngine(env: Record<string, string | undefined> = pr
   if (!existsSync(script)) return undefined;
   return kokoroEngine({
     ...paths, script,
+    // Environment variables stay as explicit overrides on top of the shared config file.
+    settings: () => {
+      const config = getConfig();
+      return {
+        voices: {
+          es: env.AGENTVOZ_KOKORO_VOICE_ES?.trim() || config.voices.es,
+          en: env.AGENTVOZ_KOKORO_VOICE_EN?.trim() || config.voices.en,
+        },
+        speed: env.AGENTVOZ_SPEED?.trim() && Number.isFinite(Number(env.AGENTVOZ_SPEED)) ? Number(env.AGENTVOZ_SPEED) : config.speed,
+      };
+    },
     run: windowsRunner,
     tmpDir: tmpdir(),
     unlink: (file) => { try { unlinkSync(file); } catch {} },

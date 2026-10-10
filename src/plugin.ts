@@ -3,7 +3,8 @@ import type { Hooks, Plugin } from "@opencode-ai/plugin";
 import { selectFinalResponse, validID, type MessageData, type Selection } from "./final-response";
 import { defaultKokoroEngine } from "./kokoro-engine";
 import { defaultPiperEngine } from "./piper-engine";
-import { createSpeechSink, type Engine, type SpeechSink } from "./speech-sink";
+import { createConfigReader } from "./config";
+import { createSpeechSink, sapiEngine, type Engine, type SpeechSink } from "./speech-sink";
 
 type Result<T> = { data?: T; error?: unknown };
 export type Client = {
@@ -99,11 +100,17 @@ export function createCoordinator(client: Client, directory: string, sink: Sink 
   };
 }
 
-export function createAgentVoz(client: Client, directory: string, sink: SpeechSink): Hooks {
+
+export function createAgentVoz(client: Client, directory: string, sink: SpeechSink, isPaused?: () => boolean): Hooks {
   const coordinator = createCoordinator(client, directory, sink);
   const seenUsers = new Set<string>();
+  let wasPaused = false;
   const event: NonNullable<Hooks["event"]> = async (input) => {
     try {
+      // Pausing cuts the current narration once; resuming needs no action.
+      const paused = isPaused?.() ?? false;
+      if (paused && !wasPaused) sink.stop();
+      wasPaused = paused;
       // A NEW user turn or a session error makes any current narration stale.
       // The host repeats updates for the same user message; those must not cancel speech.
       const { event } = input;
@@ -122,6 +129,16 @@ export function createAgentVoz(client: Client, directory: string, sink: SpeechSi
   return { event };
 }
 
+/** Skips new narrations while paused; stop() always passes through. */
+export function withPause(sink: SpeechSink, isPaused: () => boolean): SpeechSink {
+  const wrapped = (async (selection: Selection) => {
+    if (isPaused()) return;
+    await sink(selection);
+  }) as SpeechSink;
+  wrapped.stop = () => sink.stop();
+  return wrapped;
+}
+
 function debugLog(file: string | undefined) {
   return (message: string) => {
     if (!file) return;
@@ -129,14 +146,13 @@ function debugLog(file: string | undefined) {
   };
 }
 
+type Factories = { kokoro: () => Engine | undefined; piper: () => Engine | undefined };
+
 /** auto = Kokoro, then Piper, then Windows SAPI (engine left undefined). */
 export function chooseEngine(
   wanted: string,
   enabled: boolean,
-  factories: { kokoro: () => Engine | undefined; piper: () => Engine | undefined } = {
-    kokoro: () => defaultKokoroEngine(),
-    piper: () => defaultPiperEngine(),
-  },
+  factories: Factories = { kokoro: () => defaultKokoroEngine(), piper: () => defaultPiperEngine() },
 ): { name: "kokoro" | "piper" | "sapi"; engine: Engine | undefined } {
   if (!enabled || wanted === "sapi") return { name: "sapi", engine: undefined };
   if (wanted === "kokoro" || wanted === "auto") {
@@ -150,23 +166,47 @@ export function chooseEngine(
   return { name: "sapi", engine: undefined };
 }
 
+/** Re-chooses the engine on every utterance so `agentvoz engine ...` applies without a restart. */
+export function liveEngine(
+  wanted: () => string,
+  factories: Factories,
+  fallback: Engine = sapiEngine(),
+  onChoice?: (name: string) => void,
+): Engine {
+  let last = "";
+  return (text, language) => {
+    const choice = chooseEngine(wanted(), true, factories);
+    if (choice.name !== last) { last = choice.name; onChoice?.(choice.name); }
+    return (choice.engine ?? fallback)(text, language);
+  };
+}
+
+const memo = <T>(make: () => T | undefined) => {
+  let value: T | undefined;
+  return () => (value ??= make());
+};
+
 export const AgentVozPlugin: Plugin = async ({ client, directory }) => {
   const log = debugLog(process.env.AGENTVOZ_LOG);
   const enabled = process.env.AGENTVOZ_DISABLED !== "1" && process.platform === "win32";
-  const wanted = (process.env.AGENTVOZ_ENGINE ?? "auto").toLowerCase();
-  const choice = chooseEngine(wanted, enabled);
-  log(`engine=${choice.name} requested=${wanted}`);
+  const config = createConfigReader();
+  const factories: Factories = {
+    kokoro: memo(() => defaultKokoroEngine(process.env, config)),
+    piper: memo(() => defaultPiperEngine()),
+  };
+  const wanted = () => (process.env.AGENTVOZ_ENGINE ?? config().engine).toLowerCase();
   const sink = createSpeechSink({
     enabled,
-    engine: choice.engine,
+    engine: liveEngine(wanted, factories, sapiEngine(), (name) => log(`engine=${name}`)),
     onError: (error) => log(`speech error: ${error instanceof Error ? error.message : String(error)}`),
   });
   log(`plugin ready enabled=${enabled}`);
-  const inner = (async (selection: Selection) => {
-    log(`selection session=${selection.sessionID} message=${selection.messageID} chars=${selection.text.length}`);
+  const isPaused = () => config().paused;
+  const logged = (async (selection: Selection) => {
+    log(`selection session=${selection.sessionID} message=${selection.messageID} chars=${selection.text.length} paused=${isPaused()}`);
     await sink(selection);
   }) as SpeechSink;
-  inner.stop = sink.stop;
+  logged.stop = () => sink.stop();
   const traced: Client = process.env.AGENTVOZ_LOG ? {
     session: {
       get: async (input) => {
@@ -179,5 +219,5 @@ export const AgentVozPlugin: Plugin = async ({ client, directory }) => {
       },
     },
   } : (client as unknown as Client);
-  return createAgentVoz(traced, directory, inner);
+  return createAgentVoz(traced, directory, withPause(logged, isPaused), isPaused);
 };

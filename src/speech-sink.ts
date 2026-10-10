@@ -47,12 +47,16 @@ export const windowsSpawn: Spawn = (args, stdin) => {
   return { exited, kill: () => { child.kill(); } };
 };
 
+/** Windows SAPI through PowerShell; the last-resort engine. */
+export function sapiEngine(spawn: Spawn = windowsSpawn): Engine {
+  return (text, language) => spawn(["-NoProfile", "-NonInteractive", "-Command", script(language)], text);
+}
+
 type Job = { text: string; language: Language; done: () => void };
 
 export function createSpeechSink(options: SpeechSinkOptions = {}): SpeechSink {
   const spawn = options.spawn ?? windowsSpawn;
-  const engine: Engine = options.engine ??
-    ((text, language) => spawn(["-NoProfile", "-NonInteractive", "-Command", script(language)], text));
+  const engine: Engine = options.engine ?? sapiEngine(spawn);
   const maxPending = options.maxPending ?? 2;
   const timeoutMs = options.timeoutMs ?? 120_000;
   const report = (error: unknown) => { try { options.onError?.(error); } catch {} };

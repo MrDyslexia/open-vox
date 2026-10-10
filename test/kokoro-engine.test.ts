@@ -50,6 +50,24 @@ describe("kokoro engine", () => {
     expect(h.calls[1]!.args.join(" ")).toContain(wav);
   });
 
+  test("live settings override voices and speed on every call", async () => {
+    const calls: string[][] = [];
+    let voices = { es: "em_alex", en: "bm_george" };
+    let speed = 1.1;
+    const engine = kokoroEngine({
+      python: "p", script: "s", modelPath: "m", voicesPath: "v", voices: { es: "x", en: "y" }, speed: 1,
+      settings: () => ({ voices, speed }),
+      run: (_c, args) => { calls.push(args); return { exited: Promise.resolve(0), kill() {} }; },
+      tmpDir: "C:\\tmp", unlink: () => {},
+    });
+    await engine("x", "en").exited;
+    expect(calls[0]).toEqual(expect.arrayContaining(["bm_george", "en-gb", "1.1"]));
+    voices = { es: "em_santa", en: "af_heart" };
+    speed = 0.9;
+    await engine("x", "es").exited;
+    expect(calls[2]).toEqual(expect.arrayContaining(["em_santa", "es", "0.9"]));
+  });
+
   test("passes the speed", async () => {
     const calls: string[][] = [];
     const engine = kokoroEngine({
@@ -69,7 +87,7 @@ describe("resolveKokoro", () => {
   test("returns paths and default voices when installed", () => {
     const r = resolveKokoro("R", {}, (p) => present.has(p));
     expect(r?.python).toBe("R\\kokoro-venv\\Scripts\\python.exe");
-    expect(r?.voices).toEqual({ es: "ef_dora", en: "af_heart" });
+    expect(r?.voices).toEqual({ es: "em_alex", en: "af_heart" });
     expect(r?.speed).toBe(1);
   });
   test("undefined when the model is missing", () => {
