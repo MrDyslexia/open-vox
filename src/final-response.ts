@@ -40,7 +40,8 @@ export function selectFinalResponse(
       !validID(info.id) || !validID(user.id) || info.id === user.id ||
       info.sessionID !== session.id || user.sessionID !== session.id || info.parentID !== user.id ||
       info.error !== undefined || (info.summary !== undefined && info.summary !== false) ||
-      user.summary !== undefined || info.finish !== "stop" ||
+      // The host attaches a diff-summary OBJECT to user messages after a turn; only a non-object is malformed.
+      (user.summary !== undefined && (typeof user.summary !== "object" || user.summary === null)) || info.finish !== "stop" ||
       !Number.isFinite(info.time?.created) || !Number.isFinite(info.time?.completed) ||
       !Number.isFinite(user.time?.created) || info.time.created < user.time.created ||
       info.time.completed! < info.time.created) return undefined;

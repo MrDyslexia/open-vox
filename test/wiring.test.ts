@@ -1,0 +1,51 @@
+import { describe, expect, test } from "bun:test";
+import { createAgentVoz } from "../src/plugin";
+import type { SpeechSink } from "../src/speech-sink";
+
+function fakeSink() {
+  const spoken: string[] = [];
+  let stops = 0;
+  const sink = ((s: { text: string }) => { spoken.push(s.text); return Promise.resolve(); }) as unknown as SpeechSink;
+  sink.stop = () => { stops++; };
+  return { sink, spoken, stops: () => stops };
+}
+const client = { session: { get: async () => ({ error: "x" }), message: async () => ({ error: "x" }) } } as any;
+const user = (id: string, created: number) => ({ type: "message.updated", properties: { info: { id, sessionID: "ses_a", role: "user", time: { created } } } }) as any;
+
+describe("agentVoz wiring", () => {
+  test("a new user turn stops current speech", async () => {
+    const f = fakeSink();
+    const hooks = createAgentVoz(client, "/d", f.sink);
+    await hooks.event!({ event: user("msg_1", 1) });
+    expect(f.stops()).toBe(1);
+  });
+
+  test("a repeated update of the same user message does not stop speech", async () => {
+    const f = fakeSink();
+    const hooks = createAgentVoz(client, "/d", f.sink);
+    await hooks.event!({ event: user("msg_1", 1) });
+    await hooks.event!({ event: user("msg_1", 1) });
+    expect(f.stops()).toBe(1);
+  });
+
+  test("session.error stops current speech", async () => {
+    const f = fakeSink();
+    const hooks = createAgentVoz(client, "/d", f.sink);
+    await hooks.event!({ event: { type: "session.error", properties: { sessionID: "ses_a" } } as any });
+    expect(f.stops()).toBe(1);
+  });
+
+  test("unrelated events do not stop speech", async () => {
+    const f = fakeSink();
+    const hooks = createAgentVoz(client, "/d", f.sink);
+    await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "ses_a" } } as any });
+    expect(f.stops()).toBe(0);
+  });
+
+  test("a throwing stop never escapes the hook", async () => {
+    const f = fakeSink();
+    f.sink.stop = () => { throw new Error("x"); };
+    const hooks = createAgentVoz(client, "/d", f.sink);
+    await hooks.event!({ event: user("msg_1", 1) });
+  });
+});

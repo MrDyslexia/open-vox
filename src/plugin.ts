@@ -1,5 +1,7 @@
+import { appendFileSync } from "node:fs";
 import type { Hooks, Plugin } from "@opencode-ai/plugin";
 import { selectFinalResponse, validID, type MessageData, type Selection } from "./final-response";
+import { createSpeechSink, type SpeechSink } from "./speech-sink";
 
 type Result<T> = { data?: T; error?: unknown };
 export type Client = {
@@ -95,7 +97,60 @@ export function createCoordinator(client: Client, directory: string, sink: Sink 
   };
 }
 
+export function createAgentVoz(client: Client, directory: string, sink: SpeechSink): Hooks {
+  const coordinator = createCoordinator(client, directory, sink);
+  const seenUsers = new Set<string>();
+  const event: NonNullable<Hooks["event"]> = async (input) => {
+    try {
+      // A NEW user turn or a session error makes any current narration stale.
+      // The host repeats updates for the same user message; those must not cancel speech.
+      const { event } = input;
+      if (event.type === "session.error") sink.stop();
+      else if (event.type === "message.updated" && event.properties.info?.role === "user") {
+        const id = event.properties.info.id;
+        if (!seenUsers.has(id)) {
+          if (seenUsers.size >= 1024) seenUsers.clear();
+          seenUsers.add(id);
+          sink.stop();
+        }
+      }
+    } catch {}
+    await coordinator.event(input);
+  };
+  return { event };
+}
+
+function debugLog(file: string | undefined) {
+  return (message: string) => {
+    if (!file) return;
+    try { appendFileSync(file, `${new Date().toISOString()} ${message}\n`); } catch {}
+  };
+}
+
 export const AgentVozPlugin: Plugin = async ({ client, directory }) => {
-  const coordinator = createCoordinator(client, directory);
-  return { event: coordinator.event };
+  const log = debugLog(process.env.AGENTVOZ_LOG);
+  const enabled = process.env.AGENTVOZ_DISABLED !== "1" && process.platform === "win32";
+  const sink = createSpeechSink({
+    enabled,
+    onError: (error) => log(`speech error: ${error instanceof Error ? error.message : String(error)}`),
+  });
+  log(`plugin ready enabled=${enabled}`);
+  const inner = (async (selection: Selection) => {
+    log(`selection session=${selection.sessionID} message=${selection.messageID} chars=${selection.text.length}`);
+    await sink(selection);
+  }) as SpeechSink;
+  inner.stop = sink.stop;
+  const traced: Client = process.env.AGENTVOZ_LOG ? {
+    session: {
+      get: async (input) => {
+        try { const r = await client.session.get(input as never); log(`session.get ${r.error ? "error" : "ok"}`); return r as never; }
+        catch (error) { log(`session.get threw ${String(error)}`); throw error; }
+      },
+      message: async (input) => {
+        try { const r = await client.session.message(input as never); log(`session.message ${r.error ? "error" : "ok"}`); return r as never; }
+        catch (error) { log(`session.message threw ${String(error)}`); throw error; }
+      },
+    },
+  } : (client as unknown as Client);
+  return createAgentVoz(traced, directory, inner);
 };

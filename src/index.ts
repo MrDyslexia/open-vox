@@ -1,0 +1,1 @@
+export { AgentVozPlugin } from "./plugin";

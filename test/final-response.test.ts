@@ -62,12 +62,17 @@ describe("conservative final response", () => {
     if (kind === "unknown-part") f.response.parts[0] = { ...f.response.parts[0], type: "unknown" } as unknown as Part;
     if (kind === "blank-text") Object.assign(f.response.parts[0], { text: "  " });
     if (kind === "parent-role") f.parent.info = info;
-    if (kind === "parent-summary" && f.parent.info.role === "user") f.parent.info.summary = { diffs: [] };
+    if (kind === "parent-summary" && f.parent.info.role === "user") (f.parent.info as { summary?: unknown }).summary = true;
     if (kind === "compacting") f.session.time.compacting = 1;
     if (kind === "revert") f.session.revert = { messageID: "u" };
     if (kind === "bad-flag") Object.assign(f.response.parts[0], { ignored: "false" });
     if (kind === "backwards-time") info.time.completed = 1;
     expect(selectFinalResponse(f.session, f.response, f.parent)).toBeUndefined();
+  });
+  test("accepts the host's diff summary on the parent user message", () => {
+    const f = fixture();
+    if (f.parent.info.role === "user") f.parent.info.summary = { diffs: [] };
+    expect(selectFinalResponse(f.session, f.response, f.parent)).toEqual({ sessionID: "s", messageID: "a", text: "Answer" });
   });
   test("excludes reasoning and flagged text from mixed prose", () => {
     const f = fixture();
