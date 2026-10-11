@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { chooseEngine, createOpenVox, watchPause, withPause } from "../src/plugin";
-import type { SpeechSink } from "../src/speech-sink";
+import { chooseEngine, createLiveSink, createOpenVox, watchPause, withPause } from "../src/plugin";
+import { createConfigReader, DEFAULT_CONFIG } from "../src/config";
+import type { SpeechProcess, SpeechSink } from "../src/speech-sink";
 import { encodeCommand, decodeCommand } from "../src/repeat-control";
 
 function fakeSink() {
@@ -70,6 +71,34 @@ describe("open-vox wiring", () => {
     f.sink.stop = () => { throw new Error("x"); };
     const hooks = createOpenVox(client, "/d", f.sink);
     await hooks.event!({ event: user("msg_1", 1) });
+  });
+});
+
+describe("live sink player wiring", () => {
+  const cache = {
+    candidate: () => "unused.wav", current: () => ({ file: "kept.wav", sessionID: "ses_a", revision: 1 }),
+    promote: () => true, discard: () => {}, hold: () => () => {}, forget: () => {}, dispose: () => {},
+  };
+  const config = () => createConfigReader(() => DEFAULT_CONFIG, 0);
+
+  test("cached audio is played through the injected player", async () => {
+    const played: string[] = [];
+    const player = (file: string): SpeechProcess => { played.push(file); return { exited: Promise.resolve(0), kill() {} }; };
+    const sink = createLiveSink({}, config(), () => {}, true, { cache, isPaused: () => false, player });
+    await sink.repeat!("ses_a", 1);
+    expect(played).toEqual(["kept.wav"]);
+    await sink.dispose!();
+  });
+
+  test("the player backstop replaces the 120 s process timeout for playback", async () => {
+    let close!: (code: number) => void;
+    const proc = { killed: false, kill() { proc.killed = true; close(1); }, exited: new Promise<number>((resolve) => { close = resolve; }) };
+    const sink = createLiveSink({}, config(), () => {}, true, { cache, isPaused: () => false, player: () => proc, playbackTimeoutMs: 15 });
+    const replay = sink.repeat!("ses_a", 1);
+    await Bun.sleep(40);
+    expect(proc.killed).toBe(true);
+    await replay;
+    await sink.dispose!();
   });
 });
 

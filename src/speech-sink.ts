@@ -24,6 +24,11 @@ export type SpeechSinkOptions = {
   enabled?: boolean;
   maxPending?: number;
   timeoutMs?: number;
+  /**
+   * Backstop for the cached-audio player alone. Defaults to `timeoutMs`. A persistent player watches its own
+   * playback by duration, so the live wiring raises this to a generous safety net instead of a fixed 120 s.
+   */
+  playbackTimeoutMs?: number;
   maxLength?: number;
   onError?: (error: unknown) => void;
   cache?: AudioStore;
@@ -94,10 +99,10 @@ export function createSpeechSink(options: SpeechSinkOptions = {}): SpeechSink {
   const paused = () => options.isPaused?.() ?? false;
   const now = options.now ?? Date.now;
 
-  async function run(proc: SpeechProcess): Promise<number> {
+  async function run(proc: SpeechProcess, limitMs = timeoutMs): Promise<number> {
     current = proc;
     let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; try { proc.kill(); } catch {} }, timeoutMs);
+    const timer = setTimeout(() => { timedOut = true; try { proc.kill(); } catch {} }, limitMs);
     try {
       const code = await proc.exited;
       if (timedOut) throw new Error("speech process timed out");
@@ -134,7 +139,7 @@ export function createSpeechSink(options: SpeechSinkOptions = {}): SpeechSink {
             if (!valid() || !audio || audio.sessionID !== job.sessionID ||
                 (job.revision !== undefined && audio.revision !== job.revision)) continue;
             release = cache.hold(audio.file);
-            const code = await run((options.player ?? playWav)(audio.file));
+            const code = await run((options.player ?? playWav)(audio.file), options.playbackTimeoutMs ?? timeoutMs);
             if (code !== 0 && valid()) report(new Error(`player exited with code ${code}`));
           } else if (job.text !== undefined) {
             const code = await run(engine(job.text, job.language!));
