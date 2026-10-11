@@ -5,7 +5,8 @@ import { selectFinalResponse, validID, type MessageData, type Selection } from "
 import { defaultKokoroEngine } from "./kokoro-engine";
 import { defaultPiperEngine } from "./piper-engine";
 import { createConfigReader, readConfig, type ConfigReader } from "./config";
-import { createSpeechSink, sapiEngine, type Engine, type SpeechSink } from "./speech-sink";
+import { createSpeechSink, sapiEngine, type Engine, type SpeechSink, type SpeechSinkOptions } from "./speech-sink";
+import { createPlayer } from "./player";
 import { AudioCache, type AudioStore } from "./audio-cache";
 import { createRepeatControl } from "./repeat-control";
 
@@ -236,7 +237,7 @@ export function createLiveSink(
   config: ConfigReader,
   log: (message: string) => void,
   enabled = envValue(env, "DISABLED") !== "1" && process.platform === "win32",
-  audio?: { cache: AudioStore; isPaused: () => boolean },
+  audio?: { cache: AudioStore; isPaused: () => boolean } & Pick<SpeechSinkOptions, "player" | "playbackTimeoutMs">,
 ): SpeechSink {
   const factories: Factories = {
     kokoro: memo(() => defaultKokoroEngine(env, config)),
@@ -259,6 +260,9 @@ export async function speakOnce(text: string, env: Record<string, string | undef
   if (errors.length > 0) throw new Error(errors.join("; "));
 }
 
+/** The player watches each playback by its own duration; this is only a last-resort ceiling for the sink. */
+const PLAYBACK_BACKSTOP_MS = 30 * 60_000;
+
 export const OpenVoxPlugin: Plugin = async ({ client, directory }) => {
   const log = debugLog(envValue(process.env, "LOG"));
   let enabled = envValue(process.env, "DISABLED") !== "1" && process.platform === "win32";
@@ -269,7 +273,11 @@ export const OpenVoxPlugin: Plugin = async ({ client, directory }) => {
     try { cache = new AudioCache(); }
     catch { enabled = false; log("audio cache unavailable; narration disabled"); }
   }
-  const sink = createLiveSink(process.env, config, log, enabled, cache ? { cache, isPaused } : undefined);
+  // One persistent player host per plugin instance; it starts lazily on the first cached playback.
+  const player = cache ? createPlayer({ log: (message) => log(message) }) : undefined;
+  const sink = createLiveSink(process.env, config, log, enabled, cache && player
+    ? { cache, isPaused, player: (wav) => player.play(wav), playbackTimeoutMs: PLAYBACK_BACKSTOP_MS }
+    : undefined);
   log(`plugin ready enabled=${enabled}`);
   const stopWatcher = watchPause(sink, isPaused);
   const logged = (async (selection: Selection) => {
@@ -301,5 +309,8 @@ export const OpenVoxPlugin: Plugin = async ({ client, directory }) => {
       if (result.error || !result.data) throw new Error("Repeat status transport failed");
     },
   });
-  return { ...hooks, dispose: async () => { stopWatcher(); await hooks.dispose?.(); } };
+  return { ...hooks, dispose: async () => {
+    stopWatcher();
+    try { await hooks.dispose?.(); } finally { await player?.dispose(); }
+  } };
 };

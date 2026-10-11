@@ -249,6 +249,39 @@ describe("exact-audio replay", () => {
     await h.sink.dispose();
   });
 
+  function playbackTimeoutHarness(options: { timeoutMs: number; playbackTimeoutMs?: number }) {
+    const players: Fake[] = [];
+    const h = harness();
+    const cache = {
+      candidate: () => "wav-1", current: () => ({ file: "wav-1", sessionID: "s", revision: 1 }),
+      promote: () => true, discard: () => {}, hold: () => () => {}, forget: () => {}, dispose: () => {},
+    };
+    const engine = Object.assign(() => { throw new Error("must generate an artifact"); }, {
+      synthesize: () => ({ exited: Promise.resolve(0), kill() {} }),
+    });
+    const player = (_file: string) => { const proc = h.spawn([], "player"); players.push(h.procs.at(-1)!); return proc; };
+    const sink = createSpeechSink({ engine, cache, player, ...options }) as any;
+    return { sink, players };
+  }
+
+  test("playback is bounded by playbackTimeoutMs, separately from the synthesis timeout", async () => {
+    const h = playbackTimeoutHarness({ timeoutMs: 20, playbackTimeoutMs: 200 });
+    const pending = h.sink(item("m", "Long narration that outlasts the synthesis timeout."));
+    await tick();
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(h.players[0]!.killed).toBe(false);
+    h.players[0]!.finish();
+    await pending;
+    await h.sink.dispose();
+  });
+
+  test("playback falls back to timeoutMs when playbackTimeoutMs is not set", async () => {
+    const h = playbackTimeoutHarness({ timeoutMs: 20 });
+    await h.sink(item("m", "Hung player is killed by the default timeout."));
+    expect(h.players[0]!.killed).toBe(true);
+    await h.sink.dispose();
+  });
+
   test("a replay expiring while the previous player closes is consumed without late playback", async () => {
     const h = replayHarness();
     h.cache.promote("old", "s");

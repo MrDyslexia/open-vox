@@ -96,7 +96,12 @@ and registers in `tui.json`; existing entries are preserved.
    - Windows SAPI voices as the last resort.
 5. `src/speech-sink.ts` queues messages serially. A new user turn, a session
    error, or pausing stops the current speech.
-6. `src/config.ts` is the shared settings file used by the plugin, the CLI and
+6. `src/player.ts` + `scripts/player.ps1` play the cached audio through one
+   persistent `powershell.exe -STA` host (WPF `MediaPlayer`) per plugin
+   instance, started on the first narration and stopped when idle. If the host
+   cannot start or fails, that playback falls back to the one-shot
+   `SoundPlayer` path.
+7. `src/config.ts` is the shared settings file used by the plugin, the CLI and
    the sidebar block.
 
 ## Renamed from agentVoz
@@ -128,6 +133,13 @@ node ./node_modules/typescript/bin/tsc --noEmit
 Tests use fake clients and fake process spawners, with in-memory filesystem
 fixtures and isolated temporary filesystem tests. They never play audio or touch
 your OpenCode configuration.
+
+An optional smoke test drives the real player host with muted volume
+(`OV_PLAYER_MUTE=1`, no audible audio):
+
+```powershell
+$env:OV_PLAYER_SMOKE = "1"; bun test test/player.test.ts
+```
 
 ## Known limits
 
