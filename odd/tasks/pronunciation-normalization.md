@@ -42,7 +42,7 @@ All cases below are proposed for both Spanish and English contexts; expected pro
 | `getUserName` | Word segmentation (`get user name` as an example), language strategy, original identifier preservation. |
 | `API`, `HTTP`, `>=` | Context-sensitive acronym/symbol rendering and ambiguous-case fallback. |
 | `v1.2.3` | Preserve version meaning; do not mistake components for a decimal. |
-| `C:\example\file.txt`, `/usr/local/bin`, `https://example.com/a?q=1` | Protected filesystem paths/URLs, separators, and unchanged originals. |
+| `<reference-assets>`, `/usr/local/bin`, `https://example.com/a?q=1` | Protected filesystem paths/URLs, separators, and unchanged originals. |
 | `1,234.56`, `1.234,56`, `1.5`, `1,5` | Decimal/grouping interpretation under both locales and fallback when context is insufficient. |
 | `tool --output ./file.txt -v`, `--speed=1.5` | Preserve commands, CLI flags/options, values, and token meaning. |
 | Punctuation and multiple paragraphs | Pause/fluency listening evidence with the chosen engine, without guaranteeing phrasing. |
@@ -61,3 +61,7 @@ Language/context rules, local-language identifier pronunciation, acronym/symbol 
 - Engram: project `agentvoz`, topic `odd/pronunciation-normalization/tasks`.
 
 Playback-speed (including nested PS-05) and Repeat are separate existing features and remain untouched.
+
+## Local preparation context
+
+Original SHAs, test results, host observations and branch states above are historical evidence, not fresh verification. The new local chain is tracked in [PN delivery preparation](pn-main-delivery.md); P3b/P4 remain deferred. No publication is authorized.
