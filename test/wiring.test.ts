@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { chooseEngine, createOpenVox, withPause } from "../src/plugin";
+import { chooseEngine, createOpenVox, watchPause, withPause } from "../src/plugin";
 import type { SpeechSink } from "../src/speech-sink";
 
 function fakeSink() {
@@ -84,6 +84,25 @@ describe("pause", () => {
     paused = true;
     await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "ses_a" } } as any });
     expect(f.stops()).toBe(2);
+  });
+
+  test("watchPause stops playing audio when pause flips on, without any host event", async () => {
+    const f = fakeSink();
+    let paused = false;
+    const dispose = watchPause(f.sink, () => paused, 5);
+    await Bun.sleep(30);
+    expect(f.stops()).toBe(0);
+    paused = true;
+    await Bun.sleep(30);
+    expect(f.stops()).toBe(1);
+    await Bun.sleep(30);
+    expect(f.stops()).toBe(1);
+    paused = false;
+    await Bun.sleep(30);
+    paused = true;
+    await Bun.sleep(30);
+    expect(f.stops()).toBe(2);
+    dispose();
   });
 
   test("withPause skips speaking while paused and passes through otherwise", async () => {

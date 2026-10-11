@@ -140,6 +140,24 @@ export function withPause(sink: SpeechSink, isPaused: () => boolean): SpeechSink
   return wrapped;
 }
 
+/**
+ * Cuts the audio that is playing the moment pause flips on. Host events are not enough:
+ * while narration plays the host is usually idle, so nothing would call stop() until later.
+ * Returns a function that stops the watcher.
+ */
+export function watchPause(sink: SpeechSink, isPaused: () => boolean, intervalMs = 250): () => void {
+  let wasPaused = isPaused();
+  const timer = setInterval(() => {
+    try {
+      const paused = isPaused();
+      if (paused && !wasPaused) sink.stop();
+      wasPaused = paused;
+    } catch {}
+  }, intervalMs);
+  timer.unref?.();
+  return () => clearInterval(timer);
+}
+
 function debugLog(file: string | undefined) {
   return (message: string) => {
     if (!file) return;
@@ -219,7 +237,9 @@ export const OpenVoxPlugin: Plugin = async ({ client, directory }) => {
   const enabled = envValue(process.env, "DISABLED") !== "1" && process.platform === "win32";
   const config = createConfigReader();
   const sink = createLiveSink(process.env, config, log, enabled);
-  log(`plugin ready enabled=${enabled}`);  const isPaused = () => config().paused;
+  log(`plugin ready enabled=${enabled}`);
+  const isPaused = () => config().paused;
+  watchPause(sink, isPaused);
   const logged = (async (selection: Selection) => {
     log(`selection session=${selection.sessionID} message=${selection.messageID} chars=${selection.text.length} paused=${isPaused()}`);
     await sink(selection);
