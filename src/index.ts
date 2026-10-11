@@ -1,1 +1,1 @@
-export { AgentVozPlugin } from "./plugin";
+export { OpenVoxPlugin } from "./plugin";

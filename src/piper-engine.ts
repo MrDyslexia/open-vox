@@ -2,6 +2,7 @@ import { spawn as nodeSpawn } from "node:child_process";
 import { existsSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { win32 } from "node:path";
+import { envValue, homeFor } from "./brand";
 import type { Engine, SpeechProcess } from "./speech-sink";
 import type { Language } from "./speech-text";
 
@@ -37,7 +38,7 @@ export function resolvePiper(
   const exe = win32.join(root, "piper", "piper.exe");
   const model = (language: Language, override: string | undefined) =>
     win32.join(root, "voices", `${override?.trim() || DEFAULT_VOICES[language]}.onnx`);
-  const models = { es: model("es", env.AGENTVOZ_VOICE_ES), en: model("en", env.AGENTVOZ_VOICE_EN) };
+  const models = { es: model("es", envValue(env, "VOICE_ES")), en: model("en", envValue(env, "VOICE_EN")) };
   return [exe, models.es, models.en].every((path) => exists(path)) ? { exe, models } : undefined;
 }
 
@@ -55,7 +56,7 @@ export type WavConfig = {
 /** Synthesizes a WAV (text on stdin), then plays it. Killable at either step. */
 export function wavEngine(config: WavConfig): Engine {
   return (text, language) => {
-    const wav = win32.join(config.tmpDir, `agentvoz-${process.pid}-${Date.now()}-${counter++}.wav`);
+    const wav = win32.join(config.tmpDir, `open-vox-${process.pid}-${Date.now()}-${counter++}.wav`);
     let killed = false;
     let active: SpeechProcess | undefined;
     const exited = (async () => {
@@ -86,7 +87,7 @@ export function piperEngine(config: PiperConfig): Engine {
 }
 
 export function defaultPiperEngine(env: Record<string, string | undefined> = process.env): Engine | undefined {
-  const root = env.AGENTVOZ_HOME?.trim() || win32.join(env.LOCALAPPDATA ?? "", "agentVoz");
+  const root = homeFor(env);
   const paths = resolvePiper(root, env);
   if (!paths) return undefined;
   return piperEngine({

@@ -1,4 +1,5 @@
 import { win32 } from "node:path";
+import { LEGACY, NAME } from "./brand";
 
 export type InstallFs = {
   read: (path: string) => string | undefined;
@@ -15,13 +16,15 @@ export type InstallOptions = {
   /** Source of the TUI plugin; its `"../src/config"` import is rewritten to an absolute URL. */
   tuiTemplate: string;
 };
-export type InstallResult = { plugin: string; tui: boolean; tuiFile?: string; warnings: string[] };
+export type InstallResult = { plugin: string; tui: boolean; tuiFile?: string; warnings: string[]; removedLegacy: boolean };
 export type InstallState = { plugin: boolean; tuiFile: boolean; tuiRegistered: boolean };
 
 export const paths = (configDir: string) => ({
-  plugin: win32.join(configDir, "plugins", "agentvoz.js"),
-  tuiFile: win32.join(configDir, "tui-plugins", "agentvoz.tsx"),
+  plugin: win32.join(configDir, "plugins", `${NAME}.js`),
+  tuiFile: win32.join(configDir, "tui-plugins", `${NAME}.tsx`),
   tuiJson: win32.join(configDir, "tui.json"),
+  legacyPlugin: win32.join(configDir, "plugins", LEGACY.pluginFile),
+  legacyTuiFile: win32.join(configDir, "tui-plugins", LEGACY.tuiFile),
 });
 
 const fileUrl = (absolutePath: string) => "file:///" + encodeURI(absolutePath.replace(/\\/g, "/"));
@@ -52,13 +55,31 @@ export function updateTuiConfig(raw: string | undefined, entry: string, add: boo
   return JSON.stringify(next, null, 2) + "\n";
 }
 
+/** Removes the pre-rename loaders so OpenCode never loads two copies. Returns whether anything was removed. */
+function removeLegacy(fs: InstallFs, p: ReturnType<typeof paths>): boolean {
+  let removed = false;
+  for (const file of [p.legacyPlugin, p.legacyTuiFile]) {
+    if (fs.exists(file)) { fs.remove(file); removed = true; }
+  }
+  const raw = fs.read(p.tuiJson);
+  if (raw !== undefined) {
+    try {
+      const next = updateTuiConfig(raw, p.legacyTuiFile, false);
+      if (next !== raw) { fs.write(p.tuiJson, next); removed = true; }
+    } catch {
+      // A tui.json we cannot parse is left untouched.
+    }
+  }
+  return removed;
+}
+
 export function install(options: InstallOptions & { tui: boolean }): InstallResult {
   const { fs, configDir, repoRoot } = options;
   const p = paths(configDir);
   const warnings: string[] = [];
-  const loader = `export { AgentVozPlugin } from "${fileUrl(win32.join(repoRoot, "src", "index.ts"))}";\n`;
+  const loader = `export { OpenVoxPlugin } from "${fileUrl(win32.join(repoRoot, "src", "index.ts"))}";\n`;
   if (fs.read(p.plugin) !== loader) fs.write(p.plugin, loader);
-  const result: InstallResult = { plugin: p.plugin, tui: false, warnings };
+  const result: InstallResult = { plugin: p.plugin, tui: false, warnings, removedLegacy: removeLegacy(fs, p) };
   if (!options.tui) return result;
 
   const configUrl = fileUrl(win32.join(repoRoot, "src", "config.ts"));
@@ -79,6 +100,7 @@ export function install(options: InstallOptions & { tui: boolean }): InstallResu
 export function uninstall(options: Omit<InstallOptions, "repoRoot" | "tuiTemplate"> & Partial<InstallOptions>): void {
   const { fs, configDir } = options;
   const p = paths(configDir);
+  removeLegacy(fs, p);
   if (fs.exists(p.plugin)) fs.remove(p.plugin);
   if (fs.exists(p.tuiFile)) fs.remove(p.tuiFile);
   const raw = fs.read(p.tuiJson);

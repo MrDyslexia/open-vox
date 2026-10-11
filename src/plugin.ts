@@ -1,3 +1,4 @@
+import { envValue } from "./brand";
 import { appendFileSync } from "node:fs";
 import type { Hooks, Plugin } from "@opencode-ai/plugin";
 import { selectFinalResponse, validID, type MessageData, type Selection } from "./final-response";
@@ -101,7 +102,7 @@ export function createCoordinator(client: Client, directory: string, sink: Sink 
 }
 
 
-export function createAgentVoz(client: Client, directory: string, sink: SpeechSink, isPaused?: () => boolean): Hooks {
+export function createOpenVox(client: Client, directory: string, sink: SpeechSink, isPaused?: () => boolean): Hooks {
   const coordinator = createCoordinator(client, directory, sink);
   const seenUsers = new Set<string>();
   let wasPaused = false;
@@ -166,7 +167,7 @@ export function chooseEngine(
   return { name: "sapi", engine: undefined };
 }
 
-/** Re-chooses the engine on every utterance so `agentvoz engine ...` applies without a restart. */
+/** Re-chooses the engine on every utterance so `open-vox engine ...` applies without a restart. */
 export function liveEngine(
   wanted: () => string,
   factories: Factories,
@@ -191,13 +192,13 @@ export function createLiveSink(
   env: Record<string, string | undefined>,
   config: ConfigReader,
   log: (message: string) => void,
-  enabled = env.AGENTVOZ_DISABLED !== "1" && process.platform === "win32",
+  enabled = envValue(env, "DISABLED") !== "1" && process.platform === "win32",
 ): SpeechSink {
   const factories: Factories = {
     kokoro: memo(() => defaultKokoroEngine(env, config)),
     piper: memo(() => defaultPiperEngine(env)),
   };
-  const wanted = () => (env.AGENTVOZ_ENGINE ?? config().engine).toLowerCase();
+  const wanted = () => (envValue(env, "ENGINE") ?? config().engine).toLowerCase();
   return createSpeechSink({
     enabled,
     engine: liveEngine(wanted, factories, sapiEngine(), (name) => log(`engine=${name}`)),
@@ -205,7 +206,7 @@ export function createLiveSink(
   });
 }
 
-/** Speaks one text with the current settings and waits for it to finish (used by `agentvoz say`). */
+/** Speaks one text with the current settings and waits for it to finish (used by `open-vox say`). */
 export async function speakOnce(text: string, env: Record<string, string | undefined> = process.env): Promise<void> {
   const errors: string[] = [];
   const sink = createLiveSink(env, createConfigReader(() => readConfig(), 0), (m) => { if (m.startsWith("speech error")) errors.push(m); });
@@ -213,9 +214,9 @@ export async function speakOnce(text: string, env: Record<string, string | undef
   if (errors.length > 0) throw new Error(errors.join("; "));
 }
 
-export const AgentVozPlugin: Plugin = async ({ client, directory }) => {
-  const log = debugLog(process.env.AGENTVOZ_LOG);
-  const enabled = process.env.AGENTVOZ_DISABLED !== "1" && process.platform === "win32";
+export const OpenVoxPlugin: Plugin = async ({ client, directory }) => {
+  const log = debugLog(envValue(process.env, "LOG"));
+  const enabled = envValue(process.env, "DISABLED") !== "1" && process.platform === "win32";
   const config = createConfigReader();
   const sink = createLiveSink(process.env, config, log, enabled);
   log(`plugin ready enabled=${enabled}`);  const isPaused = () => config().paused;
@@ -224,7 +225,7 @@ export const AgentVozPlugin: Plugin = async ({ client, directory }) => {
     await sink(selection);
   }) as SpeechSink;
   logged.stop = () => sink.stop();
-  const traced: Client = process.env.AGENTVOZ_LOG ? {
+  const traced: Client = envValue(process.env, "LOG") ? {
     session: {
       get: async (input) => {
         try { const r = await client.session.get(input as never); log(`session.get ${r.error ? "error" : "ok"}`); return r as never; }
@@ -236,5 +237,5 @@ export const AgentVozPlugin: Plugin = async ({ client, directory }) => {
       },
     },
   } : (client as unknown as Client);
-  return createAgentVoz(traced, directory, withPause(logged, isPaused), isPaused);
+  return createOpenVox(traced, directory, withPause(logged, isPaused), isPaused);
 };

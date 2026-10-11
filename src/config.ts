@@ -1,5 +1,6 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { win32 } from "node:path";
+import { homeFor } from "./brand";
 import type { Language } from "./speech-text";
 
 export type EngineName = "auto" | "kokoro" | "piper" | "sapi";
@@ -71,7 +72,7 @@ export function parseConfig(raw: unknown): Config {
 }
 
 export function appHome(env: Record<string, string | undefined> = process.env): string {
-  return env.AGENTVOZ_HOME?.trim() || win32.join(env.LOCALAPPDATA ?? "", "agentVoz");
+  return homeFor(env);
 }
 export const configPath = (env: Record<string, string | undefined> = process.env) => win32.join(appHome(env), "config.json");
 

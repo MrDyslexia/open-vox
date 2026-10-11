@@ -22,6 +22,7 @@ function harness(overrides: Partial<CliDeps> = {}) {
     exists: () => false,
     env: {},
     say: async (text) => { spoken.push(text); },
+    migrateHome: () => undefined,
     setup: async (what) => { out.push(`setup ${what}`); },
     ...overrides,
   };
@@ -97,20 +98,20 @@ describe("install / uninstall", () => {
   test("install writes the loaders and prints what to do next", async () => {
     const { code, h } = await run(["install"]);
     expect(code).toBe(0);
-    expect(h.files.has("C:\\cfg\\plugins\\agentvoz.js")).toBe(true);
-    expect(h.files.has("C:\\cfg\\tui-plugins\\agentvoz.tsx")).toBe(true);
+    expect(h.files.has("C:\\cfg\\plugins\\open-vox.js")).toBe(true);
+    expect(h.files.has("C:\\cfg\\tui-plugins\\open-vox.tsx")).toBe(true);
     expect(h.out.join("\n")).toMatch(/Restart OpenCode/i);
   });
   test("--no-tui skips the sidebar plugin", async () => {
     const { h } = await run(["install", "--no-tui"]);
-    expect(h.files.has("C:\\cfg\\tui-plugins\\agentvoz.tsx")).toBe(false);
+    expect(h.files.has("C:\\cfg\\tui-plugins\\open-vox.tsx")).toBe(false);
   });
   test("uninstall removes them", async () => {
     const h = harness();
     await runCli(["install"], h.deps);
     const code = await runCli(["uninstall"], h.deps);
     expect(code).toBe(0);
-    expect(h.files.has("C:\\cfg\\plugins\\agentvoz.js")).toBe(false);
+    expect(h.files.has("C:\\cfg\\plugins\\open-vox.js")).toBe(false);
   });
 });
 
@@ -139,7 +140,7 @@ describe("status, config and misc", () => {
     expect((await run(["wat"])).code).toBe(2);
     const help = await run(["help"]);
     expect(help.code).toBe(0);
-    expect(help.h.out.join("\n")).toMatch(/Usage: agentvoz/);
+    expect(help.h.out.join("\n")).toMatch(/Usage: open-vox/);
     expect((await run([])).code).toBe(0);
   });
   test("doctor reports failures with a nonzero exit", async () => {
@@ -183,5 +184,28 @@ describe("setupKokoro", () => {
     const e = env();
     e.deps.run = async () => 1;
     await expect(setupKokoro(e.deps)).rejects.toThrow();
+  });
+});
+
+describe("data folder migration", () => {
+  test("install migrates the legacy folder and reports it", async () => {
+    const moves: string[] = [];
+    const h = harness({ migrateHome: () => { moves.push("moved"); return { from: "C:\\L\\agentVoz", to: "C:\\L\\open-vox" }; } });
+    await runCli(["install"], h.deps);
+    expect(moves).toHaveLength(1);
+    expect(h.out.join("\n")).toMatch(/Moved your data/);
+  });
+  test("a migration failure is a warning, not a failed install", async () => {
+    const h = harness({ migrateHome: () => { throw new Error("EBUSY"); } });
+    const code = await runCli(["install"], h.deps);
+    expect(code).toBe(0);
+    expect(h.err.join("\n")).toMatch(/EBUSY/);
+    expect(h.files.has("C:\\cfg\\plugins\\open-vox.js")).toBe(true);
+  });
+  test("install tells the user when old plugin files were removed", async () => {
+    const h = harness();
+    h.files.set("C:\\cfg\\plugins\\agentvoz.js", "old");
+    await runCli(["install"], h.deps);
+    expect(h.out.join("\n")).toMatch(/Removed the old agentvoz/);
   });
 });

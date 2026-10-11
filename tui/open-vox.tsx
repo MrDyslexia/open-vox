@@ -1,14 +1,14 @@
 // @ts-nocheck
 /** @jsxImportSource @opentui/solid */
-// OpenCode TUI plugin: a small agentVoz block in the sidebar with two buttons.
-// `agentvoz install` copies this file into the OpenCode config directory and rewrites
+// OpenCode TUI plugin: a small open-vox block in the sidebar with two buttons.
+// `open-vox install` copies this file into the OpenCode config directory and rewrites
 // the "../src/config" import below to an absolute URL, so it resolves solid and opentui
 // from OpenCode's own dependencies (a second copy would break reactivity).
 import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import { For, createMemo, createSignal, onCleanup } from "solid-js"
 import { KOKORO_VOICES, readConfig, writeConfig } from "../src/config"
 
-const id = "agentvoz"
+const id = "open-vox"
 
 const label = (voiceId: string) => KOKORO_VOICES.find((v) => v.id === voiceId)?.label ?? voiceId
 
@@ -25,7 +25,7 @@ function Block(props: { api: TuiPluginApi }) {
   const chooseVoice = () => {
     props.api.ui.dialog.replace(() => (
       <props.api.ui.DialogSelect
-        title="agentVoz voice"
+        title="open-vox voice"
         options={KOKORO_VOICES.map((v) => ({
           title: `${v.label}`,
           value: v.id,
@@ -64,7 +64,7 @@ function Block(props: { api: TuiPluginApi }) {
   return (
     <box flexDirection="column" gap={0}>
       <text fg={theme().text}>
-        <b>agentVoz</b>
+        <b>open-vox</b>
         <span style={{ fg: paused() ? theme().warning : theme().textMuted }}>{paused() ? " paused" : ""}</span>
       </text>
       <box flexDirection="row" gap={1}>

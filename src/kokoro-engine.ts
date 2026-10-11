@@ -2,6 +2,7 @@ import { existsSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { win32 } from "node:path";
 import { fileURLToPath } from "node:url";
+import { envValue, homeFor } from "./brand";
 import { DEFAULT_CONFIG, createConfigReader, kokoroLanguageCode } from "./config";
 import { windowsRunner, wavEngine, type Runner } from "./piper-engine";
 import type { Engine } from "./speech-sink";
@@ -36,13 +37,13 @@ export function resolveKokoro(
   const modelPath = win32.join(root, "kokoro", "kokoro-v1.0.onnx");
   const voicesPath = win32.join(root, "kokoro", "voices-v1.0.bin");
   if (![python, modelPath, voicesPath].every((path) => exists(path))) return undefined;
-  const parsed = Number(env.AGENTVOZ_SPEED);
+  const parsed = Number(envValue(env, "SPEED"));
   const speed = Number.isFinite(parsed) && parsed >= 0.5 && parsed <= 2 ? parsed : 1;
   return {
     python, modelPath, voicesPath, speed,
     voices: {
-      es: env.AGENTVOZ_KOKORO_VOICE_ES?.trim() || DEFAULT_KOKORO_VOICES.es,
-      en: env.AGENTVOZ_KOKORO_VOICE_EN?.trim() || DEFAULT_KOKORO_VOICES.en,
+      es: envValue(env, "KOKORO_VOICE_ES") || DEFAULT_KOKORO_VOICES.es,
+      en: envValue(env, "KOKORO_VOICE_EN") || DEFAULT_KOKORO_VOICES.en,
     },
   };
 }
@@ -75,7 +76,7 @@ export function defaultKokoroEngine(
   env: Record<string, string | undefined> = process.env,
   getConfig: () => import("./config").Config = createConfigReader(),
 ): Engine | undefined {
-  const root = env.AGENTVOZ_HOME?.trim() || win32.join(env.LOCALAPPDATA ?? "", "agentVoz");
+  const root = homeFor(env);
   const paths = resolveKokoro(root, env);
   if (!paths) return undefined;
   const script = fileURLToPath(new URL("../scripts/kokoro_say.py", import.meta.url));
@@ -87,10 +88,10 @@ export function defaultKokoroEngine(
       const config = getConfig();
       return {
         voices: {
-          es: env.AGENTVOZ_KOKORO_VOICE_ES?.trim() || config.voices.es,
-          en: env.AGENTVOZ_KOKORO_VOICE_EN?.trim() || config.voices.en,
+          es: envValue(env, "KOKORO_VOICE_ES") || config.voices.es,
+          en: envValue(env, "KOKORO_VOICE_EN") || config.voices.en,
         },
-        speed: env.AGENTVOZ_SPEED?.trim() && Number.isFinite(Number(env.AGENTVOZ_SPEED)) ? Number(env.AGENTVOZ_SPEED) : config.speed,
+        speed: Number.isFinite(Number(envValue(env, "SPEED"))) && envValue(env, "SPEED") ? Number(envValue(env, "SPEED")) : config.speed,
       };
     },
     run: windowsRunner,

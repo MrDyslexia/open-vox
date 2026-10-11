@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { chooseEngine, createAgentVoz, withPause } from "../src/plugin";
+import { chooseEngine, createOpenVox, withPause } from "../src/plugin";
 import type { SpeechSink } from "../src/speech-sink";
 
 function fakeSink() {
@@ -12,17 +12,17 @@ function fakeSink() {
 const client = { session: { get: async () => ({ error: "x" }), message: async () => ({ error: "x" }) } } as any;
 const user = (id: string, created: number) => ({ type: "message.updated", properties: { info: { id, sessionID: "ses_a", role: "user", time: { created } } } }) as any;
 
-describe("agentVoz wiring", () => {
+describe("open-vox wiring", () => {
   test("a new user turn stops current speech", async () => {
     const f = fakeSink();
-    const hooks = createAgentVoz(client, "/d", f.sink);
+    const hooks = createOpenVox(client, "/d", f.sink);
     await hooks.event!({ event: user("msg_1", 1) });
     expect(f.stops()).toBe(1);
   });
 
   test("a repeated update of the same user message does not stop speech", async () => {
     const f = fakeSink();
-    const hooks = createAgentVoz(client, "/d", f.sink);
+    const hooks = createOpenVox(client, "/d", f.sink);
     await hooks.event!({ event: user("msg_1", 1) });
     await hooks.event!({ event: user("msg_1", 1) });
     expect(f.stops()).toBe(1);
@@ -30,14 +30,14 @@ describe("agentVoz wiring", () => {
 
   test("session.error stops current speech", async () => {
     const f = fakeSink();
-    const hooks = createAgentVoz(client, "/d", f.sink);
+    const hooks = createOpenVox(client, "/d", f.sink);
     await hooks.event!({ event: { type: "session.error", properties: { sessionID: "ses_a" } } as any });
     expect(f.stops()).toBe(1);
   });
 
   test("unrelated events do not stop speech", async () => {
     const f = fakeSink();
-    const hooks = createAgentVoz(client, "/d", f.sink);
+    const hooks = createOpenVox(client, "/d", f.sink);
     await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "ses_a" } } as any });
     expect(f.stops()).toBe(0);
   });
@@ -45,7 +45,7 @@ describe("agentVoz wiring", () => {
   test("a throwing stop never escapes the hook", async () => {
     const f = fakeSink();
     f.sink.stop = () => { throw new Error("x"); };
-    const hooks = createAgentVoz(client, "/d", f.sink);
+    const hooks = createOpenVox(client, "/d", f.sink);
     await hooks.event!({ event: user("msg_1", 1) });
   });
 });
@@ -72,7 +72,7 @@ describe("pause", () => {
   test("pausing stops current speech once and later events do not stop again", async () => {
     const f = fakeSink();
     let paused = false;
-    const hooks = createAgentVoz(client, "/d", f.sink, () => paused);
+    const hooks = createOpenVox(client, "/d", f.sink, () => paused);
     await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "ses_a" } } as any });
     expect(f.stops()).toBe(0);
     paused = true;

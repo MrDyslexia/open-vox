@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { win32 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,6 +7,7 @@ import {
   KOKORO_VOICES, MAX_SPEED, MIN_SPEED, appHome, configPath, readConfig, writeConfig,
   type Config, type ConfigPatch, type EngineName,
 } from "./config";
+import { envValue, legacyHomeMigration } from "./brand";
 import { inspectInstall, install, uninstall, type InstallFs } from "./installer";
 import { resolveKokoro } from "./kokoro-engine";
 import { resolvePiper } from "./piper-engine";
@@ -26,12 +27,14 @@ export type CliDeps = {
   env: Record<string, string | undefined>;
   platform?: string;
   say: (text: string) => Promise<void>;
+  /** Moves the pre-rename data folder to its new location, when applicable. Throws on failure. */
+  migrateHome: () => { from: string; to: string } | undefined;
   setup: (what: "kokoro" | "piper") => Promise<void>;
 };
 
 const ENGINES: readonly EngineName[] = ["auto", "kokoro", "piper", "sapi"];
 
-export const HELP = `Usage: agentvoz <command>
+export const HELP = `Usage: open-vox <command>
 
 Setup
   install [--no-tui] [--config-dir <dir>]   Register the plugin (and the sidebar block) in OpenCode
@@ -82,10 +85,10 @@ function doctor(deps: CliDeps): number {
   const results = [
     check("Platform", platform === "win32" ? "OK" : "FAIL", platform === "win32" ? "Windows" : `${platform} is not supported (Windows only)`),
     check("OpenCode config", deps.exists(deps.configDir) ? "OK" : "FAIL", deps.configDir),
-    check("Server plugin", state.plugin ? "OK" : "FAIL", state.plugin ? "installed" : "missing; run: agentvoz install"),
-    check("Sidebar block", state.tuiFile && state.tuiRegistered ? "OK" : "WARN", state.tuiFile && state.tuiRegistered ? "installed" : "not installed; run: agentvoz install"),
-    check("Kokoro engine", kokoro ? "OK" : "WARN", kokoro ? "ready" : "not set up; run: agentvoz setup kokoro"),
-    check("Piper engine", piper ? "OK" : "WARN", piper ? "ready" : "not set up (optional); run: agentvoz setup piper"),
+    check("Server plugin", state.plugin ? "OK" : "FAIL", state.plugin ? "installed" : "missing; run: open-vox install"),
+    check("Sidebar block", state.tuiFile && state.tuiRegistered ? "OK" : "WARN", state.tuiFile && state.tuiRegistered ? "installed" : "not installed; run: open-vox install"),
+    check("Kokoro engine", kokoro ? "OK" : "WARN", kokoro ? "ready" : "not set up; run: open-vox setup kokoro"),
+    check("Piper engine", piper ? "OK" : "WARN", piper ? "ready" : "not set up (optional); run: open-vox setup piper"),
     check("Windows voices (SAPI)", platform === "win32" ? "OK" : "WARN", "built in, used as the last fallback"),
   ];
   for (const r of results) deps.out(`${r.level.padEnd(4)} ${r.label}: ${r.detail}`);
@@ -141,7 +144,7 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
       const forced = args.length >= 2 && (args[0] === "es" || args[0] === "en") ? (args[0] as "es" | "en") : undefined;
       const id = forced ? args[1]! : args[0]!;
       const found = KOKORO_VOICES.find((v) => v.id === id && (!forced || v.language === forced));
-      if (!found) return usage(deps, `Unknown voice "${id}"${forced ? ` for ${forced}` : ""}. Run "agentvoz voices" to list them.`);
+      if (!found) return usage(deps, `Unknown voice "${id}"${forced ? ` for ${forced}` : ""}. Run "open-vox voices" to list them.`);
       deps.writeConfig({ voices: { [found.language]: found.id } });
       deps.out(`${found.language === "es" ? "Spanish" : "English"} voice set to ${found.label} (${found.id}).`);
       return 0;
@@ -166,7 +169,7 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
 
     case "say": {
       const text = args.join(" ").trim();
-      if (!text) return usage(deps, 'Usage: agentvoz say "text to speak"');
+      if (!text) return usage(deps, 'Usage: open-vox say "text to speak"');
       await deps.say(text);
       return 0;
     }
@@ -175,7 +178,14 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
       const configDir = flag(args, "--config-dir") ?? deps.configDir;
       const template = typeof deps.tuiTemplate === "function" ? deps.tuiTemplate() : deps.tuiTemplate;
       const wantTui = !args.includes("--no-tui");
+      try {
+        const moved = deps.migrateHome();
+        if (moved) deps.out(`Moved your data (settings, models, voices) from ${moved.from} to ${moved.to}.`);
+      } catch (error) {
+        deps.err(`Warning: could not move the old data folder: ${error instanceof Error ? error.message : String(error)}`);
+      }
       const result = install({ fs: deps.installFs, configDir, repoRoot: deps.repoRoot, tuiTemplate: template, tui: wantTui });
+      if (result.removedLegacy) deps.out("Removed the old agentvoz plugin files.");
       deps.out(`Installed plugin: ${result.plugin}`);
       if (wantTui) deps.out(result.tui ? `Installed sidebar block: ${result.tuiFile}` : "Sidebar block NOT installed.");
       for (const warning of result.warnings) deps.err(`Warning: ${warning}`);
@@ -192,7 +202,7 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
 
     case "setup": {
       const what = args[0];
-      if (what !== "kokoro" && what !== "piper") return usage(deps, "Usage: agentvoz setup kokoro|piper");
+      if (what !== "kokoro" && what !== "piper") return usage(deps, "Usage: open-vox setup kokoro|piper");
       await deps.setup(what);
       return 0;
     }
@@ -212,11 +222,11 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
         deps.out("Settings reset to defaults.");
         return 0;
       }
-      return usage(deps, "Usage: agentvoz config path|show|reset");
+      return usage(deps, "Usage: open-vox config path|show|reset");
     }
 
     default:
-      return usage(deps, `Unknown command "${command}". Run "agentvoz help".`);
+      return usage(deps, `Unknown command "${command}". Run "open-vox help".`);
   }
 }
 
@@ -239,16 +249,21 @@ export async function main(argv: string[]): Promise<number> {
     installFs: nodeInstallFs,
     configDir: env.OPENCODE_CONFIG_DIR?.trim() || win32.join(homedir(), ".config", "opencode"),
     repoRoot,
-    tuiTemplate: () => readFileSync(win32.join(repoRoot, "tui", "agentvoz.tsx"), "utf8"),
+    tuiTemplate: () => readFileSync(win32.join(repoRoot, "tui", "open-vox.tsx"), "utf8"),
     exists: (path) => existsSync(path),
     env,
+    migrateHome: () => {
+      const plan = legacyHomeMigration(env, existsSync);
+      if (plan) renameSync(plan.from, plan.to);
+      return plan;
+    },
     say: async (text) => {
       const { speakOnce } = await import("./plugin");
       await speakOnce(text);
     },
     setup: async (what) => {
       const setupDeps = {
-        home: appHome(env), systemPython: env.AGENTVOZ_PYTHON?.trim() || "python",
+        home: appHome(env), systemPython: envValue(env, "PYTHON") || "python",
         exists: (path: string) => existsSync(path), run: nodeRun, download: nodeDownload,
         log: (line: string) => console.log(line),
       };

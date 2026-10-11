@@ -94,8 +94,9 @@ describe("voices", () => {
 });
 
 describe("appHome", () => {
-  test("prefers AGENTVOZ_HOME, then LOCALAPPDATA", () => {
-    expect(appHome({ AGENTVOZ_HOME: "D:\\x", LOCALAPPDATA: "C:\\L" })).toBe("D:\\x");
-    expect(appHome({ LOCALAPPDATA: "C:\\L" })).toBe("C:\\L\\agentVoz");
+  test("prefers OPEN_VOX_HOME, then the legacy variable, then LOCALAPPDATA", () => {
+    expect(appHome({ OPEN_VOX_HOME: "D:\\x", AGENTVOZ_HOME: "D:\\old", LOCALAPPDATA: "C:\\L" })).toBe("D:\\x");
+    expect(appHome({ AGENTVOZ_HOME: "D:\\old", LOCALAPPDATA: "C:\\L" })).toBe("D:\\old");
+    expect(appHome({ LOCALAPPDATA: "C:\\L" })).toBe("C:\\L\\open-vox");
   });
 });

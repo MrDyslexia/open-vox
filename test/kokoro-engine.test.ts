@@ -94,10 +94,10 @@ describe("resolveKokoro", () => {
     expect(resolveKokoro("R", {}, (p) => p !== "R\\kokoro\\kokoro-v1.0.onnx" && present.has(p))).toBeUndefined();
   });
   test("honors voice and speed overrides, ignoring a bad speed", () => {
-    const r = resolveKokoro("R", { AGENTVOZ_KOKORO_VOICE_ES: "em_alex", AGENTVOZ_KOKORO_VOICE_EN: "am_adam", AGENTVOZ_SPEED: "1.25" }, () => true);
+    const r = resolveKokoro("R", { OPEN_VOX_KOKORO_VOICE_ES: "em_alex", AGENTVOZ_KOKORO_VOICE_EN: "am_adam", OPEN_VOX_SPEED: "1.25" }, () => true);
     expect(r?.voices).toEqual({ es: "em_alex", en: "am_adam" });
     expect(r?.speed).toBe(1.25);
-    expect(resolveKokoro("R", { AGENTVOZ_SPEED: "abc" }, () => true)?.speed).toBe(1);
+    expect(resolveKokoro("R", { OPEN_VOX_SPEED: "abc" }, () => true)?.speed).toBe(1);
     expect(resolveKokoro("R", { AGENTVOZ_SPEED: "9" }, () => true)?.speed).toBe(1);
   });
 });

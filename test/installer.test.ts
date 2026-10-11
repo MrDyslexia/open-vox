@@ -15,8 +15,8 @@ const CFG = "C:\\u\\.config\\opencode";
 const ROOT = "C:\\repo\\agentVoz";
 const TEMPLATE = 'import { x } from "../src/config";\nexport default {};\n';
 const base = { configDir: CFG, repoRoot: ROOT, tuiTemplate: TEMPLATE };
-const PLUGIN = `${CFG}\\plugins\\agentvoz.js`;
-const TUI_FILE = `${CFG}\\tui-plugins\\agentvoz.tsx`;
+const PLUGIN = `${CFG}\\plugins\\open-vox.js`;
+const TUI_FILE = `${CFG}\\tui-plugins\\open-vox.tsx`;
 const TUI_JSON = `${CFG}\\tui.json`;
 
 describe("updateTuiConfig", () => {
@@ -46,7 +46,7 @@ describe("install", () => {
   test("writes the server loader pointing at the repository", () => {
     const fs = memoryFs();
     install({ ...base, fs, tui: false });
-    expect(fs.files.get(PLUGIN)).toBe('export { AgentVozPlugin } from "file:///C:/repo/agentVoz/src/index.ts";\n');
+    expect(fs.files.get(PLUGIN)).toBe('export { OpenVoxPlugin } from "file:///C:/repo/agentVoz/src/index.ts";\n');
     expect(fs.files.has(TUI_FILE)).toBe(false);
     expect(fs.files.has(TUI_JSON)).toBe(false);
   });
@@ -95,5 +95,37 @@ describe("uninstall and inspect", () => {
     expect(inspectInstall({ ...base, fs })).toEqual({ plugin: false, tuiFile: false, tuiRegistered: false });
     install({ ...base, fs, tui: true });
     expect(inspectInstall({ ...base, fs })).toEqual({ plugin: true, tuiFile: true, tuiRegistered: true });
+  });
+});
+
+describe("legacy cleanup", () => {
+  const OLD_PLUGIN = `${CFG}\\plugins\\agentvoz.js`;
+  const OLD_TUI = `${CFG}\\tui-plugins\\agentvoz.tsx`;
+  test("install removes the pre-rename files and entry, keeping other entries", () => {
+    const fs = memoryFs({
+      [OLD_PLUGIN]: "old", [OLD_TUI]: "old",
+      [TUI_JSON]: JSON.stringify({ plugin: ["other", OLD_TUI] }),
+    });
+    const result = install({ ...base, fs, tui: true });
+    expect(fs.files.has(OLD_PLUGIN)).toBe(false);
+    expect(fs.files.has(OLD_TUI)).toBe(false);
+    expect(JSON.parse(fs.files.get(TUI_JSON)!).plugin).toEqual(["other", TUI_FILE]);
+    expect(result.removedLegacy).toBe(true);
+  });
+  test("uninstall also removes the pre-rename files", () => {
+    const fs = memoryFs({ [OLD_PLUGIN]: "old", [OLD_TUI]: "old", [TUI_JSON]: JSON.stringify({ plugin: [OLD_TUI] }) });
+    uninstall({ ...base, fs });
+    expect(fs.files.has(OLD_PLUGIN)).toBe(false);
+    expect(fs.files.has(OLD_TUI)).toBe(false);
+    expect(JSON.parse(fs.files.get(TUI_JSON)!).plugin).toEqual([]);
+  });
+  test("a clean install reports no legacy removal", () => {
+    expect(install({ ...base, fs: memoryFs(), tui: true }).removedLegacy).toBe(false);
+  });
+  test("a malformed tui.json still lets the legacy server loader be removed", () => {
+    const fs = memoryFs({ [OLD_PLUGIN]: "old", [TUI_JSON]: "{ nope" });
+    install({ ...base, fs, tui: true });
+    expect(fs.files.has(OLD_PLUGIN)).toBe(false);
+    expect(fs.files.get(TUI_JSON)).toBe("{ nope");
   });
 });

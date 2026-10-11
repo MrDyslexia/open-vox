@@ -108,7 +108,7 @@ describe("resolvePiper", () => {
     expect(resolvePiper("R", {}, (p) => p !== "R\\voices\\en_US-lessac-high.onnx" && present.has(p))).toBeUndefined();
   });
   test("honors voice overrides", () => {
-    const r = resolvePiper("R", { AGENTVOZ_VOICE_ES: "es_ES-davefx-medium" }, () => true);
+    const r = resolvePiper("R", { OPEN_VOX_VOICE_ES: "es_ES-davefx-medium" }, () => true);
     expect(r?.models.es).toBe("R\\voices\\es_ES-davefx-medium.onnx");
   });
 });
