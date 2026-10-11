@@ -7,7 +7,7 @@
 import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import { For, createMemo, createSignal, onCleanup } from "solid-js"
 import { KOKORO_VOICES, readConfig, writeConfig } from "../src/config"
-import { createRepeatUi, buttonHandlers, publishAttached } from "../src/repeat-ui"
+import { createRepeatUi, buttonHandlers, publishAttached, sameView } from "../src/repeat-ui"
 
 const id = "open-vox"
 
@@ -16,25 +16,26 @@ const label = (voiceId: string) => KOKORO_VOICES.find((v) => v.id === voiceId)?.
 function Block(props: { api: TuiPluginApi; sessionID: string }) {
   const theme = () => props.api.theme.current
   const [config, setConfig] = createSignal(readConfig())
-  // The CLI and other sessions can change the shared settings, so keep the block in sync.
+  // The CLI and other sessions can change the shared voice settings, so keep the block in sync.
+  // Pause is not a shared setting: it is per plugin instance and shown from the confirmed status reply.
   const timer = setInterval(() => setConfig(readConfig()), 1000)
   onCleanup(() => clearInterval(timer))
 
-  const paused = () => config().paused
-  const toggle = () => setConfig(writeConfig({ paused: !paused() }))
-  const [canRepeat, setCanRepeat] = createSignal(false)
   const session = () => {
     const route = props.api.route.current
     return route.name === "session" && route.params?.sessionID === props.sessionID ? props.sessionID : ""
   }
+  // paused is undefined until the plugin instance confirms its state; nothing is optimistic.
+  const [view, setView] = createSignal({ paused: undefined, canControl: false, canRepeat: false }, { equals: sameView })
   const repeat = createRepeatUi({
     subscribe: (receive) => props.api.event.on("tui.command.execute", (event) => receive(event.properties.command)),
     publish: (command) => publishAttached(props.api.client, props.api.state.path.directory, command),
-    onChange: () => setCanRepeat(repeat.available(session(), paused())),
+    onChange: () => setView(repeat.view(session())),
   })
+  const paused = () => view().paused === true
   const repeatTimer = setInterval(() => {
     repeat.refresh(session())
-    setCanRepeat(repeat.available(session(), paused()))
+    setView(repeat.view(session()))
   }, 250)
   onCleanup(() => { clearInterval(repeatTimer); repeat.dispose() })
 
@@ -91,10 +92,11 @@ function Block(props: { api: TuiPluginApi; sessionID: string }) {
         <span style={{ fg: paused() ? theme().warning : theme().textMuted }}>{paused() ? " paused" : ""}</span>
       </text>
       <box flexDirection="row" gap={1}>
-        {button(() => (paused() ? "Resume" : "Pause"), toggle, paused)}
+        {button(() => (paused() ? "Resume" : "Pause"), () => { void repeat.togglePause(session()) }, paused, false,
+          () => !view().canControl || !repeat.view(session()).canControl)}
         {button(() => "Voice", chooseVoice, undefined, true)}
-        {button(() => "Repeat", () => { void repeat.repeat(session(), paused()) }, undefined, false,
-          () => !canRepeat() || !repeat.available(session(), paused()))}
+        {button(() => "Repeat", () => { void repeat.repeat(session()) }, undefined, false,
+          () => !view().canRepeat || !repeat.available(session()))}
       </box>
     </box>
   )

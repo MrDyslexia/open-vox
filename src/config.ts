@@ -4,14 +4,13 @@ import { homeFor } from "./brand";
 import type { Language } from "./speech-text";
 
 export type EngineName = "auto" | "kokoro" | "piper" | "sapi";
+/** Shared persisted defaults only. Runtime controls such as pause live in memory, per plugin instance. */
 export type Config = {
-  paused: boolean;
   voices: Record<Language, string>;
   speed: number;
   engine: EngineName;
 };
 export type ConfigPatch = {
-  paused?: boolean;
   voices?: Partial<Record<Language, string>>;
   speed?: number;
   engine?: EngineName;
@@ -41,7 +40,6 @@ export const KOKORO_VOICES: readonly KokoroVoice[] = [
 ];
 
 export const DEFAULT_CONFIG: Config = {
-  paused: false,
   voices: { es: "em_alex", en: "af_heart" },
   speed: 1,
   engine: "auto",
@@ -56,12 +54,14 @@ const validVoice = (id: unknown, language: Language): id is string =>
 const validSpeed = (value: unknown): value is number =>
   typeof value === "number" && Number.isFinite(value) && value >= MIN_SPEED && value <= MAX_SPEED;
 
-/** Tolerant parser: invalid fields fall back to defaults individually. */
+/**
+ * Tolerant parser: invalid fields fall back to defaults individually. Unknown keys, including
+ * the legacy `paused` flag from older files, are ignored and therefore dropped on the next write.
+ */
 export function parseConfig(raw: unknown): Config {
   const input = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
   const voices = input.voices && typeof input.voices === "object" ? (input.voices as Record<string, unknown>) : {};
   return {
-    paused: typeof input.paused === "boolean" ? input.paused : DEFAULT_CONFIG.paused,
     voices: {
       es: validVoice(voices.es, "es") ? voices.es : DEFAULT_CONFIG.voices.es,
       en: validVoice(voices.en, "en") ? voices.en : DEFAULT_CONFIG.voices.en,

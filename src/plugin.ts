@@ -105,23 +105,39 @@ export function createCoordinator(client: Client, directory: string, sink: Sink 
 }
 
 
-export function createOpenVox(client: Client, directory: string, sink: SpeechSink, isPaused?: () => boolean,
+/** Runtime pause flag of one plugin instance: in memory only, never read from or written to config.json. */
+export type PauseState = { isPaused: () => boolean; setPaused: (paused: boolean) => void };
+
+/**
+ * Pausing cuts the current narration exactly once, on the false->true edge. The flag is already set
+ * when `onPause` runs, so queued and in-flight work sees the paused state; resuming needs no action.
+ */
+export function createPauseState(onPause: () => void): PauseState {
+  let paused = false;
+  return {
+    isPaused: () => paused,
+    setPaused(next) {
+      if (next === paused) return;
+      paused = next;
+      if (next) { try { onPause(); } catch {} }
+    },
+  };
+}
+
+export function createOpenVox(client: Client, directory: string, sink: SpeechSink,
+  pause: PauseState = createPauseState(() => sink.stop()),
   controlOptions?: { publish: (command: string) => Promise<void>; instance?: string }): Hooks {
   const coordinator = createCoordinator(client, directory, sink);
   const control = controlOptions && createRepeatControl({ ...controlOptions,
-    status: () => sink.status?.(), isPaused: () => isPaused?.() ?? false,
+    status: () => sink.status?.(), isPaused: pause.isPaused,
+    control: (action) => pause.setPaused(action === "pause"),
     repeat: async (sessionID, revision, expires) => { await sink.repeat?.(sessionID, revision, expires); } });
   const seenUsers = new Set<string>();
-  let wasPaused = false;
   let disposed = false;
   const event: NonNullable<Hooks["event"]> = async (input) => {
     if (disposed) return;
     if (input.event.type === "tui.command.execute" && await control?.handle(input.event.properties.command)) return;
     try {
-      // Pausing cuts the current narration once; resuming needs no action.
-      const paused = isPaused?.() ?? false;
-      if (paused && !wasPaused) sink.stop();
-      wasPaused = paused;
       // A NEW user turn or a session error makes any current narration stale.
       // The host repeats updates for the same user message; those must not cancel speech.
       const { event } = input;
@@ -157,24 +173,6 @@ export function withPause(sink: SpeechSink, isPaused: () => boolean): SpeechSink
   wrapped.removeSession = (sessionID) => sink.removeSession?.(sessionID);
   wrapped.dispose = async () => { await sink.dispose?.(); };
   return wrapped;
-}
-
-/**
- * Cuts the audio that is playing the moment pause flips on. Host events are not enough:
- * while narration plays the host is usually idle, so nothing would call stop() until later.
- * Returns a function that stops the watcher.
- */
-export function watchPause(sink: SpeechSink, isPaused: () => boolean, intervalMs = 250): () => void {
-  let wasPaused = isPaused();
-  const timer = setInterval(() => {
-    try {
-      const paused = isPaused();
-      if (paused && !wasPaused) sink.stop();
-      wasPaused = paused;
-    } catch {}
-  }, intervalMs);
-  timer.unref?.();
-  return () => clearInterval(timer);
 }
 
 function debugLog(file: string | undefined) {
@@ -267,7 +265,9 @@ export const OpenVoxPlugin: Plugin = async ({ client, directory }) => {
   const log = debugLog(envValue(process.env, "LOG"));
   let enabled = envValue(process.env, "DISABLED") !== "1" && process.platform === "win32";
   const config = createConfigReader();
-  const isPaused = () => { config.invalidate(); return config().paused; };
+  // Pause is per plugin instance and in memory (D1); the sink exists below, so stop() is resolved lazily.
+  const pause = createPauseState(() => sink.stop());
+  const isPaused = pause.isPaused;
   let cache: AudioCache | undefined;
   if (enabled) {
     try { cache = new AudioCache(); }
@@ -279,7 +279,6 @@ export const OpenVoxPlugin: Plugin = async ({ client, directory }) => {
     ? { cache, isPaused, player: (wav) => player.play(wav), playbackTimeoutMs: PLAYBACK_BACKSTOP_MS }
     : undefined);
   log(`plugin ready enabled=${enabled}`);
-  const stopWatcher = watchPause(sink, isPaused);
   const logged = (async (selection: Selection) => {
     log(`selection session=${selection.sessionID} message=${selection.messageID} chars=${selection.text.length} paused=${isPaused()}`);
     await sink(selection);
@@ -301,7 +300,7 @@ export const OpenVoxPlugin: Plugin = async ({ client, directory }) => {
       },
     },
   } : (client as unknown as Client);
-  const hooks = createOpenVox(traced, directory, withPause(logged, isPaused), isPaused, {
+  const hooks = createOpenVox(traced, directory, withPause(logged, isPaused), pause, {
     instance: cache?.instance,
     publish: async (command) => {
       const result = await client.tui.publish({ query: { directory },
@@ -310,7 +309,6 @@ export const OpenVoxPlugin: Plugin = async ({ client, directory }) => {
     },
   });
   return { ...hooks, dispose: async () => {
-    stopWatcher();
     try { await hooks.dispose?.(); } finally { await player?.dispose(); }
   } };
 };

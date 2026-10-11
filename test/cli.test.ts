@@ -30,15 +30,23 @@ function harness(overrides: Partial<CliDeps> = {}) {
 }
 const run = (argv: string[], h = harness()) => runCli(argv, h.deps).then((code) => ({ code, h }));
 
-describe("pause / resume / toggle", () => {
-  test("pause and resume persist the flag", async () => {
-    const { code, h } = await run(["pause"]);
-    expect(code).toBe(0);
-    expect(h.config().paused).toBe(true);
-    await runCli(["resume"], h.deps);
-    expect(h.config().paused).toBe(false);
-    await runCli(["toggle"], h.deps);
-    expect(h.config().paused).toBe(true);
+describe("removed pause / resume / toggle", () => {
+  test("they are unknown commands that change nothing and never write the config", async () => {
+    for (const command of ["pause", "resume", "toggle"]) {
+      let writes = 0;
+      const h = harness();
+      const base = h.deps.writeConfig;
+      h.deps.writeConfig = (patch) => { writes++; return base(patch); };
+      const code = await runCli([command], h.deps);
+      expect(code).toBe(2);
+      expect(h.err.join(" ")).toContain(`Unknown command "${command}"`);
+      expect(writes).toBe(0);
+      expect(h.config()).toEqual(DEFAULT_CONFIG);
+    }
+  });
+  test("help no longer advertises them", async () => {
+    const help = (await run(["help"])).h.out.join("\n");
+    expect(help).not.toMatch(/pause|resume|toggle/i);
   });
 });
 
@@ -116,10 +124,11 @@ describe("install / uninstall", () => {
 });
 
 describe("status, config and misc", () => {
-  test("status shows pause state, voices and install state", async () => {
+  test("status shows voices and install state but no pause state", async () => {
     const { h } = await run(["status"]);
     const text = h.out.join("\n");
-    expect(text).toMatch(/paused: no/);
+    expect(text).not.toMatch(/paused/);
+    expect(text).toMatch(/voices: es: em_alex, en: af_heart/);
     expect(text).toMatch(/plugin: not installed/);
   });
   test("config path prints the path; reset restores defaults", async () => {
@@ -129,6 +138,14 @@ describe("status, config and misc", () => {
     expect(h.out.join("\n")).toContain("C:\\h\\config.json");
     await runCli(["config", "reset"], h.deps);
     expect(h.config()).toEqual(DEFAULT_CONFIG);
+  });
+  test("config reset writes only the persisted settings, never a paused flag", async () => {
+    const patches: object[] = [];
+    const h = harness();
+    const base = h.deps.writeConfig;
+    h.deps.writeConfig = (patch) => { patches.push(patch); return base(patch); };
+    await runCli(["config", "reset"], h.deps);
+    expect(patches).toEqual([{ voices: { es: "em_alex", en: "af_heart" }, speed: 1, engine: "auto" }]);
   });
   test("setup delegates", async () => {
     const { code, h } = await run(["setup", "kokoro"]);

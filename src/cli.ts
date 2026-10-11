@@ -44,7 +44,6 @@ Setup
   status                                    Show current settings
 
 Controls (apply immediately, no restart)
-  pause | resume | toggle                   Stop or resume narration
   voice [<id>] | voice es|en <id>           Show or change the voice (see "voices")
   voices                                    List available voices
   speed <0.5-2>                             Speaking speed
@@ -98,7 +97,6 @@ function doctor(deps: CliDeps): number {
 function status(deps: CliDeps): void {
   const config = deps.readConfig();
   const state = inspectInstall({ fs: deps.installFs, configDir: deps.configDir });
-  deps.out(`paused: ${config.paused ? "yes" : "no"}`);
   deps.out(`voices: es: ${config.voices.es}, en: ${config.voices.en}`);
   deps.out(`speed: ${config.speed}`);
   deps.out(`engine: ${config.engine}`);
@@ -116,20 +114,6 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
     case "-h":
       deps.out(HELP.trimEnd());
       return 0;
-
-    case "pause":
-    case "resume": {
-      const paused = command === "pause";
-      deps.writeConfig({ paused });
-      deps.out(paused ? "Paused. Narration is off." : "Resumed. Narration is on.");
-      return 0;
-    }
-    case "toggle": {
-      const paused = !deps.readConfig().paused;
-      deps.writeConfig({ paused });
-      deps.out(paused ? "Paused. Narration is off." : "Resumed. Narration is on.");
-      return 0;
-    }
 
     case "voices":
       listVoices(deps);
@@ -218,7 +202,7 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
       if (sub === "path") { deps.out(deps.configPath); return 0; }
       if (sub === "show") { deps.out(JSON.stringify(deps.readConfig(), null, 2)); return 0; }
       if (sub === "reset") {
-        deps.writeConfig({ paused: false, voices: { es: "em_alex", en: "af_heart" }, speed: 1, engine: "auto" });
+        deps.writeConfig({ voices: { es: "em_alex", en: "af_heart" }, speed: 1, engine: "auto" });
         deps.out("Settings reset to defaults.");
         return 0;
       }
