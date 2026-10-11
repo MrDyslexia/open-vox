@@ -27,9 +27,9 @@ export function createRepeatUi(options: {
   id?: () => string;
 }) {
   const now = options.now ?? Date.now, id = options.id ?? randomUUID;
-  let pending: { challenge: string; sessionID: string; expires: number; settle: number } | undefined;
+  let pending: { challenge: string; sessionID: string; expires: number; settle: number; reply?: ControlMessage } | undefined;
   let status: ControlMessage | undefined;
-  let conflict = false, disposed = false, sending = false;
+  let conflict = false, disposed = false, sending = false, discovering = false;
   async function send(command: string): Promise<void> {
     if (disposed || sending) return;
     sending = true;
@@ -41,27 +41,41 @@ export function createRepeatUi(options: {
     if (disposed || m?.kind !== "status") return;
     if (!pending || m.challenge !== pending.challenge || m.sessionID !== pending.sessionID ||
         m.expires !== pending.expires || m.expires <= now()) return;
-    if (status && status.instance !== m.instance) conflict = true;
-    status = m;
+    if ((pending.reply && pending.reply.instance !== m.instance) ||
+        (status && status.expires > now() && status.instance !== m.instance))
+      conflict = true;
+    pending.reply = m;
+    if (conflict || m.paused || m.revision === 0) status = undefined;
     options.onChange();
   });
-  const available = (sessionID: string, paused: boolean) => !disposed && !sending && !paused && !conflict &&
-    !!pending && pending.sessionID === sessionID && now() >= pending.settle &&
-    !!status && status.sessionID === sessionID && !status.paused && status.revision! > 0 && status.expires > now();
+  const available = (sessionID: string, paused: boolean) => {
+    // Renewal candidates earn their own settlement; the accepted lease keeps its original expiry.
+    if (!disposed && !discovering && !conflict && pending?.reply && now() >= pending.settle && pending.expires > now())
+      status = pending.reply;
+    return !disposed && !sending && !paused && !conflict && !!status && status.sessionID === sessionID &&
+      !status.paused && status.revision! > 0 && status.expires > now();
+  };
   return {
     available,
     refresh(sessionID: string) {
-      if (disposed || sending) return;
-      if (!sessionID) {
-        pending = undefined; status = undefined; options.onChange(); return;
+      if (disposed) return;
+      // Route/session invalidation must not wait for an outstanding transport operation.
+      if (!sessionID || (pending && pending.sessionID !== sessionID)) {
+        pending = undefined; status = undefined; conflict = false; options.onChange();
       }
+      if (!sessionID || discovering || sending) return;
       if (pending?.sessionID === sessionID && pending.expires > now() + 400) return;
       pending = { challenge: id(), sessionID, expires: now() + CONTROL_TTL, settle: now() + 250 };
-      status = undefined; conflict = false;
+      conflict = false;
       const challenge = pending.challenge;
-      void send(encodeCommand({ kind: "hello", challenge, sessionID, expires: pending.expires })).catch(() => {
-        if (pending?.challenge === challenge) { status = undefined; conflict = true; options.onChange(); }
-      });
+      const command = encodeCommand({ kind: "hello", challenge, sessionID, expires: pending.expires });
+      discovering = true;
+      void (async () => {
+        try { await options.publish(command); }
+        catch {
+          if (pending?.challenge === challenge) { status = undefined; conflict = true; }
+        } finally { discovering = false; if (!disposed) options.onChange(); }
+      })();
       options.onChange();
     },
     async repeat(sessionID: string, paused: boolean): Promise<void> {
