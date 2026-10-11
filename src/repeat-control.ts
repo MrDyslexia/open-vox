@@ -3,8 +3,11 @@ import { randomUUID } from "node:crypto";
 export const REPEAT_PREFIX = "open-vox.repeat.v1:";
 export const CONTROL_TTL = 2000;
 export type AudioStatus = { sessionID: string; revision: number };
+/** Runtime actions a TUI may request. New actions are added here and nowhere else in the wire format. */
+export const CONTROL_ACTIONS = ["pause", "resume"] as const;
+export type ControlAction = (typeof CONTROL_ACTIONS)[number];
 export type ControlMessage = {
-  kind: "hello" | "status" | "repeat";
+  kind: "hello" | "status" | "repeat" | "control";
   sessionID: string;
   expires: number;
   challenge?: string;
@@ -12,8 +15,10 @@ export type ControlMessage = {
   revision?: number;
   paused?: boolean;
   requestID?: string;
+  action?: ControlAction;
 };
 const id = (v: unknown): v is string => typeof v === "string" && /^[\w-]{1,128}$/.test(v);
+const action = (v: unknown): v is ControlAction => typeof v === "string" && (CONTROL_ACTIONS as readonly string[]).includes(v);
 export const encodeCommand = (message: ControlMessage): string => REPEAT_PREFIX + JSON.stringify(message);
 
 export function decodeCommand(command: unknown): ControlMessage | undefined {
@@ -22,7 +27,10 @@ export function decodeCommand(command: unknown): ControlMessage | undefined {
     const m = JSON.parse(command.slice(REPEAT_PREFIX.length));
     if (!m || !id(m.sessionID) || !Number.isSafeInteger(m.expires)) return;
     if (m.kind === "hello" && id(m.challenge)) return m;
-    if (!id(m.instance) || !Number.isSafeInteger(m.revision) || m.revision < 0) return;
+    if (!id(m.instance)) return;
+    // Control requests carry no audio revision: they act on the instance, not on retained audio.
+    if (m.kind === "control" && id(m.requestID) && action(m.action)) return m;
+    if (!Number.isSafeInteger(m.revision) || m.revision < 0) return;
     if (m.kind === "status" && id(m.challenge) && typeof m.paused === "boolean") return m;
     if (m.kind === "repeat" && id(m.requestID)) return m;
   } catch {}
@@ -34,12 +42,21 @@ export function createRepeatControl(options: {
   now?: () => number;
   status: () => AudioStatus | undefined;
   isPaused: () => boolean;
+  /** Applies a validated control action to the instance state; failures stay inside the host hook. */
+  control?: (action: ControlAction) => void | Promise<void>;
   repeat: (sessionID: string, revision: number, expires: number) => Promise<void>;
   publish: (command: string) => Promise<void>;
 }) {
   const instance = options.instance ?? randomUUID(), now = options.now ?? Date.now;
   const consumed = new Map<string, number>();
   let disposed = false, publishing = false;
+  /** One bounded history shared by every request kind: expired entries are purged, the cap is 64. */
+  const consume = (requestID: string, expires: number, time: number): boolean => {
+    for (const [key, expiry] of consumed) if (expiry <= time) consumed.delete(key);
+    if (consumed.has(requestID) || consumed.size >= 64) return false;
+    consumed.set(requestID, expires);
+    return true;
+  };
   return {
     instance,
     async handle(command: unknown): Promise<boolean> {
@@ -57,14 +74,16 @@ export function createRepeatControl(options: {
               paused: options.isPaused(), expires: m.expires }));
           } finally { publishing = false; }
         } else if (m.kind === "repeat" && m.instance === instance) {
-          for (const [key, expiry] of consumed) if (expiry <= time) consumed.delete(key);
-          if (consumed.has(m.requestID!) || consumed.size >= 64) return true;
-          consumed.set(m.requestID!, m.expires); // Paused/stale requests are consumed, never deferred.
+          if (!consume(m.requestID!, m.expires, time)) return true; // Paused/stale requests are consumed, never deferred.
           const status = options.status();
           if (!options.isPaused() && status?.sessionID === m.sessionID && status.revision === m.revision)
             await options.repeat(m.sessionID, m.revision!, m.expires);
+        } else if (m.kind === "control" && m.instance === instance) {
+          // The request is consumed before it runs, so a failing handler is never retried by a replay.
+          if (!consume(m.requestID!, m.expires, time)) return true;
+          await options.control?.(m.action!);
         }
-      } catch { /* Transport, pause-reader and playback failures stay inside the host hook. */ }
+      } catch { /* Transport, control-handler and playback failures stay inside the host hook. */ }
       return true;
     },
     dispose() { disposed = true; consumed.clear(); },

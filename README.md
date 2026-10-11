@@ -28,7 +28,6 @@ no restart, even while OpenCode is running.
 | `open-vox uninstall` | Remove both (settings and downloaded voices are kept) |
 | `open-vox setup kokoro\|piper` | Download a local neural voice engine |
 | `open-vox doctor` / `status` | Check the installation / show current settings |
-| `open-vox pause` / `resume` / `toggle` | Stop or resume narration |
 | `open-vox voices` | List the voices (`*` marks the current ones) |
 | `open-vox voice <id>` | Change the voice, e.g. `voice em_alex`, `voice bm_george` |
 | `open-vox speed <0.5-2>` | Speaking speed |
@@ -39,18 +38,26 @@ no restart, even while OpenCode is running.
 Defaults: Spanish `em_alex`, English `af_heart`. Voices whose id starts with `b`
 (for example `bm_george`) are British and use British phonemes automatically.
 
+Pause is no longer a terminal command. `open-vox pause`, `resume` and `toggle` were
+removed and now fail as unknown commands; use the **Pause** button in the sidebar.
+An old `paused` entry in `config.json` is ignored and dropped on the next write.
+
 ## Sidebar block
 
 `open-vox install` adds a small **open-vox** block to the OpenCode sidebar with
 three buttons:
 
-- **Pause / Resume**: stops the current narration and mutes new ones.
+- **Pause / Resume**: stops the current narration, clears the queue and mutes new
+  ones for **this OpenCode instance only**. The state lives in memory (it resets
+  when OpenCode restarts) and the button shows the state the plugin confirmed, so
+  it is disabled until the plugin has answered.
 - **Voice**: opens a list of voices; picking one changes the voice for that
   language immediately.
 - **Repeat**: restarts the last successfully generated audio from the beginning,
   using the same WAV bytes without synthesizing again. Later voice, speed or engine
   changes affect new narration, not Repeat. It is disabled while paused, without
   audio for the displayed session, or when instance discovery is missing/ambiguous.
+  Pause stays usable in those last two cases, as long as the plugin answered.
 
 Each server plugin instance retains only one last audio, owned by its session.
 Switching sessions or inactivity keeps it; another session cannot replay it, and
@@ -62,19 +69,20 @@ Deleting the owner session or disposing the plugin
 stops playback and removes owned audio after player handles close. Resume does
 not replay a request received while paused.
 
-Repeat uses correlated, metadata-only `tui.command.execute` events sent through
-the attached SDK client's `tui.publish`. Instance nonce, session, audio revision,
-request identity and expiry guard replay on the server; the nonce is routing
-metadata, not an authentication secret. Other attached clients ignore unmatched
-challenges. No transient commands are written into shared settings.
+Repeat and Pause use correlated, metadata-only `tui.command.execute` events sent
+through the attached SDK client's `tui.publish`. Instance nonce, session, request
+identity and expiry guard replay on the server (Repeat also checks the audio
+revision; Pause sends an explicit `pause` or `resume` action, never a toggle); the
+nonce is routing metadata, not an authentication secret. Other attached clients
+ignore unmatched challenges. No transient commands are written into shared settings.
 
 Audio is held under the isolated temporary `open-vox-audio-v1` namespace, not
 alongside models/settings. Dead-owner cleanup only recognizes its own directory
 format and skips live/reused PIDs, unknown access state and symlinks/junctions.
 Cached audio is local sensitive content, not an encrypted archive or history.
 
-The block and the CLI share the same settings file, so a change in one shows up
-in the other within a second. The block is a separate TUI plugin
+For the voice, the block and the CLI share the same settings file, so a change in
+one shows up in the other within a second. The block is a separate TUI plugin
 (`tui/open-vox.tsx`) that `install` copies into `~/.config/opencode/tui-plugins`
 and registers in `tui.json`; existing entries are preserved.
 
@@ -95,7 +103,8 @@ and registers in `tui.json`; existing entries are preserved.
      (`es_MX-claude-high`, `en_US-lessac-high`).
    - Windows SAPI voices as the last resort.
 5. `src/speech-sink.ts` queues messages serially. A new user turn, a session
-   error, or pausing stops the current speech.
+   error, or pausing stops the current speech. The pause flag is held in memory
+   by each plugin instance and changes only through the control channel.
 6. `src/player.ts` + `scripts/player.ps1` play the cached audio through one
    persistent `powershell.exe -STA` host (WPF `MediaPlayer`) per plugin
    instance, started on the first narration and stopped when idle. If the host
@@ -156,7 +165,9 @@ $env:OV_PLAYER_SMOKE = "1"; bun test test/player.test.ts
   sidebar session-binding fix and a user-controlled restart, the user confirmed
   Repeat enabled and replayed a newly narrated answer in the live session.
   This does not qualify every Windows engine, session switching/deletion, player
-  handle cleanup or host-disposal timing. The normal pause watcher polls every 250 ms.
+   handle cleanup or host-disposal timing. Per-instance Pause (control channel and
+   confirmed-state display) has deterministic fake-transport tests only; its live
+   sidebar behavior is not yet verified.
 - Event freshness is bounded by observation: a delayed historical user update
   could in theory look fresh. Real-host traces are in
   [`odd/tasks/bootstrap.md`](odd/tasks/bootstrap.md).
