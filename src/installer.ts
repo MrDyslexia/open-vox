@@ -83,7 +83,9 @@ export function install(options: InstallOptions & { tui: boolean }): InstallResu
   if (!options.tui) return result;
 
   const configUrl = fileUrl(win32.join(repoRoot, "src", "config.ts"));
-  const tuiSource = options.tuiTemplate.split('"../src/config"').join(`"${configUrl}"`);
+  const repeatUrl = fileUrl(win32.join(repoRoot, "src", "repeat-ui.ts"));
+  const tuiSource = options.tuiTemplate.split('"../src/config"').join(`"${configUrl}"`)
+    .split('"../src/repeat-ui"').join(`"${repeatUrl}"`);
   try {
     const nextJson = updateTuiConfig(fs.read(p.tuiJson), p.tuiFile, true);
     // Validate the config before touching anything else, so a failure leaves no half-installed TUI.

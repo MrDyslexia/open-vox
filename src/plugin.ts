@@ -6,6 +6,8 @@ import { defaultKokoroEngine } from "./kokoro-engine";
 import { defaultPiperEngine } from "./piper-engine";
 import { createConfigReader, readConfig, type ConfigReader } from "./config";
 import { createSpeechSink, sapiEngine, type Engine, type SpeechSink } from "./speech-sink";
+import { AudioCache, type AudioStore } from "./audio-cache";
+import { createRepeatControl } from "./repeat-control";
 
 type Result<T> = { data?: T; error?: unknown };
 export type Client = {
@@ -102,11 +104,18 @@ export function createCoordinator(client: Client, directory: string, sink: Sink 
 }
 
 
-export function createOpenVox(client: Client, directory: string, sink: SpeechSink, isPaused?: () => boolean): Hooks {
+export function createOpenVox(client: Client, directory: string, sink: SpeechSink, isPaused?: () => boolean,
+  controlOptions?: { publish: (command: string) => Promise<void>; instance?: string }): Hooks {
   const coordinator = createCoordinator(client, directory, sink);
+  const control = controlOptions && createRepeatControl({ ...controlOptions,
+    status: () => sink.status?.(), isPaused: () => isPaused?.() ?? false,
+    repeat: async (sessionID, revision, expires) => { await sink.repeat?.(sessionID, revision, expires); } });
   const seenUsers = new Set<string>();
   let wasPaused = false;
+  let disposed = false;
   const event: NonNullable<Hooks["event"]> = async (input) => {
+    if (disposed) return;
+    if (input.event.type === "tui.command.execute" && await control?.handle(input.event.properties.command)) return;
     try {
       // Pausing cuts the current narration once; resuming needs no action.
       const paused = isPaused?.() ?? false;
@@ -116,6 +125,7 @@ export function createOpenVox(client: Client, directory: string, sink: SpeechSin
       // The host repeats updates for the same user message; those must not cancel speech.
       const { event } = input;
       if (event.type === "session.error") sink.stop();
+      else if (event.type === "session.deleted") sink.removeSession?.(event.properties.info.id);
       else if (event.type === "message.updated" && event.properties.info?.role === "user") {
         const id = event.properties.info.id;
         if (!seenUsers.has(id)) {
@@ -127,7 +137,11 @@ export function createOpenVox(client: Client, directory: string, sink: SpeechSin
     } catch {}
     await coordinator.event(input);
   };
-  return { event };
+  return { event, dispose: async () => {
+    if (disposed) return;
+    disposed = true; control?.dispose(); coordinator.dispose(); seenUsers.clear();
+    try { sink.stop(); } finally { await sink.dispose?.(); }
+  } };
 }
 
 /** Skips new narrations while paused; stop() always passes through. */
@@ -137,6 +151,10 @@ export function withPause(sink: SpeechSink, isPaused: () => boolean): SpeechSink
     await sink(selection);
   }) as SpeechSink;
   wrapped.stop = () => sink.stop();
+  wrapped.status = () => sink.status?.();
+  wrapped.repeat = async (sessionID, revision, expires) => { if (!isPaused()) await sink.repeat?.(sessionID, revision, expires); };
+  wrapped.removeSession = (sessionID) => sink.removeSession?.(sessionID);
+  wrapped.dispose = async () => { await sink.dispose?.(); };
   return wrapped;
 }
 
@@ -193,11 +211,18 @@ export function liveEngine(
   onChoice?: (name: string) => void,
 ): Engine {
   let last = "";
-  return (text, language) => {
+  const select = () => {
     const choice = chooseEngine(wanted(), true, factories);
     if (choice.name !== last) { last = choice.name; onChoice?.(choice.name); }
-    return (choice.engine ?? fallback)(text, language);
+    return choice.engine ?? fallback;
   };
+  const engine: Engine = (text, language) => select()(text, language);
+  engine.synthesize = (text, language, wav) => {
+    const selected = select();
+    if (!selected.synthesize) throw new Error("Selected engine cannot generate audio");
+    return selected.synthesize(text, language, wav);
+  };
+  return engine;
 }
 
 const memo = <T>(make: () => T | undefined) => {
@@ -211,6 +236,7 @@ export function createLiveSink(
   config: ConfigReader,
   log: (message: string) => void,
   enabled = envValue(env, "DISABLED") !== "1" && process.platform === "win32",
+  audio?: { cache: AudioStore; isPaused: () => boolean },
 ): SpeechSink {
   const factories: Factories = {
     kokoro: memo(() => defaultKokoroEngine(env, config)),
@@ -219,6 +245,7 @@ export function createLiveSink(
   const wanted = () => (envValue(env, "ENGINE") ?? config().engine).toLowerCase();
   return createSpeechSink({
     enabled,
+    ...audio,
     engine: liveEngine(wanted, factories, sapiEngine(), (name) => log(`engine=${name}`)),
     onError: (error) => log(`speech error: ${error instanceof Error ? error.message : String(error)}`),
   });
@@ -234,17 +261,26 @@ export async function speakOnce(text: string, env: Record<string, string | undef
 
 export const OpenVoxPlugin: Plugin = async ({ client, directory }) => {
   const log = debugLog(envValue(process.env, "LOG"));
-  const enabled = envValue(process.env, "DISABLED") !== "1" && process.platform === "win32";
+  let enabled = envValue(process.env, "DISABLED") !== "1" && process.platform === "win32";
   const config = createConfigReader();
-  const sink = createLiveSink(process.env, config, log, enabled);
+  const isPaused = () => { config.invalidate(); return config().paused; };
+  let cache: AudioCache | undefined;
+  if (enabled) {
+    try { cache = new AudioCache(); }
+    catch { enabled = false; log("audio cache unavailable; narration disabled"); }
+  }
+  const sink = createLiveSink(process.env, config, log, enabled, cache ? { cache, isPaused } : undefined);
   log(`plugin ready enabled=${enabled}`);
-  const isPaused = () => config().paused;
-  watchPause(sink, isPaused);
+  const stopWatcher = watchPause(sink, isPaused);
   const logged = (async (selection: Selection) => {
     log(`selection session=${selection.sessionID} message=${selection.messageID} chars=${selection.text.length} paused=${isPaused()}`);
     await sink(selection);
   }) as SpeechSink;
   logged.stop = () => sink.stop();
+  logged.repeat = sink.repeat;
+  logged.status = sink.status;
+  logged.removeSession = sink.removeSession;
+  logged.dispose = sink.dispose;
   const traced: Client = envValue(process.env, "LOG") ? {
     session: {
       get: async (input) => {
@@ -257,5 +293,13 @@ export const OpenVoxPlugin: Plugin = async ({ client, directory }) => {
       },
     },
   } : (client as unknown as Client);
-  return createOpenVox(traced, directory, withPause(logged, isPaused), isPaused);
+  const hooks = createOpenVox(traced, directory, withPause(logged, isPaused), isPaused, {
+    instance: cache?.instance,
+    publish: async (command) => {
+      const result = await client.tui.publish({ query: { directory },
+        body: { type: "tui.command.execute", properties: { command } }, signal: AbortSignal.timeout(2000) });
+      if (result.error || !result.data) throw new Error("Repeat status transport failed");
+    },
+  });
+  return { ...hooks, dispose: async () => { stopWatcher(); await hooks.dispose?.(); } };
 };

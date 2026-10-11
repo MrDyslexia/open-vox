@@ -21,6 +21,12 @@ function harness() {
 }
 
 describe("kokoro engine", () => {
+  test("artifact synthesis writes the caller-owned WAV without invoking the player", async () => {
+    const h = harness();
+    await h.engine.synthesize!("Exact audio", "es", "C:\\owned\\candidate.wav").exited;
+    expect(h.calls).toHaveLength(1);
+    expect(h.calls[0]!.args).toContain("C:\\owned\\candidate.wav");
+  });
   test("synthesizes Spanish with the Spanish voice and es language", async () => {
     const h = harness();
     await h.engine("Hola", "es").exited;

@@ -55,7 +55,7 @@ export type WavConfig = {
 
 /** Synthesizes a WAV (text on stdin), then plays it. Killable at either step. */
 export function wavEngine(config: WavConfig): Engine {
-  return (text, language) => {
+  const engine: Engine = (text, language) => {
     const wav = win32.join(config.tmpDir, `open-vox-${process.pid}-${Date.now()}-${counter++}.wav`);
     let killed = false;
     let active: SpeechProcess | undefined;
@@ -75,6 +75,11 @@ export function wavEngine(config: WavConfig): Engine {
     })();
     return { exited, kill: () => { killed = true; try { active?.kill(); } catch {} } };
   };
+  engine.synthesize = (text, language, wav) => {
+    const command = config.commandFor(language, wav);
+    return config.run(command.cmd, command.args, text);
+  };
+  return engine;
 }
 
 export function piperEngine(config: PiperConfig): Engine {

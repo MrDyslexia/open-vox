@@ -26,6 +26,15 @@ function harness() {
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("piper engine", () => {
+  test("artifact synthesis uses the caller-owned WAV without playback or unlink", async () => {
+    const h = harness();
+    const proc = h.engine.synthesize!("Exact text", "en", "C:\\owned\\candidate.wav");
+    h.calls[0]!.proc.finish();
+    expect(await proc.exited).toBe(0);
+    expect(h.calls[0]!.args).toContain("C:\\owned\\candidate.wav");
+    expect(h.calls).toHaveLength(1);
+    expect(h.unlinked).toEqual([]);
+  });
   test("synthesizes with the model for the language, then plays the wav", async () => {
     const h = harness();
     const proc = h.engine("Hola mundo", "es");

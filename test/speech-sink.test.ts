@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createSpeechSink, type SpeechProcess, type Spawn } from "../src/speech-sink";
+import { createSpeechSink, sapiEngine, playWav, type SpeechProcess, type Spawn } from "../src/speech-sink";
 
 type Fake = SpeechProcess & { stdin: string; killed: boolean; finish(code?: number): void; fail(error: Error): void };
 
@@ -135,5 +135,132 @@ describe("speech sink", () => {
     const sink = createSpeechSink({ spawn: h.spawn, enabled: false });
     await sink(item("m1", "Muted message that should not play."));
     expect(h.procs).toHaveLength(0);
+  });
+});
+
+describe("exact-audio replay", () => {
+  test("SAPI generates a WAV with escaped owned path and player does not invoke Speak", async () => {
+    const calls: { args: string[]; text: string }[] = [];
+    const spawn: Spawn = (args, text) => { calls.push({ args, text }); return { exited: Promise.resolve(0), kill() {} }; };
+    await sapiEngine(spawn).synthesize!("stdin only", "en", "C:\\o'brien\\owned.wav").exited;
+    await playWav("C:\\o'brien\\owned.wav", spawn).exited;
+    expect(calls[0]!.args.join(" ")).toContain("SetOutputToWaveFile('C:\\o''brien\\owned.wav')");
+    expect(calls[0]!.text).toBe("stdin only");
+    expect(calls[1]!.args.join(" ")).toContain("PlaySync()");
+    expect(calls[1]!.args.join(" ")).not.toContain("Speak");
+  });
+  function replayHarness() {
+    const h = harness();
+    let last: { file: string; sessionID: string; revision: number } | undefined;
+    let paused = false;
+    let now = 1000;
+    const played: string[] = [];
+    const generated: string[] = [];
+    const removed: string[] = [];
+    let count = 0;
+    const cache = {
+      candidate: () => `wav-${++count}`,
+      current: () => last,
+      promote(file: string, sessionID: string) { last = { file, sessionID, revision: count }; return true; },
+      discard: (file: string) => { removed.push(file); },
+      hold: (_file: string) => () => {},
+      forget(sessionID: string) { if (last?.sessionID === sessionID) last = undefined; },
+      dispose() { last = undefined; },
+    };
+    const engine = Object.assign(() => { throw new Error("must generate an artifact"); }, {
+      synthesize(text: string, _language: string, file: string) { generated.push(file); return h.spawn([], text); },
+      play(file: string) { played.push(file); return h.spawn([], "player"); },
+    });
+    const sink = createSpeechSink({ engine, cache, player: engine.play, isPaused: () => paused, now: () => now } as any) as any;
+    return { ...h, sink, cache, played, generated, removed, pause: (value: boolean) => { paused = value; }, time: (value: number) => { now = value; } };
+  }
+
+  test("replays the exact retained artifact without synthesizing, only for its session", async () => {
+    const h = replayHarness();
+    const first = h.sink(item("m", "Original voice and speed."));
+    await tick();
+    h.procs[0]!.finish();
+    await tick();
+    h.procs[1]!.finish();
+    await first;
+    await h.sink.repeat("other", 1);
+    const repeat = h.sink.repeat("s", 1);
+    await tick();
+    expect(h.generated).toEqual(["wav-1"]);
+    expect(h.played).toEqual(["wav-1", "wav-1"]);
+    h.procs[2]!.finish();
+    await repeat;
+    await h.sink.dispose();
+  });
+
+  test("failed or cancelled generation retains prior audio; pause rejects queued replay", async () => {
+    const h = replayHarness();
+    h.cache.promote("old", "s");
+    const first = h.sink(item("m", "New synthesis fails."));
+    await tick();
+    h.procs[0]!.finish(2);
+    await first;
+    expect(h.cache.current()?.file).toBe("old");
+    const cancelled = h.sink(item("n", "Cancelled synthesis."));
+    await tick();
+    h.sink.stop();
+    await cancelled;
+    expect(h.cache.current()?.file).toBe("old");
+    h.pause(true);
+    await h.sink.repeat("s", 0);
+    expect(h.played).toEqual([]);
+    await h.sink.dispose();
+  });
+
+  test("repeat stops active playback and serializes restart; deletion and disposal retain no audio", async () => {
+    const h = replayHarness();
+    h.cache.promote("old", "s");
+    const first = h.sink.repeat("s", 0);
+    await tick();
+    const restart = h.sink.repeat("s", 0);
+    await tick();
+    expect(h.procs[0]!.killed).toBe(true);
+    expect(h.played).toEqual(["old", "old"]);
+    h.sink.removeSession("s");
+    await Promise.all([first, restart]);
+    expect(h.cache.current()).toBeUndefined();
+    await h.sink.dispose();
+    await h.sink.repeat("s", 0);
+    expect(h.played).toHaveLength(2);
+  });
+
+  test("stale generation after deletion cannot resurrect audio, and pause before restart consumes queued replay", async () => {
+    const h = replayHarness();
+    const pending = h.sink(item("m", "Deleted while generating."));
+    await tick();
+    h.sink.removeSession("s");
+    await pending;
+    expect(h.cache.current()).toBeUndefined();
+    h.cache.promote("retained", "s");
+    const first = h.sink.repeat("s", 1);
+    await tick();
+    const next = h.sink.repeat("s", 1);
+    h.pause(true);
+    await Promise.all([first, next]);
+    h.pause(false);
+    await tick();
+    expect(h.played).toEqual(["retained"]);
+    expect(h.cache.current()?.file).toBe("retained");
+    await h.sink.dispose();
+  });
+
+  test("a replay expiring while the previous player closes is consumed without late playback", async () => {
+    const h = replayHarness();
+    h.cache.promote("old", "s");
+    const first = h.sink.repeat("s", 0);
+    await tick();
+    h.procs[0]!.kill = () => { h.procs[0]!.killed = true; }; // Closing is controlled separately.
+    const pending = h.sink.repeat("s", 0, 1500);
+    h.time(2000);
+    h.procs[0]!.finish(1);
+    await Promise.all([first, pending]);
+    expect(h.played).toEqual(["old"]);
+    expect(h.cache.current()?.file).toBe("old");
+    await h.sink.dispose();
   });
 });

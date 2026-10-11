@@ -1,0 +1,108 @@
+# Repeat the last exact audio safely
+
+Status: source implementation complete; the user confirmed live Repeat enable/replay after a session-binding fix and restart. Temporary diagnostics are removed from source and the explicitly authorized installed TUI. R1 remains open for broader Windows/lifecycle qualification and parent delivery. This preparation did not run actual TTS, installation, restart, settings mutation, staging, commit, push, native review, or child workers.
+
+## Objective and problem
+
+Repeat restarts the last successfully synthesized audio from its beginning without re-synthesis. Previously SAPI spoke directly, Piper/Kokoro deleted WAVs after playback, and sink jobs discarded session identity. The implementation separates artifact generation from playback while preserving existing callable engine compatibility and final-answer eligibility.
+
+## Authorization and routing
+
+- Parent authorized exactly: `odd/tasks/repeat-last-audio.md`, `src/speech-sink.ts`, `src/piper-engine.ts`, `src/kokoro-engine.ts`, `src/plugin.ts`, `src/audio-cache.ts`, `src/repeat-control.ts`, `src/repeat-ui.ts`, `tui/open-vox.tsx`, `src/installer.ts`, `test/speech-sink.test.ts`, `test/piper-engine.test.ts`, `test/kokoro-engine.test.ts`, `test/wiring.test.ts`, `test/installer.test.ts`, `test/audio-cache.test.ts`, `test/repeat-control.test.ts`, `test/repeat-ui.test.ts`, and `README.md`.
+- `route=delegated`: preparation required source qualification before writing; engine/sink/lifecycle/control/TUI/installer and tests required coordinated multifile changes. One writer, no children. Source/tests/docs were authored with apply_patch; artifact language is English.
+- `skills_resolution=paths-injected`: exact supplied `work-unit-commits/SKILL.md`, `cognitive-doc-design/SKILL.md`, and `context7/SKILL.md` were read before work. CodeGraph had already returned no index; no indexing or memory search occurred.
+- Pre-existing dirty TUI equal-width/centered buttons, padding, bold labels, spacing, wrapped title/voice labels, and Voice mouse-up behavior were preserved. Untracked `.atl/` remained untouched. Package/lockfile, CLI/setup, speech text, selector, model files and user settings remain unchanged.
+- One last artifact per plugin instance, not per-session history or cross-restart playback. Nonce correlation is logical routing/ownership, not a confidentiality or authentication privilege.
+- Engram project: `agentvoz`; full recovery topic: `odd/repeat-last-audio/tasks`; repository-relative locator: `odd/tasks/repeat-last-audio.md`. Both copies must be read back; writes are not atomic.
+
+## B1 resolution and qualified carrier
+
+The earlier stop at B1 was a bounded failure to establish identity from public URL/PID metadata, not an impossibility claim. Parent approved the independently source-qualified event solution without expanding product scope. Context7 results were insufficiently specific; pinned release source and installed declarations establish the carrier.
+
+- `v1.18.35/packages/schema/src/tui-event.ts`: CommandExecute permits arbitrary strings. Installed root/v2 SDK `Tui.publish` permits a `tui.command.execute` event body; v2 still requires `body`, not flattened type/properties.
+- `packages/opencode/src/server/routes/instance/httpapi/handlers/tui.ts`: publish preserves the command and calls events.publish. Do not use executeCommand: its legacy alias conversion drops unknown command names.
+- `packages/opencode/src/plugin/index.ts`: plugin events are filtered by exact ctx.directory; disposal finalizers invoke hook.dispose. `packages/tui/src/context/event.ts` and installed plugin `dist/tui.d.ts:407-411,492-493` support event subscription.
+- `packages/opencode/src/cli/cmd/tui.ts` and `packages/tui/src/context/sdk.tsx`: ordinary TUI SDK requests use its concrete Worker RPC transport and corresponding event stream. Session identity comes from the second sidebar_content renderer argument's session_id, confirmed by installed declarations, OpenTUI renderer source, and `packages/tui/src/routes/session/sidebar.tsx`.
+- Source base: `https://raw.githubusercontent.com/anomalyco/opencode/v1.18.35/`. This establishes code paths, not observed live transport/disposal timing. No protected-field access, URL/PID discovery, file IPC, or settings handshake is used.
+
+## Implemented design and ownership
+
+| Boundary | Behavior |
+| --- | --- |
+| Engines | Optional synthesis-only capability writes the caller-owned WAV. SAPI uses SetOutputToWaveFile and disposes the synthesizer before playback; Piper/Kokoro reuse the shared WAV command builder. Legacy callable engine behavior remains compatible with CLI/tests. |
+| Cache | Isolated temporary open-vox-audio-v1 namespace, unpredictable instance nonce, exclusive candidate/owner-file creation, validated bounded PCM WAV, and one committed session-owned artifact. Memory promotion occurs only after successful, closed, current generation; invalid/failed/cancelled/stale candidates leave prior audio intact. Playback failure does not undo generation. |
+| Playback | Shared SoundPlayer starts the retained WAV from the beginning without voice/language/engine selection. One active process; Repeat stops it and serializes a latest restart after exit. Bounded narration queue and coalesced Repeat prevent overlapping playback. |
+| Pause and sessions | Fresh server pause check at request admission and queued-job execution. Stop retains committed audio. Switch/inactivity retain it; another session cannot repeat it. Owner deletion invalidates pending generation and retires owned audio; unrelated deletion retains it. |
+| Handles and disposal | Candidate and player holds defer unlink until exited. Idempotent hook disposal invalidates coordinator/control/queue work, stops playback, removes owned artifacts after release, and closes the pause watcher. Locked/uncertain artifacts remain owned for later safe cleanup. |
+| Unexpected exit | Only recognized instance directories/markers/files are considered; no recursive deletion. Only ESRCH confirms owner death; live/reused PIDs, EPERM and unknown states are skipped. Ancestor junctions/symlinks and linked files are rejected. Owner markers are removed last. TUI input never supplies deletion paths. |
+| Event control | TUI subscribes first, challenges through its actual attached tui.publish, then accepts only correlated metadata status. Unknown/expired/conflicting replies disable Repeat. Replay carries instance nonce, session, revision, expiry and request ID through the same client; server guards these and consumes paused/stale requests instead of deferring them. |
+| Bounds | Command length <=2048 characters; IDs <=128; expiry <=2 seconds; at most 64 consumed request IDs within the expiry window; one status publication per server and one publication per UI in flight. A never-settling transport cannot accumulate refresh requests; the UI stays disabled. UI uses a 250 ms reply-settle window and refreshes expiring status. Queued replay rechecks expiry after a previous player closes. |
+| TUI and installer | Pure disabled-handler guards preserve Voice mouse-up behavior and existing UI polish. Current session is supplied by slot props and checked against route. Installer rewrites the new Repeat helper import; no installer command ran. |
+
+SAPI API reference: https://learn.microsoft.com/en-us/dotnet/api/system.speech.synthesis.speechsynthesizer.setoutputtowavefile?view=netframework-4.8.1 . No actual synthesis/playback qualification is claimed.
+
+## Stable tasks: one coherent work unit
+
+- [ ] **R1 — Deliver exact-audio Repeat with ownership, control, tests, and documentation.** Local implementation and one user-confirmed live enable/replay scenario are verified; broader qualification and parent delivery remain open.
+  - [x] **R1.1 — Qualify boundary contracts and observe RED.** Pinned carrier/session/disposal source checked; parent approved correlated event routing. Initial focused RED observed before source behavior edits.
+  - [x] **R1.2 — Separate synthesis from playback across all engines.** SAPI/Piper/Kokoro synthesis-only paths and unchanged callable compatibility verified with fake runners; player consumes only a WAV path.
+  - [x] **R1.3 — Implement single-artifact ownership and successful promotion.** Real scoped filesystem tests cover byte retention, replacement/deferred release, invalid candidates, narrow dead cleanup, live/unknown owners, external paths and junction rejection. Player handles are simulated; live audio locking remains below.
+  - [x] **R1.4 — Wire lifecycle and pause guards.** Hook-level fake integration covers correlated replies, deletion, idempotent disposal and late events. Sink tests cover cancellation, stale generation, pause-before-restart, and expiry while waiting for player close.
+  - [x] **R1.5 — Add targeted control, TUI and installer wiring.** Pure handshake/conflict/session/pause guards and actual installed v2 SDK request serialization run against fake transport; TSX transpiles. Renderer/live behavior is not inferred from these checks.
+  - [ ] **R1.6 — Complete runtime qualification.** User-confirmed live session handshake, enable and replay are recorded below. All-engine Windows generation/player handles, session switching/deletion and disposal timing remain unexercised; the single happy path does not close this task. Additional runtime work requires separate authorization.
+  - [ ] **R1.7 — Parent delivery and final closure.** README/task updated and full mirror read back at handoff. The user authorized whole-project saving, commit and public publication; staging/commit/create/push/review remain parent-owned and prohibited for this writer. No commit ID, review outcome or delivery receipt exists yet.
+
+## Acceptance evidence and remaining gaps
+
+- Exact replay: real WAV bytes read by a fake player are identical on repeat; synthesis count does not increase. Wrong session, stale revision, duplicate/wrong-instance/expired/malformed requests are rejected. Two instances sharing session IDs remain nonce-targeted; request-history capacity is tested.
+- Replacement: valid generated audio promotes before playback; invalid/failed/cancelled/stale candidates preserve prior audio. Tests verify held old files survive promotion/disposal until release; owner deletion cannot resurrect stale in-flight generation.
+- Retention: pause and session mismatch retain audio; returning to the owner session can repeat. No synthesis or file path/text is sent through the event carrier. Disabled handlers are functional tests, not raw source-string assertions.
+- Cleanup: isolated real filesystem tests verify owned-marker recognition, external-path refusal and junction rejection; mocked ESRCH/EPERM/unknown outcomes verify conservative liveness. They do not prove crash cleanup against actual running synthesis/player children.
+- Runtime scope: user-confirmed live enable/replay and a correlated handshake were observed after restart; this is not all-engine or lifecycle acceptance. Engine-specific Windows generation, session switching/deletion, actual player handle cleanup and host-disposal timing remain unqualified. Existing TUI ts-nocheck and compiler exclusion remain; TSX transpilation is syntax-only. Existing pause polling is 250 ms.
+
+## Verification evidence
+
+All commands ran foreground from the repository. No mutating formatter or dependency change followed verification. Tests use fake processes/SDK transport and scoped temp directories, never actual audio or user settings.
+
+| Phase / command | Exit and observed result |
+| --- | --- |
+| Initial RED: focused command below | Exit 1: 53 pass, 6 fail, 3 module errors. Three behavioral failures showed missing synthesis/repeat behavior; three errors were not-yet-created cache/control/UI source modules. 118 assertions across eight files. |
+| First GREEN: focused command | Exit 0: 64 pass, 0 fail, 172 assertions across eight files. |
+| Additional RED: `bun test ./test/repeat-ui.test.ts` | Exit 1: 4 pass, 1 fail, 20 assertions. A never-settling fake transport accumulated 100 publications instead of one. Added the in-flight UI guard only after observing this failure. |
+| Expanded checks | Exit 0: focused 70 then 74 pass; full suite 198 pass before the final queued-expiry regression. Compiler stayed clean. |
+| Pre-session-fix focused command below | Exit 0: 76 pass, 0 fail, 211 assertions across eight files. Includes functional UI guards, installed-SDK fake transport and Bun TSX transpilation. |
+| Pre-session-fix `bun test` | Exit 0: 200 pass, 0 fail, 404 assertions across 14 files, preserving the 177-test baseline and adding 23 tests. |
+| Final `node ./node_modules/typescript/bin/tsc --noEmit` | Exit 0, no diagnostics. This does not typecheck the TUI. |
+| `git diff --check` | Exit 0; LF/CRLF warnings only. Untracked files additionally receive full structural readback; git diff alone does not check their bytes. |
+
+Focused command: `bun test ./test/speech-sink.test.ts ./test/piper-engine.test.ts ./test/kokoro-engine.test.ts ./test/wiring.test.ts ./test/installer.test.ts ./test/audio-cache.test.ts ./test/repeat-control.test.ts ./test/repeat-ui.test.ts`.
+
+Historical baseline-only follow-up: before B1 resolution the same focused command ran 53 tests because new test paths did not exist; full suite was 177 pass. That was not Repeat GREEN. Initial B1 investigation and earlier outcomes remain in Engram document revisions rather than being presented as current blockers.
+
+## Size, rollback, persistence and next step
+
+- Original forecast: 650-950 authored additions plus deletions. Earlier complete candidate measured 1083 lines before the session-binding regression and final documentation. Final handoff recount includes untracked feature files and identifies pre-existing TUI/README hunks separately. The full candidate exceeds the forecast; no tests, comments or readability were removed to fit 400.
+- `delivery_strategy=ask-on-risk`; 400 is advisory, not an acceptance gate. One coherent unit remains; parent owns any later delivery-size decision. No branch/staging/commit/push/review mutation occurred.
+- Rollback: remove only this feature's new modules/tests and changed feature hunks in sink/engine/plugin/TUI/installer/README; preserve the prior dirty TUI polish, `.atl/`, settings/models and unrelated work. Shared wavEngine supplies Kokoro capability without a gratuitous edit to src/kokoro-engine.ts.
+- Progress: 5/7 subtasks locally complete; R1.6 live qualification and R1.7 parent delivery remain open. Full document mirror topic and repository-relative locator are above; read both copies before resuming.
+- Next: parent inspect the final local candidate and mirrored task, then own the user-requested commit/push and any review. Broader runtime qualification remains a separately authorized follow-up; do not install, restart, synthesize, commit, push or invoke native review from this preparation.
+
+## Live session-binding correction — 2026-10-11
+
+- Received actual user-observed toast after restart: `route=false pub=idle correlated=false rejected=false revision=unknown localPaused=false serverPaused=unknown conflict=unknown expired=unknown settled=unknown availability=false canRepeat=false`. The empty session getter prevented a hello publication; this observation does not establish cache absence or server transport failure.
+- Causal defect: the callback used `sidebar_content(props)` but the public renderer calls `(context, props)`. It read session_id from `{ theme }`, not the sidebar props, and passed undefined to Block. Corrected only the callback signature to `sidebar_content(_context, props)` in the checkout template and explicitly authorized installed copy. The route equality check, instance/session ownership, conflict, expiry, pause, and disabled-handler checks remain unchanged. Temporary diagnostics were subsequently removed after user confirmation.
+- Source evidence: installed `@opentui/core/plugins/types.d.ts:21,27-28` declares `(ctx, props)`; installed `@opentui/solid/index.js:1337,1407` splits slot props and calls `entry.renderer(registry().context, slotProps)`; Bun export `index.bun.js:1363,1433` has the same call. Pinned OpenTUI v0.4.5 `packages/solid/src/plugins/slot.tsx` confirms the same renderer contract. Pinned OpenCode v1.18.35 `packages/tui/src/plugin/slots.tsx` supplies `{ theme: api.theme }` as context; sidebar.tsx supplies session_id; adapters.tsx uses `get current()` and maps the session route to `{ name: "session", params: { sessionID } }`. No route-name or property synonym guessing was introduced.
+- Declaration qualification: checkout plugin is 1.18.35; the config-directory plugin package is actually 1.18.32, and its `dist/tui.d.ts:380-382,472-475` exposes the same sidebar and route fields. Config-directory OpenTUI Solid is 0.5.12. These disk versions do not prove which dependency instance the live host loaded; both inspected renderer contracts agree on context-first ordering.
+- Regression executes the actual TSX registration callback with the source-confirmed two-argument renderer call, using a JSX capture instead of mounting the host or reading settings. RED before the production edit: `bun test ./test/repeat-ui.test.ts`, exit 1, 5 pass/1 fail, 22 assertions; expected owner-session but received undefined. GREEN after edit: required focused three-file command, exit 0, 21 pass/0 fail, 61 assertions. Full suite: exit 0, 201 pass/0 fail, 406 assertions across 14 files. Compiler exit 0 (TUI excluded); diff check exit 0 with LF/CRLF warnings only. Both TSX copies passed Bun.Transpiler syntax checks and exact installer-transform equality in a file-free assertion command.
+- Allowed continuation edits: `tui/open-vox.tsx`, `test/repeat-ui.test.ts`, this task, and the installed `~/.config/opencode/tui-plugins/open-vox.tsx`. `src/repeat-ui.ts` was inspected but not changed. Existing UI polish and Voice mouse-up remain intact. No children, installer, host launch/restart, settings changes, actual audio, staging, commit, or review lifecycle occurred; unrelated dirty/untracked files were preserved.
+- Subsequent user-observed toast: `route=true pub=success correlated=true revision=zero`, unpaused and settled. This confirms a live session-bound handshake; revision=zero meant no retained audio for that session in that plugin instance, not handshake failure. Parent then narrated a new answer, and the user confirmed Repeat enabled and replayed correctly after restart. This evidence is one live happy path, not all-engine/session/deletion/disposal acceptance.
+- Final preparation removes only transient diagnostic snapshot/publication metadata and the one-shot diagnostic toast/timer from `src/repeat-ui.ts` and both TSX copies. Operational refresh, in-flight publication, correlation, settlement, ownership, expiry, pause and disabled-handler guards remain. The two-argument renderer fix and executable regression remain; installed imports stay absolute. No new live audio proof was attempted after removal.
+- Pause stops playback rather than resuming from a position; Resume unmutes future narration. Repeat starts retained audio from its beginning, and the cache is not persisted across plugin restarts. R1.6 and R1.7 remain open; the user requested saving, commit and push, but delivery belongs to the parent and no commit ID or push receipt exists yet.
+
+## Final candidate verification and delivery handoff
+
+- After diagnostic removal and source normalization, the exact eight-file focused command above ran once foreground: exit 0, 77 pass, 0 fail, 213 assertions. Final `bun test`: exit 0, 201 pass, 0 fail, 406 assertions across 14 files. Final compiler: exit 0, no diagnostics (TUI excluded). `git diff --check`: exit 0, LF/CRLF warnings only. No source edits followed these checks.
+- File-free Bun TSX checks passed for checkout and installed copies; exact installer import-transformed equality passed, diagnostic code was absent, and the two-argument slot fix plus regression were retained. No real audio, settings changes, installer/restart, dependency changes or formatter configuration occurred.
+- Publication handoff supersedes the earlier Repeat-only/destination-pending scope: the user authorized the whole Open-Vox project, including all pending project task documents and full current TUI polish, for a new public `MrDyslexia/open-vox` repository using the current authenticated GitHub session. Repository creation has not occurred; the intended URL is `https://github.com/MrDyslexia/open-vox`, not a publication receipt. Local `.atl/` is ignored and preserved on disk; Voice mouse-up behavior remains intact. This writer made no network/auth/credential probe or remote mutation.
+- History decision: the user explicitly chose to preserve and publish existing Git history, acknowledging that historical author email and personal/vault paths remain publicly visible. Current documentation uses neutral or repository-relative locators; history is not rewritten and Git identity/configuration is unchanged.
+- Parent owns staging, commit, push, delivery-size decision and review. Broad runtime qualification is still open independently of the user-confirmed happy path. Full Engram mirror uses `odd/repeat-last-audio/tasks` with locator `odd/tasks/repeat-last-audio.md`.

@@ -7,12 +7,13 @@
 import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import { For, createMemo, createSignal, onCleanup } from "solid-js"
 import { KOKORO_VOICES, readConfig, writeConfig } from "../src/config"
+import { createRepeatUi, buttonHandlers, publishAttached } from "../src/repeat-ui"
 
 const id = "open-vox"
 
 const label = (voiceId: string) => KOKORO_VOICES.find((v) => v.id === voiceId)?.label ?? voiceId
 
-function Block(props: { api: TuiPluginApi }) {
+function Block(props: { api: TuiPluginApi; sessionID: string }) {
   const theme = () => props.api.theme.current
   const [config, setConfig] = createSignal(readConfig())
   // The CLI and other sessions can change the shared settings, so keep the block in sync.
@@ -21,6 +22,21 @@ function Block(props: { api: TuiPluginApi }) {
 
   const paused = () => config().paused
   const toggle = () => setConfig(writeConfig({ paused: !paused() }))
+  const [canRepeat, setCanRepeat] = createSignal(false)
+  const session = () => {
+    const route = props.api.route.current
+    return route.name === "session" && route.params?.sessionID === props.sessionID ? props.sessionID : ""
+  }
+  const repeat = createRepeatUi({
+    subscribe: (receive) => props.api.event.on("tui.command.execute", (event) => receive(event.properties.command)),
+    publish: (command) => publishAttached(props.api.client, props.api.state.path.directory, command),
+    onChange: () => setCanRepeat(repeat.available(session(), paused())),
+  })
+  const repeatTimer = setInterval(() => {
+    repeat.refresh(session())
+    setCanRepeat(repeat.available(session(), paused()))
+  }, 250)
+  onCleanup(() => { clearInterval(repeatTimer); repeat.dispose() })
 
   const chooseVoice = () => {
     props.api.ui.dialog.replace(() => (
@@ -49,31 +65,37 @@ function Block(props: { api: TuiPluginApi }) {
   // `onRelease` buttons act on mouse-up. A button that opens a dialog must do this: the host
   // dialog backdrop dismisses itself on mouse-up, so opening on mouse-down makes the
   // dialog appear under the pointer and be closed by the very same click.
-  const button = (text: () => string, onClick: () => void, active?: () => boolean, onRelease = false) => (
+  const button = (text: () => string, onClick: () => void, active?: () => boolean, onRelease = false, disabled = () => false) => (
     <box
+      flexGrow={1}
+      flexBasis={0}
+      minWidth={8}
+      alignItems="center"
       paddingLeft={1}
       paddingRight={1}
+      paddingTop={1}
+      paddingBottom={1}
       backgroundColor={active?.() ? theme().warning : theme().backgroundElement}
-      onMouseDown={onRelease ? undefined : onClick}
-      onMouseUp={onRelease ? onClick : undefined}
+      onMouseDown={buttonHandlers(onClick, disabled, onRelease).onMouseDown}
+      onMouseUp={buttonHandlers(onClick, disabled, onRelease).onMouseUp}
     >
-      <text fg={active?.() ? theme().background : theme().text}>{text()}</text>
+      <text fg={disabled() ? theme().textMuted : active?.() ? theme().background : theme().text}><b>{text()}</b></text>
     </box>
   )
 
   return (
-    <box flexDirection="column" gap={0}>
-      <text fg={theme().text}>
-        <b>open-vox</b>
+    <box flexDirection="column" gap={1}>
+      <text fg={theme().text} width="100%" wrapMode="word">
+        <b>Open-Vox</b>
+        <span style={{ fg: theme().textMuted }}>{` ES ${label(config().voices.es)} / EN ${label(config().voices.en)}`}</span>
         <span style={{ fg: paused() ? theme().warning : theme().textMuted }}>{paused() ? " paused" : ""}</span>
       </text>
       <box flexDirection="row" gap={1}>
         {button(() => (paused() ? "Resume" : "Pause"), toggle, paused)}
         {button(() => "Voice", chooseVoice, undefined, true)}
+        {button(() => "Repeat", () => { void repeat.repeat(session(), paused()) }, undefined, false,
+          () => !canRepeat() || !repeat.available(session(), paused()))}
       </box>
-      <text fg={theme().textMuted}>
-        {`ES ${label(config().voices.es)} / EN ${label(config().voices.en)}`}
-      </text>
     </box>
   )
 }
@@ -82,8 +104,8 @@ const tui: TuiPlugin = async (api) => {
   api.slots.register({
     order: 150,
     slots: {
-      sidebar_content() {
-        return <Block api={api} />
+      sidebar_content(_context, props) {
+        return <Block api={api} sessionID={props.session_id} />
       },
     },
   })

@@ -43,6 +43,12 @@ describe("updateTuiConfig", () => {
 });
 
 describe("install", () => {
+  test("rewrites the Repeat helper import in the copied TUI without touching settings", () => {
+    const fs = memoryFs();
+    install({ ...base, fs, tui: true, tuiTemplate: TEMPLATE + 'import { x } from "../src/repeat-ui";' });
+    expect(fs.files.get(TUI_FILE)).toContain('from "file:///C:/repo/agentVoz/src/repeat-ui.ts"');
+    expect(fs.files.get(TUI_FILE)).not.toContain('"../src/repeat-ui"');
+  });
   test("writes the server loader pointing at the repository", () => {
     const fs = memoryFs();
     install({ ...base, fs, tui: false });

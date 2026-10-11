@@ -1,4 +1,4 @@
-# open-vox
+# Open-Vox
 
 An OpenCode plugin that reads the agent's final answer aloud. Windows-first and
 local-only: neural voices run on your machine (Kokoro, then Piper), with the
@@ -42,11 +42,36 @@ Defaults: Spanish `em_alex`, English `af_heart`. Voices whose id starts with `b`
 ## Sidebar block
 
 `open-vox install` adds a small **open-vox** block to the OpenCode sidebar with
-two buttons:
+three buttons:
 
 - **Pause / Resume**: stops the current narration and mutes new ones.
 - **Voice**: opens a list of voices; picking one changes the voice for that
   language immediately.
+- **Repeat**: restarts the last successfully generated audio from the beginning,
+  using the same WAV bytes without synthesizing again. Later voice, speed or engine
+  changes affect new narration, not Repeat. It is disabled while paused, without
+  audio for the displayed session, or when instance discovery is missing/ambiguous.
+
+Each server plugin instance retains only one last audio, owned by its session.
+Switching sessions or inactivity keeps it; another session cannot replay it, and
+returning to the owner session enables Repeat until a successful new generation
+replaces it. Failed/cancelled/invalid generation keeps the prior audio. Pause stops
+playback but retains audio; Resume unmutes future narration rather than resuming
+the stopped playback position. Cached audio does not survive a plugin restart.
+Deleting the owner session or disposing the plugin
+stops playback and removes owned audio after player handles close. Resume does
+not replay a request received while paused.
+
+Repeat uses correlated, metadata-only `tui.command.execute` events sent through
+the attached SDK client's `tui.publish`. Instance nonce, session, audio revision,
+request identity and expiry guard replay on the server; the nonce is routing
+metadata, not an authentication secret. Other attached clients ignore unmatched
+challenges. No transient commands are written into shared settings.
+
+Audio is held under the isolated temporary `open-vox-audio-v1` namespace, not
+alongside models/settings. Dead-owner cleanup only recognizes its own directory
+format and skips live/reused PIDs, unknown access state and symlinks/junctions.
+Cached audio is local sensitive content, not an encrypted archive or history.
 
 The block and the CLI share the same settings file, so a change in one shows up
 in the other within a second. The block is a separate TUI plugin
@@ -100,8 +125,9 @@ bun test
 node ./node_modules/typescript/bin/tsc --noEmit
 ```
 
-Tests use fake clients, fake process spawners and an in-memory file system; they
-never play audio or touch your OpenCode configuration.
+Tests use fake clients and fake process spawners, with in-memory filesystem
+fixtures and isolated temporary filesystem tests. They never play audio or touch
+your OpenCode configuration.
 
 ## Known limits
 
@@ -111,8 +137,14 @@ never play audio or touch your OpenCode configuration.
   English.
 - The Voice list covers Kokoro voices only. With the Piper or SAPI engines, use
   `OPEN_VOX_VOICE_*` or the Windows settings instead.
-- The sidebar block is verified with opentui's test renderer, not in a live
-  terminal session.
+- Automated sidebar checks use opentui's test renderer; live evidence is limited
+  to the user-confirmed Repeat scenario below, not full sidebar qualification.
+- Repeat has deterministic fake-process, isolated-filesystem, attached SDK
+  transport, handshake and UI-guard tests plus a TSX transpile check. After the
+  sidebar session-binding fix and a user-controlled restart, the user confirmed
+  Repeat enabled and replayed a newly narrated answer in the live session.
+  This does not qualify every Windows engine, session switching/deletion, player
+  handle cleanup or host-disposal timing. The normal pause watcher polls every 250 ms.
 - Event freshness is bounded by observation: a delayed historical user update
   could in theory look fresh. Real-host traces are in
   [`odd/tasks/bootstrap.md`](odd/tasks/bootstrap.md).

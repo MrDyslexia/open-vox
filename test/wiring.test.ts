@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { chooseEngine, createOpenVox, watchPause, withPause } from "../src/plugin";
 import type { SpeechSink } from "../src/speech-sink";
+import { encodeCommand, decodeCommand } from "../src/repeat-control";
 
 function fakeSink() {
   const spoken: string[] = [];
@@ -13,6 +14,28 @@ const client = { session: { get: async () => ({ error: "x" }), message: async ()
 const user = (id: string, created: number) => ({ type: "message.updated", properties: { info: { id, sessionID: "ses_a", role: "user", time: { created } } } }) as any;
 
 describe("open-vox wiring", () => {
+  test("host command bridge replies via injected attached publisher, removes owned session and disposes once", async () => {
+    const f = fakeSink();
+    const replies: string[] = [], removals: string[] = [];
+    let disposals = 0, repeats = 0;
+    f.sink.status = () => ({ sessionID: "ses_a", revision: 1 });
+    f.sink.repeat = async () => { repeats++; };
+    f.sink.removeSession = (id) => { removals.push(id); };
+    f.sink.dispose = async () => { disposals++; };
+    const hooks = createOpenVox(client, "/d", f.sink, () => false, { instance: "instance-a", publish: async (s) => { replies.push(s); } });
+    const event = (m: any) => ({ event: { type: "tui.command.execute", properties: { command: encodeCommand(m) } } } as any);
+    await hooks.event!(event({ kind: "hello", challenge: "challenge", sessionID: "ses_a", expires: Date.now() + 1500 }));
+    expect(decodeCommand(replies[0])?.instance).toBe("instance-a");
+    expect(f.stops()).toBe(0);
+    await hooks.event!(event({ kind: "repeat", instance: "instance-a", sessionID: "ses_a", revision: 1, requestID: "one", expires: Date.now() + 1500 }));
+    expect(repeats).toBe(1);
+    await hooks.event!({ event: { type: "session.deleted", properties: { info: { id: "ses_a" } } } } as any);
+    expect(removals).toEqual(["ses_a"]);
+    await hooks.dispose!(); await hooks.dispose!();
+    expect(disposals).toBe(1);
+    await hooks.event!(event({ kind: "hello", challenge: "late", sessionID: "ses_a", expires: Date.now() + 1500 }));
+    expect(replies).toHaveLength(1);
+  });
   test("a new user turn stops current speech", async () => {
     const f = fakeSink();
     const hooks = createOpenVox(client, "/d", f.sink);
