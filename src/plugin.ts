@@ -148,14 +148,17 @@ export function createOpenVox(client: Client, directory: string, sink: SpeechSin
       // A NEW user turn or a session error makes any current narration stale.
       // The host repeats updates for the same user message; those must not cancel speech.
       const { event } = input;
-      if (event.type === "session.error") sink.stop();
+      // Only events of the narrated session cancel it; an error without a session id stays global.
+      const stopFor = (sessionID: string | undefined) =>
+        sessionID !== undefined && sink.stopSession ? sink.stopSession(sessionID) : sink.stop();
+      if (event.type === "session.error") stopFor(event.properties.sessionID);
       else if (event.type === "session.deleted") sink.removeSession?.(event.properties.info.id);
       else if (event.type === "message.updated" && event.properties.info?.role === "user") {
         const id = event.properties.info.id;
         if (!seenUsers.has(id)) {
           if (seenUsers.size >= 1024) seenUsers.clear();
           seenUsers.add(id);
-          sink.stop();
+          stopFor(event.properties.info.sessionID);
         }
       }
     } catch {}
@@ -179,6 +182,7 @@ export function withPause(sink: SpeechSink, isPaused: () => boolean): SpeechSink
   if (sink.resume) wrapped.resume = () => sink.resume!();
   wrapped.status = () => sink.status?.();
   wrapped.repeat = async (sessionID, revision, expires) => { if (!isPaused()) await sink.repeat?.(sessionID, revision, expires); };
+  if (sink.stopSession) wrapped.stopSession = (sessionID) => sink.stopSession!(sessionID);
   wrapped.removeSession = (sessionID) => sink.removeSession?.(sessionID);
   wrapped.dispose = async () => { await sink.dispose?.(); };
   return wrapped;
@@ -322,6 +326,7 @@ export const OpenVoxPlugin: Plugin = async ({ client, directory }) => {
   logged.resume = sink.resume;
   logged.repeat = sink.repeat;
   logged.status = sink.status;
+  logged.stopSession = sink.stopSession;
   logged.removeSession = sink.removeSession;
   logged.dispose = sink.dispose;
   const traced: Client = envValue(process.env, "LOG") ? {

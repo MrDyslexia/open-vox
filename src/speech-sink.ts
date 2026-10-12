@@ -28,6 +28,11 @@ export type Engine = ((text: string, language: Language) => SpeechProcess) & {
 export type SpeechSink = ((selection: Selection) => Promise<void>) & {
   stop(): void;
   /**
+   * Cancels narration that belongs to one session: its queued jobs and, only when it is the active job, the
+   * current synthesis or playback. Other sessions keep their place and the cache is not forgotten.
+   */
+  stopSession?: (sessionID: string) => void;
+  /**
    * Freezes the active cached playback in place (real pause) and cancels everything that has no audio yet:
    * queued jobs and a synthesis in flight. A playback that cannot be frozen is stopped instead.
    */
@@ -296,15 +301,23 @@ export function createSpeechSink(options: SpeechSinkOptions = {}): SpeechSink {
     });
   }) as SpeechSink;
 
-  sink.stop = () => {
+  /** Cancels the active job. A stopped playback is discarded even when frozen: it is never resumed, and
+   *  killing it lets the pump close the file and release the cache hold. */
+  const cancelActive = () => {
     generation++;
-    while (queue.length > 0) queue.shift()!.done();
-    // A stopped playback is discarded even when frozen: it is never resumed, and killing it lets the
-    // pump close the file and release the cache hold.
     const f = frozen;
     frozen = undefined;
     f?.abort?.();
     try { current?.proc.kill(); } catch {}
+  };
+  sink.stop = () => {
+    while (queue.length > 0) queue.shift()!.done();
+    cancelActive();
+  };
+  // Jobs read the generation when they start, so queued jobs of other sessions are not invalidated by the bump.
+  sink.stopSession = (sessionID) => {
+    for (let i = queue.length - 1; i >= 0; i--) if (queue[i]!.sessionID === sessionID) queue.splice(i, 1)[0]!.done();
+    if (activeSession === sessionID) cancelActive();
   };
   /**
    * Real pause. What can be held is held: the active cached playback keeps its place, its job and its cache

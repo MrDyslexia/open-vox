@@ -179,6 +179,10 @@ Historical PN-01–PN-05 remain recognizable, not completion evidence:
 - **C — pending-child cancellation:** second actual synthesis child received exactly **one owned kill ~211ms after start**, exited1 **within 3.37ms of kill**; prior committed revision1/artifact stayed preserved, canceled candidate was absent and there was no late promotion. This proves pending-child cancellation, not specifically interruption inside an ONNX inference. End-of-run aggregate preparation/synthesis/runner/resolver counts are2 because scenarioC started that second candidate; they were1 throughout Repeat.
 - **Cleanup/preservation:** both owned synthesis processes and one owned host exited; only the harness-owned cache instance was removed. Host disposal's exit1 was a deliberate owned-kill outcome, not an unreported success code. Existing user cache, source, protected assets, prior evidence and app-home footprint were preserved. No native firewall, exhaustive plugin/session lifecycle or human audio-quality proof is asserted.
 
+### Cross-session cancellation correction (2026-10-12)
+
+Defect: the plugin called `sink.stop()` on any `session.error` and on the first update of any user message of any session, so child or concurrent sessions could discard another session's pending narration. Fix: optional `SpeechSink.stopSession(sessionID)` cancels queued jobs of that session and the active job only when it belongs to it; no cache forget, other queued sessions keep order. The plugin uses event session ids, `withPause` forwards it, and sinks without it, or errors without a session id, keep global `stop()`. Verification: focused wiring+sink RED 122 pass/6 fail (real hook killed A's synthesis on session B events) -> GREEN 128 pass; typecheck 0; full Bun 418 pass/2 skip/0 fail. Stage 1 read-only metadata found no other-session message in the 06:48:58-06:49:04Z window, so this is a proven defect but NOT proven to be the cause of the observed silence. Host verification awaits a full OpenCode quit/restart.
+
 ## Acceptance gates and retained limits
 
 ### SDK summary gate correction (2026-10-12)

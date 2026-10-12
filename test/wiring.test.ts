@@ -32,8 +32,9 @@ describe("SDK user summary metadata through the plugin factory", () => {
       speakPlan: (plan: ReturnType<typeof createNarrationPlan>) => { plans.push(plan.blocks.map(b => b.segments.map(s => s.text).join("")).join("\n")); return done(); },
     });
     const sink = createSpeechSink({ enabled: true, engine, narrationLanguage: "es", onError: e => errors.push(e) });
-    const stop = sink.stop;
+    const stop = sink.stop, stopSession = sink.stopSession!;
     sink.stop = () => { stops++; stop(); };
+    sink.stopSession = (id) => { stops++; stopSession(id); };
     const sdk = { session: {
       get: async () => ({ data: f.session }),
       message: async (input: { path: { messageID: string } }) => {
@@ -106,6 +107,96 @@ describe("SDK user summary metadata through the plugin factory", () => {
   });
 });
 
+describe("narration is cancelled only by events of its own session", () => {
+  const userIn = (sessionID: string, id: string, created: number) =>
+    ({ type: "message.updated", properties: { info: { id, sessionID, role: "user", time: { created } } } }) as any;
+  const errorIn = (sessionID?: string) => ({ type: "session.error", properties: { sessionID } }) as any;
+
+  /** Real hook + real sink + plan-aware engine whose synthesis stays pending until the test finishes it. */
+  function live() {
+    const synths: { killed: boolean; finish(code?: number): void }[] = [];
+    const promoted: string[] = [];
+    let last: { file: string; sessionID: string; revision: number } | undefined;
+    let count = 0;
+    const cache = {
+      candidate: () => `wav-${++count}`, current: () => last,
+      promote(file: string, sessionID: string) { promoted.push(`${sessionID}:${file}`); last = { file, sessionID, revision: count }; return true; },
+      discard() {}, hold: () => () => {}, forget() {}, dispose() {},
+    };
+    const synthesizePlan = () => {
+      let done!: (code: number) => void;
+      const proc = { killed: false, exited: new Promise<number>(resolve => { done = resolve; }),
+        kill() { proc.killed = true; done(1); }, finish(code = 0) { done(code); } };
+      synths.push(proc);
+      return proc;
+    };
+    const engine: Engine = Object.assign(() => { throw new Error("plan only"); }, { synthesizePlan });
+    const sink = createSpeechSink({ enabled: true, engine, cache,
+      player: () => ({ exited: Promise.resolve(0), kill() {} }) } as any);
+    const hooks = createOpenVox(client, "/d", sink);
+    const send = (event: any) => hooks.event!({ event });
+    const tick = () => new Promise(resolve => setTimeout(resolve, 0));
+    return { sink, hooks, send, synths, promoted, tick };
+  }
+
+  test.each([
+    ["a user message of another session", () => userIn("ses_child", "msg_child", 5)],
+    ["a session.error of another session", () => errorIn("ses_child")],
+  ])("%s does not cancel pending narration", async (_name, make) => {
+    const l = live();
+    try {
+      await l.send(userIn("ses_a", "msg_a", 1));
+      const narration = l.sink({ sessionID: "ses_a", messageID: "ans", text: "Answer for A" });
+      await l.tick();
+      await l.send(make());
+      await l.tick();
+      expect(l.synths[0]!.killed).toBe(false);
+      l.synths[0]!.finish();
+      await narration;
+      expect(l.promoted).toEqual(["ses_a:wav-1"]);
+    } finally { await l.hooks.dispose!(); }
+  });
+
+  test.each([
+    ["a new user message of the same session", () => userIn("ses_a", "msg_a2", 5)],
+    ["a session.error of the same session", () => errorIn("ses_a")],
+    ["a session.error without a session id", () => errorIn(undefined)],
+  ])("%s cancels the narration without a stale promotion", async (_name, make) => {
+    const l = live();
+    try {
+      await l.send(userIn("ses_a", "msg_a", 1));
+      const narration = l.sink({ sessionID: "ses_a", messageID: "ans", text: "Answer for A" });
+      await l.tick();
+      await l.send(make());
+      await narration;
+      expect(l.synths[0]!.killed).toBe(true);
+      expect(l.promoted).toEqual([]);
+    } finally { await l.hooks.dispose!(); }
+  });
+
+  test("a sink without stopSession falls back to stop() for session events", async () => {
+    const f = fakeSink();
+    const hooks = createOpenVox(client, "/d", f.sink);
+    await hooks.event!({ event: userIn("ses_a", "msg_a", 1) });
+    await hooks.event!({ event: errorIn("ses_b") });
+    expect(f.stops()).toBe(2);
+    await hooks.dispose!();
+  });
+
+  test("a sink with stopSession gets the event's session id and withPause forwards it", async () => {
+    const f = fakeSink();
+    const stopped: string[] = [];
+    f.sink.stopSession = (id) => { stopped.push(id); };
+    const hooks = createOpenVox(client, "/d", withPause(f.sink, () => false));
+    await hooks.event!({ event: userIn("ses_a", "msg_a", 1) });
+    await hooks.event!({ event: userIn("ses_a", "msg_a", 1) });   // repeated update of the same message
+    await hooks.event!({ event: errorIn("ses_b") });
+    await hooks.event!({ event: errorIn(undefined) });
+    expect(stopped).toEqual(["ses_a", "ses_b"]);
+    expect(f.stops()).toBe(1);                                    // only the global error
+    await hooks.dispose!();
+  });
+});
 describe("open-vox wiring", () => {
   test("host command bridge replies via injected attached publisher, removes owned session and disposes once", async () => {
     const f = fakeSink();
