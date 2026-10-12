@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "maxNarrationLength": 4000,
+  "markdown": {
+    "code": "announce",
+    "table": "announce",
+    "image": "alt",
+    "link": "visible-text",
+    "rawUrl": "omit",
+    "html": "omit-with-content",
+    "definition": "omit",
+    "thematicBreak": "separate",
+    "unknown": "omit"
+  },
+  "announcements": {
+    "code": { "es": "Bloque de código omitido", "en": "Code block omitted" },
+    "table": { "es": "Tabla omitida", "en": "Table omitted" }
+  },
+  "resolver": {
+    "acronyms": {
+      "API": { "es": "a pe i", "en": "ay pee eye" },
+      "HTTP": { "es": "hache te te pe", "en": "aitch tee tee pee" }
+    },
+    "names": { "GitHub": "en", "TypeScript": "en", "Docker": "en" },
+    "expressions": { "Open editor": "en" },
+    "fallback": "defaultLanguage"
+  }
+}
