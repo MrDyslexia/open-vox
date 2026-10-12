@@ -5,8 +5,9 @@ import { join } from "node:path";
 import { OpenVoxPlugin, chooseEngine, createLiveSink, createOpenVox, createPauseState, liveEngine, withPause } from "../src/plugin";
 import { createNarrationPlan } from "../src/markdown-narration";
 import { createConfigReader, DEFAULT_CONFIG } from "../src/config";
-import type { SpeechProcess, SpeechSink } from "../src/speech-sink";
+import { createSpeechSink, type Engine, type SpeechProcess, type SpeechSink } from "../src/speech-sink";
 import { encodeCommand, decodeCommand } from "../src/repeat-control";
+import { fixture } from "./final-response.test";
 
 function fakeSink() {
   const spoken: string[] = [];
@@ -19,6 +20,91 @@ function fakeSink() {
 }
 const client = { session: { get: async () => ({ error: "x" }), message: async () => ({ error: "x" }) } } as any;
 const user = (id: string, created: number) => ({ type: "message.updated", properties: { info: { id, sessionID: "ses_a", role: "user", time: { created } } } }) as any;
+
+describe("SDK user summary metadata through the plugin factory", () => {
+  function narration() {
+    const f = fixture("ses_a", "msg_user", "msg_answer");
+    const plans: string[] = [], reads: string[] = [];
+    const errors: unknown[] = [];
+    let stops = 0;
+    const done = () => ({ exited: Promise.resolve(0), kill() {} });
+    const engine: Engine = Object.assign(done, {
+      speakPlan: (plan: ReturnType<typeof createNarrationPlan>) => { plans.push(plan.blocks.map(b => b.segments.map(s => s.text).join("")).join("\n")); return done(); },
+    });
+    const sink = createSpeechSink({ enabled: true, engine, narrationLanguage: "es", onError: e => errors.push(e) });
+    const stop = sink.stop;
+    sink.stop = () => { stops++; stop(); };
+    const sdk = { session: {
+      get: async () => ({ data: f.session }),
+      message: async (input: { path: { messageID: string } }) => {
+        reads.push(input.path.messageID);
+        return { data: input.path.messageID === f.parent.info.id ? f.parent : f.response };
+      },
+    } };
+    const hooks = createOpenVox(sdk, "/d", sink);
+    const update = (info: typeof f.parent.info) => hooks.event!({ event: { type: "message.updated", properties: { info } } });
+    const metadata = () => { if (f.parent.info.role === "user") f.parent.info.summary = { title: "Changes", body: "Diff metadata", diffs: [] }; };
+    return { f, plans, reads, errors, sdk, hooks, update, metadata, stops: () => stops };
+  }
+
+  test.each(["ordinary", "initial metadata", "metadata before assistant"])("narrates %s once with correct SDK responses", async (kind) => {
+    const n = narration();
+    try {
+      if (kind === "initial metadata") n.metadata();
+      await n.update(n.f.parent.info);
+      if (kind === "metadata before assistant") { n.metadata(); await n.update(n.f.parent.info); }
+      await n.update(n.f.response.info);
+      await n.update(n.f.response.info);
+      n.metadata(); await n.update(n.f.parent.info);
+      await n.hooks.event!(idle);
+      await n.update(n.f.response.info);
+      expect(n.plans).toEqual(["Answer"]);
+      expect(n.reads).toEqual(["msg_answer", "msg_user"]);
+      expect(n.stops()).toBe(1);
+      expect(n.errors).toEqual([]);
+    } finally { await n.hooks.dispose!(); }
+  });
+
+  test("metadata after terminal assistant and before idle preserves the in-flight accepted turn", async () => {
+    const n = narration();
+    let release!: () => void;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    n.sdk.session.get = async () => { await pending; return { data: n.f.session }; };
+    try {
+      await n.update(n.f.parent.info);
+      const completion = n.update(n.f.response.info);
+      n.metadata(); await n.update(n.f.parent.info);
+      await n.hooks.event!(idle);
+      release(); await completion;
+      await n.update(n.f.parent.info);
+      await n.update(n.f.response.info);
+      expect(n.plans).toEqual(["Answer"]);
+      expect(n.reads).toEqual(["msg_answer", "msg_user"]);
+      expect(n.stops()).toBe(1);
+      expect(n.errors).toEqual([]);
+    } finally { release(); await n.hooks.dispose!(); }
+  });
+
+  test.each(["boolean summary", "null summary", "scalar summary", "parent compaction", "parent synthetic", "assistant summary", "child", "compacting"])("does not narrate %s", async (kind) => {
+    const n = narration();
+    try {
+      if (kind === "boolean summary") Object.assign(n.f.parent.info, { summary: true });
+      if (kind === "null summary") Object.assign(n.f.parent.info, { summary: null });
+      if (kind === "scalar summary") Object.assign(n.f.parent.info, { summary: "invalid" });
+      if (kind === "parent compaction") n.f.parent.parts = [{ ...n.f.parent.parts[0], type: "compaction", auto: true }];
+      if (kind === "parent synthetic") Object.assign(n.f.parent.parts[0], { synthetic: true });
+      if (kind === "assistant summary") Object.assign(n.f.response.info, { summary: true });
+      if (kind === "child") n.f.session.parentID = "ses_root";
+      if (kind === "compacting") n.f.session.time.compacting = 1;
+      await n.update(n.f.parent.info);
+      await n.update(n.f.response.info);
+      await n.hooks.event!(idle);
+      await n.update(n.f.response.info);
+      expect(n.plans).toEqual([]);
+      expect(n.errors).toEqual([]);
+    } finally { await n.hooks.dispose!(); }
+  });
+});
 
 describe("open-vox wiring", () => {
   test("host command bridge replies via injected attached publisher, removes owned session and disposes once", async () => {

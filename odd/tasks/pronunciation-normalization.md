@@ -181,6 +181,10 @@ Historical PN-01–PN-05 remain recognizable, not completion evidence:
 
 ## Acceptance gates and retained limits
 
+### SDK summary gate correction (2026-10-12)
+
+Authorized worktree: `feat/pn-implementation`, HEAD `95d6faf`; parent reports installed paths now target it. The coordinator rejected valid user `summary: {title?, body?, diffs}` metadata before establishing a turn. It now accepts objects, retaining scalar/null rejection and existing selection/lifecycle guards. Real `createOpenVox` hook + production sink + injected engine: initial metadata yielded **0 calls before / 1 after**; duplicate metadata before/after terminal assistant and before idle preserves one narration. Compaction/synthetic/child controls stay silent. Focused RED **72 pass/1 fail**, GREEN **73 pass/0 fail**; full Bun **408 pass/2 skip/0 fail**; typecheck exit0. Only plugin, wiring tests and this tracker changed; uncommitted, RDD off. Installed callback dispatch and audible acceptance remain unproven; the active host needs a user-owned restart to load this fix. No restart/config/install occurred here.
+
 - [x] Scoped actual TS/Python original-source/UTF16 fixture trace, including an emoji in omitted HTML; original/source detached and unchanged in the operational plan.
 - [ ] Exhaustive original UI/history invariance and combining/repeated-label/omission cases through the installed plugin.
 - [ ] Both base languages and negative controls: identifiers/API/HTTP/names/whole expressions, `>=`, versions, paths, URLs/links, numbers, commands/flags/variables, angular quotes, code/tables/images/HTML and ambiguous adjacent text.

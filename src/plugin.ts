@@ -61,7 +61,9 @@ export function createCoordinator(client: Client, directory: string, sink: Sink 
       if (!info || !validID(info.id) || !validID(info.sessionID)) return;
       let state = sessions.get(info.sessionID);
       if (info.role === "user") {
-        if (!Number.isFinite(info.time?.created) || info.summary !== undefined) return;
+        // User summaries are SDK diff metadata, unlike the assistant's synthetic-summary flag.
+        if (!Number.isFinite(info.time?.created) ||
+            (info.summary !== undefined && (typeof info.summary !== "object" || info.summary === null))) return;
         if (!state) {
           // No eviction: eviction would allow delayed historical events to look fresh.
           if (sessions.size >= 128) return;
