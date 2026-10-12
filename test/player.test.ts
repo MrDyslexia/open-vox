@@ -349,6 +349,298 @@ describe("watchdog", () => {
   });
 });
 
+describe("pausable play handle", () => {
+  test("pause freezes the playback: pause is sent, the ack resolves true, nothing is stopped or settled", async () => {
+    const h = harness();
+    const { handle, host } = await startPlaying(h);
+    expect(typeof handle.pause).toBe("function");
+    expect(typeof handle.resume).toBe("function");
+    const paused = handle.pause!();
+    expect(host.sent.at(-1)).toBe("pause");
+    host.emit({ event: "paused", positionMs: 400 });
+    expect(await paused).toBe(true);
+    expect(host.sent).not.toContain("stop");
+    expect(host.killed).toBe(false);
+    expect(await peek(handle.exited)).toBe("pending");
+    await h.player.dispose();
+  });
+
+  test("pausing twice acknowledges without sending a second request", async () => {
+    const h = harness();
+    const { handle, host } = await startPlaying(h);
+    const first = handle.pause!();
+    host.emit({ event: "paused", positionMs: 10 });
+    await first;
+    const sent = host.sent.length;
+    expect(await handle.pause!()).toBe(true);
+    expect(host.sent).toHaveLength(sent);
+    await h.player.dispose();
+  });
+
+  test("resume sends resume, the ack resolves true, and the playback then ends normally", async () => {
+    const h = harness();
+    const { handle, host } = await startPlaying(h);
+    const paused = handle.pause!();
+    host.emit({ event: "paused", positionMs: 400 });
+    await paused;
+    const resumed = handle.resume!();
+    expect(host.sent.at(-1)).toBe("resume");
+    host.emit({ event: "playing" });
+    expect(await resumed).toBe(true);
+    expect(await peek(handle.exited)).toBe("pending");
+    host.emit({ event: "ended" });
+    expect(await handle.exited).toBe(0);
+    await h.player.dispose();
+  });
+
+  test("resume without a pause is refused and sends nothing", async () => {
+    const h = harness();
+    const { handle, host } = await startPlaying(h);
+    const sent = host.sent.length;
+    expect(await handle.resume!()).toBe(false);
+    expect(host.sent).toHaveLength(sent);
+    await h.player.dispose();
+  });
+
+  test("the watchdog stays disarmed while paused and is re-armed on resume", async () => {
+    const h = harness();
+    const { handle, host } = await startPlaying(h, "C:\\cache\\a.wav", 20);   // budget 20 + 20 slack
+    const paused = handle.pause!();
+    host.emit({ event: "paused", positionMs: 5 });
+    await paused;
+    await tick(100);                                       // far beyond the budget
+    expect(host.sent).not.toContain("stop");
+    const resumed = handle.resume!();
+    host.emit({ event: "playing" });
+    await resumed;
+    await tick(15);
+    expect(host.sent).not.toContain("stop");               // the paused time did not count
+    await tick(60);
+    expect(host.sent.at(-1)).toBe("stop");                 // but a lost `ended` is still caught
+    host.emit({ event: "stopped" });
+    expect(await handle.exited).toBe(1);
+    await h.player.dispose();
+  });
+
+  test("a rate change while paused does not re-arm the watchdog", async () => {
+    const h = harness();
+    const { handle, host } = await startPlaying(h, "C:\\cache\\a.wav", 20);
+    const paused = handle.pause!();
+    host.emit({ event: "paused", positionMs: 5 });
+    await paused;
+    const applied = h.player.setRate(2);
+    host.emit({ event: "rate", value: 2 });
+    await applied;
+    await tick(100);
+    expect(host.sent).not.toContain("stop");
+    expect(await peek(handle.exited)).toBe("pending");
+    await h.player.dispose();
+  });
+
+  test("idle shutdown is suppressed while paused and resumes after the playback ends", async () => {
+    const h = harness({ idleMs: 20 });
+    const { handle, host } = await startPlaying(h, "C:\\cache\\a.wav", 5000);
+    const paused = handle.pause!();
+    host.emit({ event: "paused", positionMs: 100 });
+    await paused;
+    await tick(80);
+    expect(host.sent).not.toContain("quit");
+    expect(host.killed).toBe(false);
+    const resumed = handle.resume!();
+    host.emit({ event: "playing" });
+    await resumed;
+    host.emit({ event: "ended" });
+    await handle.exited;
+    await tick(60);
+    expect(host.sent.at(-1)).toBe("quit");
+    await h.player.dispose();
+  });
+
+  test("an unacknowledged pause degrades to stop: host recycled, playback settled, no replay", async () => {
+    const h = harness();
+    const { handle, host } = await startPlaying(h);
+    expect(await handle.pause!()).toBe(false);             // requestTimeoutMs is 40 ms in this harness
+    expect(host.killed).toBe(true);
+    expect(await handle.exited).toBe(1);
+    expect(h.fallbacks).toHaveLength(0);
+    await h.player.dispose();
+  });
+
+  test("an unacknowledged resume degrades to stop and never leaves the host holding the file", async () => {
+    const h = harness();
+    const { handle, host } = await startPlaying(h);
+    const paused = handle.pause!();
+    host.emit({ event: "paused", positionMs: 5 });
+    await paused;
+    expect(await handle.resume!()).toBe(false);
+    expect(host.killed).toBe(true);
+    expect(await handle.exited).toBe(1);
+    expect(h.fallbacks).toHaveLength(0);
+    await h.player.dispose();
+  });
+
+  test("a host crash while paused ends the playback instead of replaying it from the start", async () => {
+    const h = harness();
+    const { handle, host } = await startPlaying(h);
+    const paused = handle.pause!();
+    host.emit({ event: "paused", positionMs: 5 });
+    await paused;
+    host.die();
+    expect(await handle.exited).toBe(1);
+    await tick();
+    expect(h.fallbacks).toHaveLength(0);
+    await h.player.dispose();
+  });
+
+  test("a host crash while the pause is still pending also ends the playback", async () => {
+    const h = harness();
+    const { handle, host } = await startPlaying(h);
+    const paused = handle.pause!();
+    host.die();
+    expect(await handle.exited).toBe(1);
+    expect(await paused).toBe(false);
+    expect(h.fallbacks).toHaveLength(0);
+    await h.player.dispose();
+  });
+
+  test("killing a paused playback sends stop and settles on the stopped event", async () => {
+    const h = harness();
+    const { handle, host } = await startPlaying(h);
+    const paused = handle.pause!();
+    host.emit({ event: "paused", positionMs: 5 });
+    await paused;
+    handle.kill();
+    expect(host.sent.at(-1)).toBe("stop");
+    host.emit({ event: "stopped" });
+    expect(await handle.exited).toBe(1);
+    await h.player.dispose();
+  });
+
+  test("dispose while paused settles the playback and kills the host", async () => {
+    const h = harness();
+    const { handle, host } = await startPlaying(h);
+    const paused = handle.pause!();
+    host.emit({ event: "paused", positionMs: 5 });
+    await paused;
+    await h.player.dispose();
+    expect(await handle.exited).toBe(1);
+    expect(host.killed).toBe(true);
+  });
+
+  test("a pause that arrives while the file is still opening waits for `opened`, then freezes it", async () => {
+    const h = harness({ openTimeoutMs: 1_000 });
+    const early = h.player.play("C:\\cache\\a.wav");
+    await tick();
+    const host = h.hosts[0]!;
+    host.emit({ event: "ready" });
+    await tick();
+    const paused = early.pause!();
+    await tick();
+    expect(host.sent).not.toContain("pause");              // nothing to freeze yet
+    expect(await peek(paused)).toBe("pending");
+    host.emit({ event: "opened", durationMs: 5000 });
+    host.emit({ event: "playing" });
+    await tick();
+    expect(host.sent.at(-1)).toBe("pause");
+    host.emit({ event: "paused", positionMs: 3 });
+    expect(await paused).toBe(true);
+    expect(await peek(early.exited)).toBe("pending");
+    expect(h.fallbacks).toHaveLength(0);
+    await h.player.dispose();
+  });
+
+  test("a pause waiting for the host to start also waits for the host to become ready", async () => {
+    const h = harness();
+    const early = h.player.play("C:\\cache\\a.wav");
+    const paused = early.pause!();                          // the host has not even been started yet
+    await tick();
+    const host = h.hosts[0]!;
+    expect(host.sent).toEqual([]);
+    host.emit({ event: "ready" });
+    await tick();
+    host.emit({ event: "opened", durationMs: 5000 });
+    host.emit({ event: "playing" });
+    await tick();
+    host.emit({ event: "paused", positionMs: 3 });
+    expect(await paused).toBe(true);
+    await h.player.dispose();
+  });
+
+  test("a pause waiting for the file to open answers false when the playback is killed or falls back meanwhile", async () => {
+    const killed = harness();
+    const a = killed.player.play("C:\\cache\\a.wav");
+    await tick();
+    killed.hosts[0]!.emit({ event: "ready" });
+    await tick();
+    const waitingA = a.pause!();
+    a.kill();
+    killed.hosts[0]!.emit({ event: "stopped" });
+    expect(await waitingA).toBe(false);
+    expect(await a.exited).toBe(1);
+    expect(killed.hosts[0]!.sent).not.toContain("pause");
+
+    const failed = harness();
+    const b = failed.player.play("C:\\cache\\b.wav");
+    await tick();
+    failed.hosts[0]!.emit({ event: "ready" });
+    await tick();
+    const waitingB = b.pause!();
+    failed.hosts[0]!.emit({ event: "error", message: "cannot open" });   // not opened: SoundPlayer fallback takes over
+    expect(await waitingB).toBe(false);
+    expect(failed.fallbacks).toHaveLength(1);
+    expect(failed.hosts[0]!.sent).not.toContain("pause");
+    failed.fallbacks[0]!.finish(0);
+    expect(await b.exited).toBe(0);
+    await killed.player.dispose();
+    await failed.player.dispose();
+  });
+
+  test("a pending pause request is released immediately when the host dies, not after the request timeout", async () => {
+    const h = harness({ requestTimeoutMs: 5_000 });
+    const { handle, host } = await startPlaying(h);
+    const paused = handle.pause!();
+    const started = Date.now();
+    host.die();
+    expect(await paused).toBe(false);
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(await handle.exited).toBe(1);
+    await h.player.dispose();
+  });
+
+  test("disposing with a pause request in flight releases it immediately", async () => {
+    const h = harness({ requestTimeoutMs: 5_000 });
+    const { handle } = await startPlaying(h);
+    const paused = handle.pause!();
+    const started = Date.now();
+    await h.player.dispose();
+    expect(await paused).toBe(false);
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(await handle.exited).toBe(1);
+  });
+
+  test("a fallback playback and a settled playback cannot pause", async () => {
+    const h = harness();
+    const early = await startPlaying(h);
+    early.handle.kill();
+    early.host.emit({ event: "stopped" });
+    await early.handle.exited;
+    expect(await early.handle.pause!()).toBe(false);       // settled
+    expect(await early.handle.resume!()).toBe(false);
+
+    const fb = harness();
+    fb.failSpawn(new Error("no powershell"));
+    const fallen = fb.player.play("C:\\cache\\a.wav");
+    await tick();
+    expect(await fallen.pause!()).toBe(false);
+    expect(await fallen.resume!()).toBe(false);
+    expect(fb.fallbacks[0]!.killed).toBe(false);           // asking never touches the fallback process
+    fb.fallbacks[0]!.finish(0);
+    expect(await fallen.exited).toBe(0);
+    await h.player.dispose();
+    await fb.player.dispose();
+  });
+});
+
 describe("fallback", () => {
   test("host process dying before ready falls back to the SoundPlayer path", async () => {
     const h = harness();
@@ -587,6 +879,39 @@ describe("real host smoke (OV_PLAYER_SMOKE=1)", () => {
       expect(await player.resume()).toBe(true);
       expect(await handle.exited).toBe(0);
       unlinkSync(wav);                           // must not be locked once `ended` is reported
+      expect(existsSync(wav)).toBe(false);
+    } finally {
+      await player.dispose();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  test.skipIf(process.env.OV_PLAYER_SMOKE !== "1")("the play handle pauses in place, holds the position and resumes to the end", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "open vox smoke ñ-"));
+    const wav = join(dir, "clip #2 ñ.wav");
+    silentWav(wav, 3);
+    const player = createPlayer({
+      spawnHost: defaultHostSpawn({ ...process.env, OV_PLAYER_MUTE: "1" }),
+      fallback: () => { throw new Error("fallback used: the real host did not work"); },
+    });
+    try {
+      const handle = player.play(wav);
+      let before = await player.position();
+      for (let i = 0; i < 50 && before?.state !== "playing"; i++) { await Bun.sleep(50); before = await player.position(); }
+      expect(before?.state).toBe("playing");
+      await Bun.sleep(200);
+      expect(await handle.pause!()).toBe(true);
+      const frozenAt = (await player.position())!;
+      expect(frozenAt.state).toBe("paused");
+      expect(frozenAt.positionMs).toBeGreaterThan(0);
+      await Bun.sleep(600);                                  // the position must not advance while paused
+      const later = (await player.position())!;
+      expect(later.state).toBe("paused");
+      expect(Math.abs(later.positionMs - frozenAt.positionMs)).toBeLessThan(60);
+      expect(await Promise.race([handle.exited, Bun.sleep(100).then(() => "pending")])).toBe("pending");
+      expect(await handle.resume!()).toBe(true);
+      expect(await handle.exited).toBe(0);
+      unlinkSync(wav);
       expect(existsSync(wav)).toBe(false);
     } finally {
       await player.dispose();

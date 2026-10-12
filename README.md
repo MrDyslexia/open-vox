@@ -47,10 +47,15 @@ An old `paused` entry in `config.json` is ignored and dropped on the next write.
 `open-vox install` adds a small **open-vox** block to the OpenCode sidebar with
 three buttons:
 
-- **Pause / Resume**: stops the current narration, clears the queue and mutes new
-  ones for **this OpenCode instance only**. The state lives in memory (it resets
-  when OpenCode restarts) and the button shows the state the plugin confirmed, so
-  it is disabled until the plugin has answered.
+- **Pause / Resume**: freezes the narration that is playing (same audio, same
+  position) and **Resume** continues it from there, without synthesizing again.
+  Pause also clears the queue and mutes new narrations for **this OpenCode instance
+  only**. A narration that is still being synthesized has no audio to hold yet, so
+  it is cancelled. If the player cannot pause (the one-shot fallback player, or a
+  player that does not answer), Pause stops that narration instead and Resume has
+  nothing to continue. The state lives in memory (it resets when OpenCode restarts)
+  and the button shows the state the plugin confirmed, so it is disabled until the
+  plugin has answered.
 - **Voice**: opens a list of voices; picking one changes the voice for that
   language immediately.
 - **Repeat**: restarts the last successfully generated audio from the beginning,
@@ -62,12 +67,13 @@ three buttons:
 Each server plugin instance retains only one last audio, owned by its session.
 Switching sessions or inactivity keeps it; another session cannot replay it, and
 returning to the owner session enables Repeat until a successful new generation
-replaces it. Failed/cancelled/invalid generation keeps the prior audio. Pause stops
-playback but retains audio; Resume unmutes future narration rather than resuming
-the stopped playback position. Cached audio does not survive a plugin restart.
-Deleting the owner session or disposing the plugin
-stops playback and removes owned audio after player handles close. Resume does
-not replay a request received while paused.
+replaces it. Failed/cancelled/invalid generation keeps the prior audio. Pause keeps
+the paused playback (and its audio file) until Resume or until it is discarded: a new
+user turn, a session error, deleting the owner session or disposing the plugin
+stops it, and the instance then stays paused until Resume. Resume with nothing
+paused only unmutes future narration. Cached audio does not survive a plugin
+restart. Deleting the owner session or disposing the plugin removes owned audio
+after player handles close. Resume does not replay a request received while paused.
 
 Repeat and Pause use correlated, metadata-only `tui.command.execute` events sent
 through the attached SDK client's `tui.publish`. Instance nonce, session, request
@@ -103,8 +109,10 @@ and registers in `tui.json`; existing entries are preserved.
      (`es_MX-claude-high`, `en_US-lessac-high`).
    - Windows SAPI voices as the last resort.
 5. `src/speech-sink.ts` queues messages serially. A new user turn, a session
-   error, or pausing stops the current speech. The pause flag is held in memory
-   by each plugin instance and changes only through the control channel.
+   error stops the current speech; pausing freezes the playing audio and
+   cancels queued and in-flight synthesis (see Pause above). The pause flag is
+   held in memory by each plugin instance and changes only through the control
+   channel.
 6. `src/player.ts` + `scripts/player.ps1` play the cached audio through one
    persistent `powershell.exe -STA` host (WPF `MediaPlayer`) per plugin
    instance, started on the first narration and stopped when idle. If the host
@@ -167,7 +175,10 @@ $env:OV_PLAYER_SMOKE = "1"; bun test test/player.test.ts
   This does not qualify every Windows engine, session switching/deletion, player
    handle cleanup or host-disposal timing. Per-instance Pause (control channel and
    confirmed-state display) has deterministic fake-transport tests only; its live
-   sidebar behavior is not yet verified.
+   sidebar behavior is not yet verified. Real Pause/Resume of the player host is
+   covered by fake-host tests plus an opt-in muted smoke test
+   (`OV_PLAYER_SMOKE=1 OV_PLAYER_MUTE=1 bun test test/player.test.ts`); it has not
+   been judged by ear or in a live OpenCode session.
 - Event freshness is bounded by observation: a delayed historical user update
   could in theory look fresh. Real-host traces are in
   [`odd/tasks/bootstrap.md`](odd/tasks/bootstrap.md).

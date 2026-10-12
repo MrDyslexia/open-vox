@@ -297,3 +297,388 @@ describe("exact-audio replay", () => {
     await h.sink.dispose();
   });
 });
+
+type Pausable = Fake & {
+  pauses: number;
+  resumes: number;
+  /** Outcome of the next pause()/resume(): a boolean, "throw", "hang" (never settles) or a controlled promise. */
+  pauseOutcome: boolean | "throw" | "hang" | Promise<boolean>;
+  resumeOutcome: boolean | "throw" | "hang" | Promise<boolean>;
+};
+
+describe("real pause and resume", () => {
+  const outcome = (value: Pausable["pauseOutcome"]): Promise<boolean> => {
+    if (value === "hang") return new Promise<boolean>(() => {});
+    if (value === "throw") return Promise.reject(new Error("host exploded"));
+    return Promise.resolve(value);
+  };
+
+  function pausableProc(): Pausable {
+    let done!: (code: number) => void;
+    const exited = new Promise<number>((resolve) => { done = resolve; });
+    const proc = {
+      stdin: "", killed: false, exited, pauses: 0, resumes: 0, pauseOutcome: true, resumeOutcome: true,
+      kill() { proc.killed = true; done(1); },
+      finish(code = 0) { done(code); },
+      fail() {},
+      pause() { proc.pauses++; return outcome(proc.pauseOutcome); },
+      resume() { proc.resumes++; return outcome(proc.resumeOutcome); },
+    } as unknown as Pausable;
+    return proc;
+  }
+
+  /** A plain handle with only the original `SpeechProcess` contract (the SoundPlayer fallback path). */
+  function plainProc(): Fake {
+    let done!: (code: number) => void;
+    const exited = new Promise<number>((resolve) => { done = resolve; });
+    const proc: Fake = {
+      stdin: "", killed: false, exited,
+      kill() { proc.killed = true; done(1); },
+      finish(code = 0) { done(code); },
+      fail() {},
+    };
+    return proc;
+  }
+
+  /** Cached sink whose player hands out pausable (or, with `pausable: false`, plain) playback handles. */
+  function pauseHarness(options: Record<string, unknown> = {}, pausable = true) {
+    const base = harness();
+    const players: Fake[] = [];
+    const errors: unknown[] = [];
+    const holds = new Map<string, number>();
+    let last: { file: string; sessionID: string; revision: number } | undefined;
+    let paused = false;
+    let count = 0;
+    const cache = {
+      candidate: () => `wav-${++count}`,
+      current: () => last,
+      promote(file: string, sessionID: string) { last = { file, sessionID, revision: count }; return true; },
+      discard: () => {},
+      hold(file: string) {
+        holds.set(file, (holds.get(file) ?? 0) + 1);
+        let released = false;
+        return () => { if (!released) { released = true; holds.set(file, holds.get(file)! - 1); } };
+      },
+      forget(sessionID: string) { if (last?.sessionID === sessionID) last = undefined; },
+      dispose() { last = undefined; },
+    };
+    const engine = Object.assign(() => { throw new Error("must generate an artifact"); }, {
+      synthesize: (text: string, _language: string, _file: string) => base.spawn([], text),
+    });
+    const player = (_file: string) => {
+      const proc = pausable ? pausableProc() : plainProc();
+      players.push(proc);
+      return proc;
+    };
+    const sink = createSpeechSink({
+      engine, cache, player, isPaused: () => paused, onError: (e: unknown) => errors.push(e), ...options,
+    } as any) as any;
+    /** Mirrors the plugin: the paused flag flips first, then the matching sink method runs. */
+    const setPaused = (value: boolean) => {
+      paused = value;
+      if (value) sink.pause?.(); else sink.resume?.();
+    };
+    /** Synthesizes and starts the cached playback of one narration. */
+    async function startPlayback(text = "A narration that is playing right now.") {
+      const narration = sink(item("m", text));
+      await tick();
+      base.procs[0]!.finish();                 // synthesis ends, playback starts
+      await tick();
+      return { narration, playback: players[0] as Pausable };
+    }
+    return { sink, base, players, errors, holds, cache, setPaused, startPlayback, isPaused: () => paused };
+  }
+  const settled = (promise: Promise<unknown>) =>
+    Promise.race([promise.then(() => "settled"), new Promise((resolve) => setTimeout(() => resolve("pending"), 25))]);
+  const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  test("pause freezes the active playback: no kill, job pending, hold kept, backstop silent", async () => {
+    const h = pauseHarness({ timeoutMs: 20, playbackTimeoutMs: 20 });
+    const { narration, playback } = await h.startPlayback();
+    h.setPaused(true);
+    await tick();
+    expect(playback.pauses).toBe(1);
+    await wait(80);                                               // 4x the backstop while frozen
+    expect(playback.killed).toBe(false);
+    expect(await settled(narration)).toBe("pending");
+    expect(h.holds.get("wav-1")).toBe(1);
+    expect(h.errors).toEqual([]);
+    h.sink.stop();
+    await narration;
+    await h.sink.dispose();
+  });
+
+  test("resume continues the same playback to completion and releases the hold afterwards", async () => {
+    const h = pauseHarness();
+    const { narration, playback } = await h.startPlayback();
+    h.setPaused(true);
+    await tick();
+    h.setPaused(false);
+    await tick();
+    expect(playback.resumes).toBe(1);
+    expect(playback.killed).toBe(false);
+    expect(h.players).toHaveLength(1);
+    playback.finish();
+    await narration;
+    expect(h.holds.get("wav-1")).toBe(0);
+    expect(h.errors).toEqual([]);
+    await h.sink.dispose();
+  });
+
+  test("resume re-arms the backstop and the paused time is not counted", async () => {
+    const h = pauseHarness({ timeoutMs: 40, playbackTimeoutMs: 40 });
+    const { narration, playback } = await h.startPlayback();
+    h.setPaused(true);
+    await wait(90);                                               // longer than the backstop
+    h.setPaused(false);
+    await tick();
+    expect(playback.killed).toBe(false);                          // paused time is forgiven
+    await wait(90);
+    expect(playback.killed).toBe(true);                           // but a hung playback is still bounded
+    await narration;
+    await h.sink.dispose();
+  });
+
+  test("jobs queued at the moment of pause are cancelled", async () => {
+    const h = pauseHarness({ maxPending: 2 });
+    const { narration, playback } = await h.startPlayback();
+    const queued = h.sink(item("n", "Queued narration that never started."));
+    h.setPaused(true);
+    await queued;                                                 // resolved by the cancellation
+    h.setPaused(false);
+    await tick();
+    playback.finish();
+    await narration;
+    await tick();
+    expect(h.base.procs).toHaveLength(1);                         // no second synthesis
+    expect(h.players).toHaveLength(1);
+    await h.sink.dispose();
+  });
+
+  test("a synthesis in flight is cancelled on pause (nothing to hold yet)", async () => {
+    const h = pauseHarness();
+    const narration = h.sink(item("m", "Still being synthesized when paused."));
+    await tick();
+    h.setPaused(true);
+    await narration;
+    expect(h.base.procs[0]!.killed).toBe(true);
+    expect(h.players).toHaveLength(0);
+    h.setPaused(false);                                           // resume with nothing paused
+    await tick();
+    expect(h.cache.current()).toBeUndefined();
+    await h.sink.dispose();
+  });
+
+  test("the fallback (non-pausable) playback is stopped on pause and resume is a no-op", async () => {
+    const h = pauseHarness({}, false);
+    const { narration, playback } = await h.startPlayback();
+    h.setPaused(true);
+    await narration;
+    expect(playback.killed).toBe(true);
+    expect(h.holds.get("wav-1")).toBe(0);
+    h.setPaused(false);
+    await tick();
+    expect(h.players).toHaveLength(1);                            // resume did not start anything
+    expect(h.errors).toEqual([]);
+    await h.sink.dispose();
+  });
+
+  test("a handle that declines to pause (returns false) is stopped", async () => {
+    const h = pauseHarness();
+    const { narration, playback } = await h.startPlayback();
+    playback.pauseOutcome = false;
+    h.setPaused(true);
+    await narration;
+    expect(playback.killed).toBe(true);
+    expect(h.holds.get("wav-1")).toBe(0);
+    await h.sink.dispose();
+  });
+
+  test.each(["hang", "throw"] as const)("a pause that answers %s degrades to stop and never hangs the queue", async (mode) => {
+    const h = pauseHarness({ pauseTimeoutMs: 20 });
+    const { narration, playback } = await h.startPlayback();
+    playback.pauseOutcome = mode;
+    h.setPaused(true);
+    await narration;
+    expect(playback.killed).toBe(true);
+    expect(h.holds.get("wav-1")).toBe(0);
+    expect(h.errors).toHaveLength(1);
+    expect(String((h.errors[0] as Error).message)).not.toContain("wav-1");
+    h.setPaused(false);
+    const again = h.sink(item("n", "The queue keeps working afterwards."));
+    await tick();
+    h.base.procs[1]!.finish();
+    await tick();
+    h.players[1]!.finish();
+    await again;
+    await h.sink.dispose();
+  });
+
+  test.each(["hang", "throw", false] as const)("a resume that answers %s degrades to stop", async (mode) => {
+    const h = pauseHarness({ pauseTimeoutMs: 20 });
+    const { narration, playback } = await h.startPlayback();
+    playback.resumeOutcome = mode;
+    h.setPaused(true);
+    await tick();
+    h.setPaused(false);
+    await narration;
+    expect(playback.killed).toBe(true);
+    expect(h.holds.get("wav-1")).toBe(0);
+    expect(h.errors).toHaveLength(1);
+    await h.sink.dispose();
+  });
+
+  test("resume issued before the pause is acknowledged runs after it, in order", async () => {
+    const h = pauseHarness();
+    const { narration, playback } = await h.startPlayback();
+    let acknowledge!: (value: boolean) => void;
+    playback.pauseOutcome = new Promise<boolean>((resolve) => { acknowledge = resolve; });
+    h.setPaused(true);
+    h.setPaused(false);
+    await tick();
+    expect(playback.resumes).toBe(0);
+    acknowledge(true);
+    await tick();
+    expect(playback.resumes).toBe(1);
+    expect(playback.killed).toBe(false);
+    playback.finish();
+    await narration;
+    await h.sink.dispose();
+  });
+
+  test("stop while paused discards the audio and releases the hold, but the instance stays paused", async () => {
+    const h = pauseHarness();
+    const { narration, playback } = await h.startPlayback();
+    h.setPaused(true);
+    await tick();
+    h.sink.stop();                                                // new user turn, session.error, ...
+    await narration;
+    expect(playback.killed).toBe(true);
+    expect(h.holds.get("wav-1")).toBe(0);
+    expect(h.isPaused()).toBe(true);
+    await h.sink(item("n", "Rejected because the instance is still paused."));
+    expect(h.base.procs).toHaveLength(1);
+    h.setPaused(false);                                           // nothing paused any more: harmless
+    await tick();
+    expect(playback.resumes).toBe(0);
+    expect(h.errors).toEqual([]);
+    await h.sink.dispose();
+  });
+
+  test("pausing twice sends one request to the handle", async () => {
+    const h = pauseHarness();
+    const { narration, playback } = await h.startPlayback();
+    h.sink.pause();
+    h.sink.pause();
+    await tick();
+    h.sink.pause();
+    await tick();
+    expect(playback.pauses).toBe(1);
+    expect(playback.killed).toBe(false);
+    h.sink.stop();
+    await narration;
+    await h.sink.dispose();
+  });
+
+  test("stop right after pause discards the playback at once: hold released and the late acknowledgement timeout reports nothing", async () => {
+    const h = pauseHarness({ pauseTimeoutMs: 20 });
+    const { narration, playback } = await h.startPlayback();
+    playback.pauseOutcome = "hang";
+    h.setPaused(true);                                            // acknowledgement now pending
+    h.sink.stop();                                                // ...and the user starts a new turn at once
+    await narration;
+    expect(playback.killed).toBe(true);
+    expect(h.holds.get("wav-1")).toBe(0);
+    await wait(80);                                               // far beyond pauseTimeoutMs
+    expect(h.errors).toEqual([]);
+    await h.sink.dispose();
+  });
+
+  test("an acknowledgement that arrives after the pause was given up does not revive the playback", async () => {
+    const h = pauseHarness({ pauseTimeoutMs: 15 });
+    const { narration, playback } = await h.startPlayback();
+    let late!: (value: boolean) => void;
+    playback.pauseOutcome = new Promise<boolean>((resolve) => { late = resolve; });
+    h.setPaused(true);
+    await narration;                                              // degraded to stop after pauseTimeoutMs
+    expect(playback.killed).toBe(true);
+    expect(h.errors).toHaveLength(1);
+    late(true);
+    await tick();
+    h.setPaused(false);
+    await tick();
+    expect(playback.resumes).toBe(0);
+    expect(h.errors).toHaveLength(1);
+    expect(h.holds.get("wav-1")).toBe(0);
+    await h.sink.dispose();
+  });
+
+  test("dispose while the pause acknowledgement is pending stops the playback and reports nothing later", async () => {
+    const h = pauseHarness({ pauseTimeoutMs: 20 });
+    const { narration, playback } = await h.startPlayback();
+    playback.pauseOutcome = "hang";
+    h.setPaused(true);
+    await h.sink.dispose();
+    await narration;
+    expect(playback.killed).toBe(true);
+    await wait(60);
+    expect(h.errors).toEqual([]);
+  });
+
+  test("removing the owning session while paused discards the paused playback", async () => {
+    const h = pauseHarness();
+    const { narration, playback } = await h.startPlayback();
+    h.setPaused(true);
+    await tick();
+    h.sink.removeSession("s");
+    await narration;
+    expect(playback.killed).toBe(true);
+    expect(h.holds.get("wav-1")).toBe(0);
+    expect(h.sink.status()).toBeUndefined();
+    await h.sink.dispose();
+  });
+
+  test("dispose while paused stops the playback cleanly and releases the hold", async () => {
+    const h = pauseHarness({ timeoutMs: 20, playbackTimeoutMs: 20 });
+    const { narration, playback } = await h.startPlayback();
+    h.setPaused(true);
+    await tick();
+    await h.sink.dispose();
+    await narration;
+    expect(playback.killed).toBe(true);
+    expect(h.holds.get("wav-1")).toBe(0);
+  });
+
+  test("pause and resume keep the revision, never synthesize, and gate Repeat only through the paused flag", async () => {
+    const h = pauseHarness();
+    const { narration, playback } = await h.startPlayback();
+    const before = h.sink.status();
+    expect(before).toEqual({ sessionID: "s", revision: 1 });
+    h.setPaused(true);
+    await tick();
+    await h.sink.repeat("s", 1);                                  // disabled while paused
+    expect(h.players).toHaveLength(1);
+    expect(h.sink.status()).toEqual(before);
+    h.setPaused(false);
+    await tick();
+    expect(h.sink.status()).toEqual(before);
+    expect(h.base.procs).toHaveLength(1);                         // still the one original synthesis
+    playback.finish();
+    await narration;
+    const repeat = h.sink.repeat("s", 1);                         // available again after resume
+    await tick();
+    expect(h.players).toHaveLength(2);
+    expect(h.base.procs).toHaveLength(1);
+    h.players[1]!.finish();
+    await repeat;
+    await h.sink.dispose();
+  });
+
+  test("pause with nothing playing only cancels queued work and never throws", async () => {
+    const h = pauseHarness();
+    expect(() => h.setPaused(true)).not.toThrow();
+    expect(() => h.setPaused(false)).not.toThrow();
+    expect(h.players).toHaveLength(0);
+    await h.sink.dispose();
+  });
+});

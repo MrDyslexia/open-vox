@@ -109,23 +109,27 @@ export function createCoordinator(client: Client, directory: string, sink: Sink 
 export type PauseState = { isPaused: () => boolean; setPaused: (paused: boolean) => void };
 
 /**
- * Pausing cuts the current narration exactly once, on the false->true edge. The flag is already set
- * when `onPause` runs, so queued and in-flight work sees the paused state; resuming needs no action.
+ * `onPause` runs exactly once per false->true edge and `onResume` exactly once per true->false edge. The
+ * flag is already updated when either runs, so queued and in-flight work sees the new state. Both are
+ * contained: a failing callback never changes the flag or escapes.
  */
-export function createPauseState(onPause: () => void): PauseState {
+export function createPauseState(onPause: () => void, onResume?: () => void): PauseState {
   let paused = false;
   return {
     isPaused: () => paused,
     setPaused(next) {
       if (next === paused) return;
       paused = next;
-      if (next) { try { onPause(); } catch {} }
+      try { (next ? onPause : onResume)?.(); } catch {}
     },
   };
 }
 
+/** Pause edge of a sink: a real pause when the sink supports it, otherwise the old behavior (stop). */
+const pauseSink = (sink: SpeechSink) => (sink.pause ? sink.pause() : sink.stop());
+
 export function createOpenVox(client: Client, directory: string, sink: SpeechSink,
-  pause: PauseState = createPauseState(() => sink.stop()),
+  pause: PauseState = createPauseState(() => pauseSink(sink), () => sink.resume?.()),
   controlOptions?: { publish: (command: string) => Promise<void>; instance?: string }): Hooks {
   const coordinator = createCoordinator(client, directory, sink);
   const control = controlOptions && createRepeatControl({ ...controlOptions,
@@ -161,13 +165,15 @@ export function createOpenVox(client: Client, directory: string, sink: SpeechSin
   } };
 }
 
-/** Skips new narrations while paused; stop() always passes through. */
+/** Skips new narrations while paused; stop(), pause() and resume() always pass through. */
 export function withPause(sink: SpeechSink, isPaused: () => boolean): SpeechSink {
   const wrapped = (async (selection: Selection) => {
     if (isPaused()) return;
     await sink(selection);
   }) as SpeechSink;
   wrapped.stop = () => sink.stop();
+  if (sink.pause) wrapped.pause = () => sink.pause!();
+  if (sink.resume) wrapped.resume = () => sink.resume!();
   wrapped.status = () => sink.status?.();
   wrapped.repeat = async (sessionID, revision, expires) => { if (!isPaused()) await sink.repeat?.(sessionID, revision, expires); };
   wrapped.removeSession = (sessionID) => sink.removeSession?.(sessionID);
@@ -265,8 +271,9 @@ export const OpenVoxPlugin: Plugin = async ({ client, directory }) => {
   const log = debugLog(envValue(process.env, "LOG"));
   let enabled = envValue(process.env, "DISABLED") !== "1" && process.platform === "win32";
   const config = createConfigReader();
-  // Pause is per plugin instance and in memory (D1); the sink exists below, so stop() is resolved lazily.
-  const pause = createPauseState(() => sink.stop());
+  // Pause is per plugin instance and in memory (D1); the sink exists below, so its methods are resolved lazily.
+  // The pause edge freezes the active playback (real pause); the resume edge continues it.
+  const pause = createPauseState(() => pauseSink(sink), () => sink.resume?.());
   const isPaused = pause.isPaused;
   let cache: AudioCache | undefined;
   if (enabled) {
@@ -284,6 +291,8 @@ export const OpenVoxPlugin: Plugin = async ({ client, directory }) => {
     await sink(selection);
   }) as SpeechSink;
   logged.stop = () => sink.stop();
+  logged.pause = sink.pause;
+  logged.resume = sink.resume;
   logged.repeat = sink.repeat;
   logged.status = sink.status;
   logged.removeSession = sink.removeSession;
