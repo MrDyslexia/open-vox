@@ -768,3 +768,61 @@ describe("real pause and resume", () => {
     await h.sink.dispose();
   });
 });
+
+describe("per-session stop", () => {
+  const forSession = (sessionID: string, id: string, text = "A narration for one session.") => ({ sessionID, messageID: id, text });
+
+  test("stopSession cancels only the active job of that session and keeps the queued job of another session", async () => {
+    const h = harness();
+    const sink = createSpeechSink({ spawn: h.spawn });
+    const a = sink(forSession("A", "a1"));
+    const b = sink(forSession("B", "b1"));
+    await tick();
+    sink.stopSession!("A");
+    await a;
+    await tick();
+    expect(h.procs[0]!.killed).toBe(true);
+    expect(h.procs).toHaveLength(2);                              // B kept its place and now runs
+    expect(h.procs[1]!.killed).toBe(false);
+    h.procs[1]!.finish();
+    await b;
+    await sink.dispose!();
+  });
+
+  test("stopSession of another session neither kills the active job nor drops its queue", async () => {
+    const h = harness();
+    const sink = createSpeechSink({ spawn: h.spawn });
+    const a = sink(forSession("A", "a1"));
+    const b = sink(forSession("B", "b1"));
+    await tick();
+    sink.stopSession!("C");
+    sink.stopSession!("B");                                      // queued only: dropped without touching A
+    await b;
+    expect(h.procs[0]!.killed).toBe(false);
+    h.procs[0]!.finish();
+    await a;
+    expect(h.procs).toHaveLength(1);
+    await sink.dispose!();
+  });
+
+  test("stopSession does not forget the cached audio of that session", async () => {
+    let last: { file: string; sessionID: string; revision: number } | undefined;
+    const forgotten: string[] = [];
+    const cache = {
+      candidate: () => "wav-1", current: () => last,
+      promote(file: string, sessionID: string) { last = { file, sessionID, revision: 1 }; return true; },
+      discard() {}, hold: () => () => {}, forget(sessionID: string) { forgotten.push(sessionID); }, dispose() {},
+    };
+    const h = harness();
+    const engine = Object.assign(() => { throw new Error("cache needs an artifact"); }, { synthesize: (text: string) => h.spawn([], text) });
+    const sink = createSpeechSink({ engine, cache, player: () => ({ exited: Promise.resolve(0), kill() {} }) } as any);
+    last = { file: "kept", sessionID: "A", revision: 0 };
+    const a = sink(forSession("A", "a1"));
+    await tick();
+    sink.stopSession!("A");
+    await a;
+    expect(forgotten).toEqual([]);
+    expect(last?.file).toBe("kept");
+    await sink.dispose!();
+  });
+});
