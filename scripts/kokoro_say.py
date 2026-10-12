@@ -18,6 +18,7 @@ def main() -> int:
     parser.add_argument("--out", required=True)
     parser.add_argument("--plan-json", action="store_true")
     parser.add_argument("--app-home", help="Local app home; no provisioning during inference")
+    parser.add_argument("--lid-manifest", help="Bundled pinned LID manifest; defaults relative to this helper")
     args = parser.parse_args()
 
     if args.plan_json:
@@ -25,12 +26,15 @@ def main() -> int:
         for key in ('HF_HUB_OFFLINE', 'TRANSFORMERS_OFFLINE', 'HF_HUB_DISABLE_TELEMETRY',
                     'HF_HUB_DISABLE_PROGRESS_BARS', 'DO_NOT_TRACK'):
             os.environ[key] = '1'
+        os.environ['HF_HUB_DISABLE_IMPLICIT_TOKEN'] = '1'
+        os.environ['HF_TOKEN'] = ''
+        os.environ['HUGGING_FACE_HUB_TOKEN'] = ''
         try:
             from narration_lid import LocalDetector
             from narration_resolver import resolve_plan
             from narration_synthesis import load_plan, local_lid_directory, raw_phonemizer, synthesize_envelope
             plan = load_plan(sys.stdin)
-            detector = LocalDetector(local_lid_directory(args.app_home)) if args.app_home else None
+            detector = LocalDetector(local_lid_directory(args.app_home), args.lid_manifest) if args.app_home else None
             resolved = resolve_plan(plan, detector)
             kokoro = Kokoro(args.model, args.voices)
             english = args.lang if args.lang in ('en-us', 'en-gb') else 'en-us'

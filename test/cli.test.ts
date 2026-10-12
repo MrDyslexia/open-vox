@@ -3,6 +3,7 @@ import { runCli, type CliDeps } from "../src/cli";
 import { DEFAULT_CONFIG, parseConfig, type Config } from "../src/config";
 import type { InstallFs } from "../src/installer";
 import { setupKokoro, KOKORO_FILES } from "../src/setup";
+import { inspectNarration, LID_MANIFEST, narrationPaths, PN_READY_RECORD } from "../src/narration-assets";
 
 function harness(overrides: Partial<CliDeps> = {}) {
   let config: Config = DEFAULT_CONFIG;
@@ -134,6 +135,50 @@ describe("install / uninstall", () => {
 });
 
 describe("status, config and misc", () => {
+  test("narration setup is explicit and help distinguishes contextual provisioning", async () => {
+    const h = harness();
+    expect(await runCli(["setup", "narration"], h.deps)).toBe(0);
+    expect(h.out).toContain("setup narration");
+    expect((await run(["help"])).h.out.join("\n")).toContain("setup narration");
+  });
+  test("doctor separates missing contextual narration from Kokoro availability", async () => {
+    const h = harness({ exists: () => true });
+    await runCli(["doctor"], h.deps);
+    expect(h.out.join("\n")).toContain("Kokoro engine: ready");
+    expect(h.out.join("\n")).toMatch(/WARN.*Contextual narration:.*degraded.*setup narration/);
+  });
+  test("doctor reports contextual verification separately and does not mutate configuration", async () => {
+    const h = harness({ exists: () => true, narrationStatus: async () => ({ ready: true, code: "verified-local-assets-and-dependencies" }) });
+    h.deps.writeConfig = () => { throw Error("doctor must not write"); };
+    await runCli(["doctor"], h.deps);
+    expect(h.out.join("\n")).toMatch(/OK.*Contextual narration: verified local assets\/dependencies/);
+    h.deps.narrationStatus = async () => ({ ready: false, code: "local-model-integrity-failed" });
+    h.out.length = 0;
+    await runCli(["doctor"], h.deps);
+    expect(h.out.join("\n")).toMatch(/WARN.*Contextual narration: degraded: local-model-integrity-failed/);
+    expect(await runCli(["setup", "narration", "extra"], h.deps)).toBe(2);
+  });
+  test("doctor binds provenance probing to configured app home and degrades foreign dependencies", async () => {
+    const home = "C:\\managed-home";
+    let probes = 0;
+    const h = harness({ exists: () => true, env: { OPEN_VOX_HOME: home },
+      narrationStatus: root => inspectNarration(root, {
+        exists: () => true, read: () => PN_READY_RECORD, validateDirectory() {},
+        fingerprint: p => LID_MANIFEST.files.find(f => p.endsWith(`\\${f.filename}`))!,
+        probe: async (python, expectedVenv) => {
+          probes++;
+          expect(root).toBe(home);
+          expect(python).toBe(narrationPaths(home).python);
+          expect(expectedVenv).toBe(narrationPaths(home).venv);
+          return 1;
+        },
+      }) });
+    h.deps.writeConfig = () => { throw Error("doctor must not write"); };
+    await runCli(["doctor"], h.deps);
+    expect(probes).toBe(1);
+    expect(h.out.join("\n")).toContain("Kokoro engine: ready");
+    expect(h.out.join("\n")).toMatch(/WARN.*Contextual narration: degraded: missing-or-incompatible-dependencies/);
+  });
   test("status shows voices and install state but no pause state", async () => {
     const { h } = await run(["status"]);
     const text = h.out.join("\n");

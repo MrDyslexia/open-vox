@@ -3,11 +3,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 from types import SimpleNamespace
-from contextlib import nullcontext
+from contextlib import nullcontext, contextmanager
 import json
+import tempfile
+import hashlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'scripts'))
-from narration_lid import LABELS, LocalDetector, sanitize_evidence, token_windows
+from narration_lid import CHECKPOINT, REVISION, FILES, LABELS, LocalDetector, sanitize_evidence, token_windows, validate_manifest, verify_local_assets
 
 
 class Tensor:
@@ -74,6 +76,23 @@ def model_config():
             'max_position_embeddings': 512}
 
 
+@contextmanager
+def assets(config=None):
+    """Tiny authentic hashing fixtures; no real weights/dependencies or network."""
+    with tempfile.TemporaryDirectory() as root:
+        directory = Path(root) / 'model'
+        directory.mkdir()
+        entries = []
+        for name in FILES:
+            data = json.dumps(model_config() if config is None else config).encode() if name == 'config.json' else b'fixture'
+            (directory / name).write_bytes(data)
+            entries.append(dict(filename=name, bytes=len(data), sha256=hashlib.sha256(data).hexdigest()))
+        manifest = Path(root) / 'manifest.json'
+        manifest.write_text(json.dumps(dict(schemaVersion=1, modelId=CHECKPOINT, revision=REVISION, files=entries)), encoding='utf-8')
+        with patch('narration_lid.MANIFEST_PATH', manifest):
+            yield directory, manifest
+
+
 def token(start, end, label='en', **extras):
     scores = {key: float(key == label) for key in LABELS}
     return dict(start=start, end=end, label=label, score=1.0, scores=scores,
@@ -81,6 +100,14 @@ def token(start, end, label='en', **extras):
 
 
 class LidTests(unittest.TestCase):
+    def test_unchecked_local_weights_are_rejected_before_dependency_import(self):
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root)
+            for name in ('config.json', 'model.safetensors', 'tokenizer_config.json', 'vocab.txt', 'special_tokens_map.json'):
+                (directory / name).write_text(json.dumps(model_config()) if name == 'config.json' else 'wrong', encoding='utf-8')
+            with patch.dict(sys.modules, {'torch': None, 'transformers': None}):
+                result = LocalDetector(directory).detect('synthetic text')
+            self.assertEqual(result['diagnostics'], ['local-model-integrity-failed'])
     def test_invalid_evidence_safe(self):
         cases = [None, 'bad', [None], [token(0, 3, score_override=2)],
                  [dict(token(0, 3), score=10 ** 10000)],
@@ -139,13 +166,11 @@ class LidTests(unittest.TestCase):
             self.assertEqual(detector.detect('a' * 4001)['diagnostics'], ['detector-input-limit'])
 
     def test_missing_dependencies_and_malformed_model(self):
-        with patch('narration_lid.Path.is_dir', return_value=True), patch('narration_lid.Path.is_file', return_value=True):
-            with patch('narration_lid.Path.read_text', return_value=json.dumps(model_config())):
-                with patch.dict(sys.modules, {'torch': None, 'transformers': None}):
-                    self.assertEqual(LocalDetector('local').detect('word')['diagnostics'], ['missing-detector-dependencies'])
-            for config in [None, [], {'id2label': {'0': 'LABEL_0'}}, dict(model_config(), max_position_embeddings=1024)]:
-                with patch('narration_lid.Path.read_text', return_value=json.dumps(config)):
-                    self.assertEqual(LocalDetector('local').detect('word')['diagnostics'], ['invalid-local-model-config'])
+        with assets() as (directory, manifest), patch.dict(sys.modules, {'torch': None, 'transformers': None}):
+            self.assertEqual(LocalDetector(directory, manifest).detect('word')['diagnostics'], ['missing-detector-dependencies'])
+        for config in [[], {'id2label': {'0': 'LABEL_0'}}, dict(model_config(), max_position_embeddings=1024)]:
+            with assets(config) as (directory, manifest):
+                self.assertEqual(LocalDetector(directory, manifest).detect('word')['diagnostics'], ['invalid-local-model-config'])
 
     def test_loader_local_only_cpu_eval_safetensors(self):
         tokenizer, model = FakeTokenizer(), FakeModel()
@@ -161,10 +186,12 @@ class LidTests(unittest.TestCase):
 
         transformers = SimpleNamespace(AutoTokenizer=SimpleNamespace(from_pretrained=load_tokenizer),
                                        AutoModelForTokenClassification=SimpleNamespace(from_pretrained=load_model))
-        with patch('narration_lid.Path.is_dir', return_value=True), patch('narration_lid.Path.is_file', return_value=True), \
-                patch('narration_lid.Path.read_text', return_value=json.dumps(model_config())), \
-                patch.dict(sys.modules, {'torch': TORCH, 'transformers': transformers}):
-            result = LocalDetector('local').detect('word')
+        with assets() as (directory, manifest), patch.dict(sys.modules, {'torch': TORCH, 'transformers': transformers}), \
+                patch('narration_lid.verify_local_assets', wraps=verify_local_assets) as verify:
+            detector = LocalDetector(directory, manifest)
+            result = detector.detect('word')
+            self.assertEqual(detector.detect('another')['status'], 'available')
+            verify.assert_called_once()
         self.assertEqual(result['status'], 'available')
         self.assertTrue(model.eval_called)
         self.assertEqual(model.device, 'cpu')
@@ -174,6 +201,42 @@ class LidTests(unittest.TestCase):
             self.assertFalse(kwargs['trust_remote_code'])
             if kind == 'model':
                 self.assertTrue(kwargs['use_safetensors'])
+
+    def test_mutated_bytes_never_load_and_failure_is_cached(self):
+        with assets() as (directory, manifest):
+            (directory / 'model.safetensors').write_bytes(b'corrupt')
+            detector = LocalDetector(directory, manifest)
+            with patch.dict(sys.modules, {'torch': TORCH, 'transformers': None}), \
+                    patch('narration_lid.verify_local_assets', wraps=verify_local_assets) as verify:
+                self.assertEqual(detector.detect('one')['diagnostics'], ['local-model-integrity-failed'])
+                self.assertEqual(detector.detect('two')['diagnostics'], ['local-model-integrity-failed'])
+                verify.assert_called_once()
+
+    def test_transport_manifest_cannot_replace_bundled_pin(self):
+        with assets() as (directory, manifest):
+            other = manifest.with_name('other.json')
+            value = json.loads(manifest.read_text())
+            value['files'][0]['sha256'] = '0' * 64
+            other.write_text(json.dumps(value), encoding='utf-8')
+            self.assertEqual(LocalDetector(directory, other).detect('one')['diagnostics'], ['local-model-integrity-failed'])
+
+    def test_extra_model_files_are_rejected(self):
+        with assets() as (directory, manifest):
+            (directory / 'tokenizer.json').write_text('{}')
+            self.assertEqual(LocalDetector(directory, manifest).detect('one')['diagnostics'], ['local-model-integrity-failed'])
+
+    def test_manifest_rejects_unsafe_files_hashes_and_revision(self):
+        with assets() as (_, manifest):
+            original = json.loads(manifest.read_text())
+            for field, value in [('filename', '../config.json'), ('filename', 'C:\\config.json'), ('filename', 'model.bin'),
+                                 ('sha256', 'A' * 64), ('bytes', True), ('url', 'https://evil.test')]:
+                changed = json.loads(json.dumps(original))
+                changed['files'][0][field] = value
+                with self.assertRaises(ValueError):
+                    validate_manifest(changed)
+            original['revision'] = 'main'
+            with self.assertRaises(ValueError):
+                validate_manifest(original)
 
     def test_bad_tokenizer_shape_and_bad_logits_degrade(self):
         with self.assertRaises(ValueError):
