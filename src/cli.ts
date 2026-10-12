@@ -48,6 +48,7 @@ Controls (apply immediately, no restart)
   voices                                    List available voices
   speed <0.5-2>                             Speaking speed
   engine auto|kokoro|piper|sapi             Speech engine
+  language es|en                           Narration base language (one voice per utterance)
   say <text>                                Speak a test sentence
   config path|show|reset                    Inspect or reset the settings file
 `;
@@ -100,6 +101,7 @@ function status(deps: CliDeps): void {
   deps.out(`voices: es: ${config.voices.es}, en: ${config.voices.en}`);
   deps.out(`speed: ${config.speed}`);
   deps.out(`engine: ${config.engine}`);
+  deps.out(`narration language: ${config.narrationLanguage}`);
   deps.out(`plugin: ${state.plugin ? "installed" : "not installed"}`);
   deps.out(`sidebar block: ${state.tuiFile && state.tuiRegistered ? "installed" : "not installed"}`);
   deps.out(`config file: ${deps.configPath}`);
@@ -141,6 +143,13 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
       }
       deps.writeConfig({ speed: value });
       deps.out(`Speed set to ${value}.`);
+      return 0;
+    }
+    case "language": {
+      const language = args[0];
+      if (args.length !== 1 || (language !== "es" && language !== "en")) return usage(deps, "Usage: open-vox language es|en");
+      deps.writeConfig({ narrationLanguage: language });
+      deps.out(`Narration language set to ${language}.`);
       return 0;
     }
     case "engine": {
@@ -202,7 +211,7 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
       if (sub === "path") { deps.out(deps.configPath); return 0; }
       if (sub === "show") { deps.out(JSON.stringify(deps.readConfig(), null, 2)); return 0; }
       if (sub === "reset") {
-        deps.writeConfig({ voices: { es: "em_alex", en: "af_heart" }, speed: 1, engine: "auto" });
+        deps.writeConfig({ voices: { es: "em_alex", en: "af_heart" }, speed: 1, engine: "auto", narrationLanguage: "es" });
         deps.out("Settings reset to defaults.");
         return 0;
       }

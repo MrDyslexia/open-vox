@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createSpeechSink, sapiEngine, playWav, type SpeechProcess, type Spawn } from "../src/speech-sink";
+import { createNarrationPlan } from "../src/markdown-narration";
 
 type Fake = SpeechProcess & { stdin: string; killed: boolean; finish(code?: number): void; fail(error: Error): void };
 
@@ -24,7 +25,34 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 const item = (id: string, text: string) => ({ sessionID: "s", messageID: id, text });
 
 describe("speech sink", () => {
-  test("speaks prepared text with the detected language", async () => {
+  test("plan preparation contains errors and stops that occur during parsing", async () => {
+    const errors: unknown[] = [];
+    const h = harness();
+    const sink = createSpeechSink({ spawn: h.spawn, onError: e => errors.push(e),
+      preparePlan: () => { throw new Error("parser failure"); } });
+    await sink(item("m", "Original"));
+    expect(errors).toHaveLength(1);
+    expect(h.procs).toHaveLength(0);
+    const raced = createSpeechSink({ spawn: h.spawn, preparePlan: (text, language) => {
+      raced.stop(); return createNarrationPlan(text, language);
+    } });
+    await raced(item("n", "Cancelled during parsing"));
+    expect(h.procs).toHaveLength(0);
+  });
+  test("reads configured base once per selection and passes untouched Unicode plan", async () => {
+    const plans: any[] = [];
+    let reads = 0;
+    const engine = Object.assign(() => { throw new Error("legacy path"); }, {
+      speakPlan(plan: any) { plans.push(plan); return { exited: Promise.resolve(0), kill() {} }; },
+    });
+    const sink = createSpeechSink({ engine, narrationLanguage: () => { reads++; return reads === 1 ? "es" : "en"; } });
+    await sink(item("a", "😀 **é** Open editor API"));
+    await sink(item("b", "Second"));
+    expect(reads).toBe(2);
+    expect(plans.map(p => p.defaultLanguage)).toEqual(["es", "en"]);
+    expect(plans[0].original).toBe("😀 **é** Open editor API");
+  });
+  test("speaks derived structural text", async () => {
     const h = harness();
     const sink = createSpeechSink({ spawn: h.spawn });
     const pending = sink(item("m1", "**Hola**, esta es la respuesta que necesitas para el proyecto."));
@@ -38,8 +66,11 @@ describe("speech sink", () => {
 
   test("passes the language to the process arguments", async () => {
     const calls: string[][] = [];
-    const sink = createSpeechSink({ spawn: (args) => { calls.push(args); return { exited: Promise.resolve(0), kill() {} }; } });
+    let language: "es" | "en" = "en";
+    const sink = createSpeechSink({ narrationLanguage: () => language,
+      spawn: (args) => { calls.push(args); return { exited: Promise.resolve(0), kill() {} }; } });
     await sink(item("m1", "Here is the answer that you need for the project."));
+    language = "es";
     await sink(item("m2", "Aquí está la respuesta que necesitas para el proyecto."));
     expect(calls[0]!.join(" ")).toContain("en");
     expect(calls[1]!.join(" ")).toContain("es");
@@ -48,7 +79,7 @@ describe("speech sink", () => {
   test("skips messages that are empty after preparation", async () => {
     const h = harness();
     const sink = createSpeechSink({ spawn: h.spawn });
-    await sink(item("m1", "```\ncode only\n```"));
+    await sink(item("m1", "<!-- omitted only -->"));
     expect(h.procs).toHaveLength(0);
   });
 
@@ -149,7 +180,7 @@ describe("exact-audio replay", () => {
     expect(calls[1]!.args.join(" ")).toContain("PlaySync()");
     expect(calls[1]!.args.join(" ")).not.toContain("Speak");
   });
-  function replayHarness() {
+  function replayHarness(options: Record<string, unknown> = {}) {
     const h = harness();
     let last: { file: string; sessionID: string; revision: number } | undefined;
     let paused = false;
@@ -171,9 +202,45 @@ describe("exact-audio replay", () => {
       synthesize(text: string, _language: string, file: string) { generated.push(file); return h.spawn([], text); },
       play(file: string) { played.push(file); return h.spawn([], "player"); },
     });
-    const sink = createSpeechSink({ engine, cache, player: engine.play, isPaused: () => paused, now: () => now } as any) as any;
+    const sink = createSpeechSink({ engine, cache, player: engine.play, isPaused: () => paused, now: () => now, ...options } as any) as any;
     return { ...h, sink, cache, played, generated, removed, pause: (value: boolean) => { paused = value; }, time: (value: number) => { now = value; } };
   }
+
+  test("plan-aware Repeat bypasses parser/resolver/inference callbacks; late cancelled success cannot promote", async () => {
+    let parses = 0, syntheses = 0;
+    const process = harness();
+    const engine = Object.assign(() => { throw new Error("legacy"); }, {
+      synthesizePlan: () => { syntheses++; return process.spawn([], "resolved/model mock"); },
+    });
+    const h = replayHarness({ engine, preparePlan: (text: string, language: "es" | "en") => {
+      parses++; return createNarrationPlan(text, language);
+    } });
+    const first = h.sink(item("m", "API Open editor"));
+    process.procs[0]!.finish();
+    await tick(); h.procs[0]!.finish(); await first;
+    const repeat = h.sink.repeat("s", 1);
+    await tick(); h.procs[1]!.finish(); await repeat;
+    expect([parses, syntheses]).toEqual([1, 1]);
+    expect(h.played).toEqual(["wav-1", "wav-1"]);
+    const stale = h.sink(item("n", "Cancelled new plan"));
+    process.procs[1]!.kill = () => {};
+    h.sink.stop(); process.procs[1]!.finish(0); await stale;
+    expect(h.cache.current()?.file).toBe("wav-1");
+    expect(h.removed).toContain("wav-2");
+    await h.sink.dispose();
+  });
+
+  test("limit outcome is observable, fallback uses flattened bounded text and configured language", async () => {
+    const seen: { text: string; language: string }[] = [], diagnostics: string[] = [];
+    const sink = createSpeechSink({ maxLength: 12, narrationLanguage: "en", onDiagnostic: c => diagnostics.push(c),
+      engine: (text, language) => { seen.push({ text, language }); return { exited: Promise.resolve(0), kill() {} }; } });
+    await sink(item("a", "**hello** world additional text"));
+    await sink(item("b", "short"));
+    expect(seen[0]).toEqual({ text: "hello world", language: "en" });
+    expect(diagnostics.filter(c => c.startsWith("reduced"))).toHaveLength(1);
+    expect(diagnostics).toContain("narration-limit:truncated");
+    expect(seen[0]!.text).not.toContain("schemaVersion");
+  });
 
   test("replays the exact retained artifact without synthesizing, only for its session", async () => {
     const h = replayHarness();
@@ -422,6 +489,25 @@ describe("real pause and resume", () => {
     await narration;
     expect(h.holds.get("wav-1")).toBe(0);
     expect(h.errors).toEqual([]);
+    await h.sink.dispose();
+  });
+
+  test("plan-aware paused transport keeps its exact old artifact and cancels queued preparation without new synthesis", async () => {
+    let parses = 0;
+    const h = pauseHarness({ preparePlan: (text: string, language: "es" | "en") => {
+      parses++; return createNarrationPlan(text, language);
+    } });
+    const { narration, playback } = await h.startPlayback("API Open editor");
+    const queued = h.sink(item("next", "A queued new plan"));
+    h.setPaused(true); await queued; await tick();
+    expect(h.holds.get("wav-1")).toBe(1);
+    expect(h.cache.current()?.file).toBe("wav-1");
+    h.setPaused(false); await tick();
+    expect(playback.resumes).toBe(1);
+    expect(h.base.procs).toHaveLength(1);
+    expect(parses).toBe(2);
+    playback.finish(); await narration;
+    expect(h.holds.get("wav-1")).toBe(0);
     await h.sink.dispose();
   });
 

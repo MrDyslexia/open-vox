@@ -1,6 +1,8 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import type { Selection } from "./final-response";
-import { detectLanguage, prepareSpeech, type Language } from "./speech-text";
+import { type Language } from "./speech-text";
+import { createNarrationPlan } from "./markdown-narration";
+import { defaultNarrationPolicies, flattenNarrationPlan, type NarrationPlan } from "./narration-plan";
 import type { AudioStore } from "./audio-cache";
 import type { AudioStatus } from "./repeat-control";
 
@@ -20,6 +22,8 @@ export type SpeechProcess = {
 export type Spawn = (args: string[], stdin: string) => SpeechProcess;
 export type Engine = ((text: string, language: Language) => SpeechProcess) & {
   synthesize?: (text: string, language: Language, wav: string) => SpeechProcess;
+  synthesizePlan?: (plan: NarrationPlan, wav: string) => SpeechProcess;
+  speakPlan?: (plan: NarrationPlan) => SpeechProcess;
 };
 export type SpeechSink = ((selection: Selection) => Promise<void>) & {
   stop(): void;
@@ -51,6 +55,9 @@ export type SpeechSinkOptions = {
   /** Time a playback handle gets to acknowledge `pause()`/`resume()` before it is stopped instead. */
   pauseTimeoutMs?: number;
   maxLength?: number;
+  narrationLanguage?: Language | (() => Language);
+  preparePlan?: typeof createNarrationPlan;
+  onDiagnostic?: (code: string) => void;
   onError?: (error: unknown) => void;
   cache?: AudioStore;
   player?: (wav: string) => SpeechProcess;
@@ -101,7 +108,7 @@ export function playWav(wav: string, spawn: Spawn = windowsSpawn): SpeechProcess
   return spawn(["-NoProfile", "-NonInteractive", "-Command", script], "");
 }
 
-type Job = { sessionID: string; text?: string; language?: Language; revision?: number; expires?: number; done: () => void };
+type Job = { sessionID: string; plan?: NarrationPlan; revision?: number; expires?: number; done: () => void };
 
 /** The process the pump is waiting on, with its backstop timer under the sink's control. */
 type Active = { proc: SpeechProcess; audible: boolean; arm(): void; disarm(): void };
@@ -126,6 +133,9 @@ export function createSpeechSink(options: SpeechSinkOptions = {}): SpeechSink {
   const timeoutMs = options.timeoutMs ?? 120_000;
   const pauseTimeoutMs = options.pauseTimeoutMs ?? 3_000;
   const report = (error: unknown) => { try { options.onError?.(error); } catch {} };
+  const diagnostic = (code: string) => { try { options.onDiagnostic?.(code); } catch {} };
+  let reducedReported = false;
+  const reduced = () => { if (!reducedReported) { reducedReported = true; diagnostic("reduced-pronunciation:text-only-engine"); } };
   const queue: Job[] = [];
   let current: Active | undefined;
   let frozen: Frozen | undefined;
@@ -222,11 +232,15 @@ export function createSpeechSink(options: SpeechSinkOptions = {}): SpeechSink {
         try {
           if (!valid()) continue;
           if (cache) {
-            if (job.text !== undefined) {
-              if (!engine.synthesize) throw new Error("Engine cannot produce cached audio");
+            if (job.plan !== undefined) {
+              if (!engine.synthesizePlan && !engine.synthesize) throw new Error("Engine cannot produce cached audio");
               candidate = cache.candidate();
               release = cache.hold(candidate);
-              const code = await run(engine.synthesize(job.text, job.language!, candidate));
+              if (!engine.synthesizePlan) reduced();
+              if (!valid()) continue;
+              const proc = engine.synthesizePlan ? engine.synthesizePlan(job.plan, candidate)
+                : engine.synthesize!(flattenNarrationPlan(job.plan), job.plan.defaultLanguage, candidate);
+              const code = await run(proc);
               if (code !== 0) throw new Error(`synthesis process exited with code ${code}`);
               if (!valid()) continue;
               if (!cache.promote(candidate, job.sessionID)) throw new Error("Invalid generated audio");
@@ -239,8 +253,11 @@ export function createSpeechSink(options: SpeechSinkOptions = {}): SpeechSink {
             release = cache.hold(audio.file);
             const code = await run((options.player ?? playWav)(audio.file), options.playbackTimeoutMs ?? timeoutMs, true);
             if (code !== 0 && valid()) report(new Error(`player exited with code ${code}`));
-          } else if (job.text !== undefined) {
-            const code = await run(engine(job.text, job.language!));
+          } else if (job.plan !== undefined) {
+            if (!engine.speakPlan) reduced();
+            if (!valid()) continue;
+            const code = await run(engine.speakPlan ? engine.speakPlan(job.plan)
+              : engine(flattenNarrationPlan(job.plan), job.plan.defaultLanguage));
             if (code !== 0 && valid()) report(new Error(`speech process exited with code ${code}`));
           }
         } catch (error) {
@@ -259,11 +276,22 @@ export function createSpeechSink(options: SpeechSinkOptions = {}): SpeechSink {
 
   const sink = ((selection: Selection) => {
     if (disposed || options.enabled === false || paused()) return Promise.resolve();
-    const text = prepareSpeech(selection.text, options.maxLength);
-    if (!text) return Promise.resolve();
+    const mine = generation;
+    let plan: NarrationPlan;
+    try {
+      const language = typeof options.narrationLanguage === "function" ? options.narrationLanguage() : options.narrationLanguage ?? "es";
+      const policy = options.maxLength === undefined ? defaultNarrationPolicies : {
+        ...defaultNarrationPolicies, maxNarrationLength: Math.min(4000, options.maxLength),
+      };
+      plan = (options.preparePlan ?? createNarrationPlan)(selection.text, language, policy);
+      if (plan.outcome !== "complete") diagnostic(`narration-limit:${plan.outcome}`);
+      if (plan.outcome === "unsplittable") throw new Error("Narration contains an unsplittable technical unit");
+    } catch (error) { report(error); return Promise.resolve(); }
+    // Preparation callbacks/diagnostics may invalidate this selection synchronously.
+    if (disposed || mine !== generation || paused() || !flattenNarrationPlan(plan)) return Promise.resolve();
     return new Promise<void>((resolve) => {
       while (queue.length >= maxPending) queue.shift()!.done();
-      queue.push({ sessionID: selection.sessionID, text, language: detectLanguage(text), done: resolve });
+      queue.push({ sessionID: selection.sessionID, plan, done: resolve });
       if (!running) idle = pump();
     });
   }) as SpeechSink;
