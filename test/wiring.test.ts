@@ -9,10 +9,12 @@ import { encodeCommand, decodeCommand } from "../src/repeat-control";
 
 function fakeSink() {
   const spoken: string[] = [];
-  let stops = 0;
+  let stops = 0, pauses = 0, resumes = 0;
   const sink = ((s: { text: string }) => { spoken.push(s.text); return Promise.resolve(); }) as unknown as SpeechSink;
   sink.stop = () => { stops++; };
-  return { sink, spoken, stops: () => stops };
+  sink.pause = () => { pauses++; };
+  sink.resume = () => { resumes++; };
+  return { sink, spoken, stops: () => stops, pauses: () => pauses, resumes: () => resumes };
 }
 const client = { session: { get: async () => ({ error: "x" }), message: async () => ({ error: "x" }) } } as any;
 const user = (id: string, created: number) => ({ type: "message.updated", properties: { info: { id, sessionID: "ses_a", role: "user", time: { created } } } }) as any;
@@ -103,6 +105,29 @@ describe("live sink player wiring", () => {
     await replay;
     await sink.dispose!();
   });
+
+  test("the live sink forwards pause and resume to the capabilities of the injected player handle", async () => {
+    let close!: (code: number) => void;
+    const calls: string[] = [];
+    const handle = {
+      exited: new Promise<number>((resolve) => { close = resolve; }),
+      kill() { calls.push("kill"); close(1); },
+      pause: async () => { calls.push("pause"); return true; },
+      resume: async () => { calls.push("resume"); return true; },
+    };
+    let paused = false;
+    const sink = createLiveSink({}, config(), () => {}, true, { cache, isPaused: () => paused, player: () => handle });
+    const replay = sink.repeat!("ses_a", 1);
+    await Bun.sleep(5);
+    paused = true; sink.pause!();
+    await Bun.sleep(5);
+    paused = false; sink.resume!();
+    await Bun.sleep(5);
+    expect(calls).toEqual(["pause", "resume"]);
+    close(0);
+    await replay;
+    await sink.dispose!();
+  });
 });
 
 describe("chooseEngine", () => {
@@ -132,7 +157,7 @@ function instance(nonce: string) {
   let repeats = 0;
   f.sink.status = () => ({ sessionID: "ses_a", revision: 1 });
   f.sink.repeat = async () => { repeats++; };
-  const pause = createPauseState(() => f.sink.stop());
+  const pause = createPauseState(() => f.sink.pause?.(), () => f.sink.resume?.());
   const sink = withPause(f.sink, pause.isPaused);
   const hooks = createOpenVox(client, "/d", sink, pause, { instance: nonce, publish: async (s) => { replies.push(s); } });
   const command = (m: any) => ({ event: { type: "tui.command.execute", properties: { command: encodeCommand(m) } } } as any);
@@ -146,49 +171,119 @@ function instance(nonce: string) {
 }
 
 describe("pause state", () => {
-  test("setPaused stops exactly once per false->true edge and never on resume or repeats", () => {
-    let stops = 0;
-    const pause = createPauseState(() => { stops++; });
+  test("setPaused fires onPause exactly once per false->true edge and never on resume or repeats", () => {
+    let pauses = 0;
+    const pause = createPauseState(() => { pauses++; });
     expect(pause.isPaused()).toBe(false);
     pause.setPaused(false);
-    expect(stops).toBe(0);
+    expect(pauses).toBe(0);
     pause.setPaused(true); pause.setPaused(true);
     expect(pause.isPaused()).toBe(true);
-    expect(stops).toBe(1);
+    expect(pauses).toBe(1);
     pause.setPaused(false);
     expect(pause.isPaused()).toBe(false);
-    expect(stops).toBe(1);
+    expect(pauses).toBe(1);
     pause.setPaused(true);
-    expect(stops).toBe(2);
+    expect(pauses).toBe(2);
   });
 
-  test("the state is already paused when the stop callback runs, and a throwing stop is contained", () => {
+  test("onResume fires exactly once per true->false edge, with the state already resumed", () => {
+    const edges: string[] = [];
     const seen: boolean[] = [];
-    const pause: ReturnType<typeof createPauseState> = createPauseState(() => { seen.push(pause.isPaused()); throw new Error("x"); });
+    const pause: ReturnType<typeof createPauseState> = createPauseState(
+      () => { edges.push("pause"); },
+      () => { edges.push("resume"); seen.push(pause.isPaused()); },
+    );
+    pause.setPaused(false);                                 // no edge
+    expect(edges).toEqual([]);
+    pause.setPaused(true); pause.setPaused(true);
+    pause.setPaused(false); pause.setPaused(false);
+    pause.setPaused(true);
+    pause.setPaused(false);
+    expect(edges).toEqual(["pause", "resume", "pause", "resume"]);
+    expect(seen).toEqual([false, false]);
+  });
+
+  test("the state is already paused when the pause callback runs, and throwing callbacks are contained", () => {
+    const seen: boolean[] = [];
+    const pause: ReturnType<typeof createPauseState> = createPauseState(
+      () => { seen.push(pause.isPaused()); throw new Error("x"); },
+      () => { throw new Error("y"); },
+    );
     pause.setPaused(true);
     expect(seen).toEqual([true]);
     expect(pause.isPaused()).toBe(true);
+    pause.setPaused(false);
+    expect(pause.isPaused()).toBe(false);
   });
 });
 
 describe("pause", () => {
-  test("a pause control stops speech once; status reflects it; later host events do not stop again", async () => {
+  test("a pause control pauses the sink once without stopping it; resume resumes it once; host events do not repeat either", async () => {
     const a = instance("instance-a");
     expect((await a.status())?.paused).toBe(false);
     await a.hooks.event!(idle);
-    expect(a.f.stops()).toBe(0);
+    expect([a.f.pauses(), a.f.resumes(), a.f.stops()]).toEqual([0, 0, 0]);
     await a.control("pause", "p1");
-    expect(a.f.stops()).toBe(1);
+    expect([a.f.pauses(), a.f.resumes(), a.f.stops()]).toEqual([1, 0, 0]);
     expect((await a.status())?.paused).toBe(true);
     await a.hooks.event!(idle); await a.hooks.event!(idle);
     await a.control("pause", "p2");
-    expect(a.f.stops()).toBe(1);
+    expect([a.f.pauses(), a.f.stops()]).toEqual([1, 0]);
     await a.control("resume", "r1");
+    expect([a.f.pauses(), a.f.resumes(), a.f.stops()]).toEqual([1, 1, 0]);
     expect((await a.status())?.paused).toBe(false);
+    await a.control("resume", "r2");
+    expect(a.f.resumes()).toBe(1);
     await a.hooks.event!(idle);
     await a.control("pause", "p3");
-    expect(a.f.stops()).toBe(2);
+    expect([a.f.pauses(), a.f.resumes(), a.f.stops()]).toEqual([2, 1, 0]);
     await a.hooks.dispose!();
+  });
+
+  test("a new user turn while paused discards the paused audio through stop, and the instance stays paused", async () => {
+    const a = instance("instance-a");
+    await a.control("pause", "p1");
+    await a.hooks.event!({ event: user("msg_1", 1) });
+    expect(a.f.stops()).toBe(1);
+    expect(a.f.pauses()).toBe(1);
+    expect((await a.status())?.paused).toBe(true);
+    await a.sink({ sessionID: "ses_a", messageID: "m", text: "still blocked" });
+    expect(a.f.spoken).toEqual([]);
+    await a.hooks.event!({ event: { type: "session.error", properties: { sessionID: "ses_a" } } as any });
+    expect(a.f.stops()).toBe(2);
+    expect(a.pause.isPaused()).toBe(true);
+    await a.control("resume", "r1");                         // the sink decides that nothing is left to resume
+    expect(a.f.resumes()).toBe(1);
+    expect((await a.status())?.paused).toBe(false);
+    await a.hooks.dispose!();
+  });
+
+  test("the default pause state of createOpenVox pauses and resumes the sink, and falls back to stop for sinks without pause", async () => {
+    const f = fakeSink();
+    const replies: string[] = [];
+    const hooks = createOpenVox(client, "/d", f.sink, undefined, { instance: "instance-d", publish: async (s) => { replies.push(s); } });
+    const send = (action: string, id: string) => hooks.event!({ event: { type: "tui.command.execute", properties: { command: encodeCommand({
+      kind: "control", instance: "instance-d", sessionID: "ses_a", requestID: id, action, expires: Date.now() + 1500 } as any) } } } as any);
+    await send("pause", "p1");
+    await send("resume", "r1");
+    expect([f.pauses(), f.resumes(), f.stops()]).toEqual([1, 1, 0]);
+    await hooks.dispose!();
+
+    const legacy = fakeSink();
+    delete legacy.sink.pause; delete legacy.sink.resume;
+    const old = createOpenVox(client, "/d", legacy.sink, undefined, { instance: "instance-e", publish: async () => {} });
+    await old.event!({ event: { type: "tui.command.execute", properties: { command: encodeCommand({
+      kind: "control", instance: "instance-e", sessionID: "ses_a", requestID: "p1", action: "pause", expires: Date.now() + 1500 } as any) } } } as any);
+    expect(legacy.stops()).toBe(1);
+    await old.dispose!();
+  });
+
+  test("withPause forwards pause and resume untouched, even while paused", () => {
+    const f = fakeSink();
+    const sink = withPause(f.sink, () => true);
+    sink.pause?.(); sink.resume?.();
+    expect([f.pauses(), f.resumes(), f.stops()]).toEqual([1, 1, 0]);
   });
 
   test("while paused new narrations and Repeat are blocked; resume allows them again", async () => {
@@ -230,7 +325,8 @@ describe("pause", () => {
     await deliver("pause", "p1", "instance-a");
     expect((await a.status())?.paused).toBe(true);
     expect((await b.status())?.paused).toBe(false);
-    expect([a.f.stops(), b.f.stops()]).toEqual([1, 0]);
+    expect([a.f.pauses(), b.f.pauses()]).toEqual([1, 0]);
+    expect([a.f.stops(), b.f.stops()]).toEqual([0, 0]);
     await b.sink({ sessionID: "ses_a", messageID: "m", text: "b speaks" });
     await a.sink({ sessionID: "ses_a", messageID: "m", text: "a silent" });
     expect(b.f.spoken).toEqual(["b speaks"]);
@@ -238,6 +334,8 @@ describe("pause", () => {
     await deliver("pause", "p2", "instance-b");
     await deliver("resume", "r1", "instance-a");
     expect([(await a.status())?.paused, (await b.status())?.paused]).toEqual([false, true]);
+    expect([a.f.resumes(), b.f.resumes()]).toEqual([1, 0]);
+    expect([a.f.pauses(), b.f.pauses()]).toEqual([1, 1]);
     await a.hooks.dispose!(); await b.hooks.dispose!();
   });
 

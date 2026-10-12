@@ -122,7 +122,13 @@ export function defaultHostSpawn(env: Record<string, string | undefined> = proce
 export type PlayerPosition = { positionMs: number; durationMs: number; state: string; rate: number };
 
 export interface Player {
-  /** Plays one WAV. `exited` settles when playback ends (0), is stopped or fails (non-zero); `kill()` stops it. */
+  /**
+   * Plays one WAV. `exited` settles when playback ends (0), is stopped or fails (non-zero); `kill()` stops it.
+   * The handle also carries `pause()`/`resume()` for this playback only: they resolve true when the persistent
+   * host froze/continued it, and false when it cannot (SoundPlayer fallback, already over or stopped) or the host
+   * did not answer within `requestTimeoutMs`. A pause that arrives before the file is open waits for it to open. An unanswered request or a host that dies while paused ends
+   * the playback (`exited` settles non-zero) instead of replaying it, so a failed pause degrades to stop.
+   */
   play(path: string): SpeechProcess;
   /** Pauses and resolves with the position in ms, or undefined when no host is running. */
   pause(): Promise<number | undefined>;
@@ -168,6 +174,12 @@ type Playback = {
   /** `play` was written to the host; its events now belong to this playback. */
   sent: boolean;
   opened: boolean;
+  /** The host reported `paused` for this playback; cleared by the next `playing`. */
+  paused: boolean;
+  /** A `pause` request is in flight; a host crash now must end the playback, not replay it. */
+  pausing: boolean;
+  /** Callers of `pause()` waiting for the file to open; released when it opens, falls back or settles. */
+  openWaiters: (() => void)[];
   fellBack: boolean;
   durationMs: number;
   fallbackProcess?: SpeechProcess;
@@ -205,6 +217,8 @@ export function createPlayer(options: PlayerOptions = {}): Player {
   /** Owners of outstanding `stop` requests, oldest first; `stopped` events answer them in order. */
   const stops: (Playback | undefined)[] = [];
   const waiters = new Map<PlayerEvent["event"], Waiter[]>();
+  /** Releases the outstanding `request()` calls (resolve undefined, cancel their timers), see `dropWaiters`. */
+  const releases = new Set<() => void>();
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
 
   /**
@@ -226,7 +240,14 @@ export function createPlayer(options: PlayerOptions = {}): Player {
     if (live === pb) live = undefined;
     if (latest === pb) latest = undefined;
     complete();
+    releaseOpenWaiters(pb);
     scheduleIdle();
+  }
+
+  /** Lets `pause()` callers that were waiting for the file to open re-check the playback. */
+  function releaseOpenWaiters(pb: Playback): void {
+    const waiting = pb.openWaiters.splice(0);
+    for (const wake of waiting) wake();
   }
 
   const settle = (pb: Playback, code: number) => finish(pb, () => pb.resolve(code));
@@ -259,8 +280,10 @@ export function createPlayer(options: PlayerOptions = {}): Player {
 
   // -- host lifecycle ---------------------------------------------------------------------------
 
+  /** Nobody can answer these requests any more: release them now instead of leaving their timers to expire. */
   function dropWaiters(): void {
     waiters.clear();
+    for (const release of [...releases]) release();
   }
 
   function recycleHost(reason: string): void {
@@ -327,7 +350,11 @@ export function createPlayer(options: PlayerOptions = {}): Player {
     stops.length = 0;
     dropWaiters();
     const pb = live;
-    if (pb && !pb.settled && !disposed) replayWithFallback(pb, "host exited");
+    if (pb && !pb.settled && !disposed) {
+      // Replaying a paused file would restart it from the beginning behind the user's back: end it instead.
+      if (pb.paused || pb.pausing) { log("player host exited while paused; playback ended"); settle(pb, 1); }
+      else replayWithFallback(pb, "host exited");
+    }
     scheduleIdle();
   }
 
@@ -344,14 +371,17 @@ export function createPlayer(options: PlayerOptions = {}): Player {
     const pb = live;
     switch (event.event) {
       case "opened":
-        if (pb && !pb.settled) { pb.opened = true; pb.durationMs = event.durationMs; armWatchdog(pb); }
+        if (pb && !pb.settled) { pb.opened = true; pb.durationMs = event.durationMs; armWatchdog(pb); releaseOpenWaiters(pb); }
         return;
       case "playing":
-        if (pb && !pb.settled) armWatchdog(pb);
+        if (pb && !pb.settled) { pb.paused = false; armWatchdog(pb); }
         answer(event);
         return;
       case "paused":
-        if (pb && !pb.settled) pb.cancelTimer?.();
+        if (pb && !pb.settled) {
+          pb.cancelTimer?.();
+          if (pb.opened) pb.paused = true;
+        }
         answer(event);
         return;
       case "rate":
@@ -384,6 +414,7 @@ export function createPlayer(options: PlayerOptions = {}): Player {
 
   /** Budget: the full clip at the current rate plus slack. Re-armed on every state change; off while paused. */
   function armWatchdog(pb: Playback): void {
+    if (pb.paused) return;      // a frozen clip makes no progress; `playing` re-arms it with a fresh budget
     pb.cancelTimer?.();
     const budget = pb.durationMs > 0 ? pb.durationMs / rate + slackMs : fallbackTimeoutMs;
     pb.cancelTimer = timer(() => {
@@ -415,6 +446,7 @@ export function createPlayer(options: PlayerOptions = {}): Player {
     if (pb.killed || disposed) { settle(pb, 1); return; }
     pb.fellBack = true;
     log(`player fallback: ${reason}`);
+    releaseOpenWaiters(pb);           // a one-shot SoundPlayer playback cannot pause
     pb.cancelTimer?.();
     // The host may still hold the half-opened file; stop it so nothing plays twice.
     if (host?.ready && pb.sent) requestStop(undefined);
@@ -425,6 +457,45 @@ export function createPlayer(options: PlayerOptions = {}): Player {
     pb.fallbackProcess = proc;
     pb.cancelTimer = timer(() => { try { proc.kill(); } catch {} }, fallbackTimeoutMs);
     proc.exited.then((code) => settle(pb, code), (error) => fail(pb, error));
+  }
+
+  /**
+   * Freezes `pb` in the host (same file, same position). Only a playback that is open in the host can pause;
+   * anything else answers false and the caller stops it. A host that does not acknowledge in time is
+   * considered wedged: it is recycled and the playback ends, so a paused host never holds the file forever.
+   */
+  async function pausePlayback(pb: Playback): Promise<boolean> {
+    const pausable = () => !pb.settled && !pb.killed && !pb.fellBack && !disposed;
+    if (!pausable()) return false;
+    // A pause that arrives while the host is starting or opening the file has nothing to freeze yet. It waits
+    // for `opened` (the ready/open timeouts bound the wait: they settle or fall back) instead of stopping.
+    if (!pb.opened) {
+      await new Promise<void>((wake) => { pb.openWaiters.push(wake); });
+      if (!pausable() || !pb.opened) return false;
+    }
+    if (live !== pb) return false;
+    if (pb.paused) return true;
+    pb.pausing = true;
+    const event = await request({ cmd: "pause" }, "paused");
+    pb.pausing = false;
+    if (pb.settled) return false;           // it ended, was stopped or the host died while we waited
+    if (event?.event === "paused") return true;
+    log("player pause was not acknowledged; stopping playback");
+    recycleHost("pause was not acknowledged");
+    settle(pb, 1);
+    return false;
+  }
+
+  /** Continues a playback frozen by `pausePlayback`; the `playing` ack re-arms the watchdog with a fresh budget. */
+  async function resumePlayback(pb: Playback): Promise<boolean> {
+    if (pb.settled || pb.killed || !pb.paused || live !== pb || disposed) return false;
+    const event = await request({ cmd: "resume" }, "playing");
+    if (pb.settled) return false;
+    if (event) return true;
+    log("player resume was not acknowledged; stopping playback");
+    recycleHost("resume was not acknowledged");
+    settle(pb, 1);
+    return false;
   }
 
   function killPlayback(pb: Playback): void {
@@ -459,8 +530,9 @@ export function createPlayer(options: PlayerOptions = {}): Player {
     let reject!: (error: unknown) => void;
     const exited = new Promise<number>((res, rej) => { resolve = res; reject = rej; });
     const pb: Playback = {
-      path, resolve, reject, settled: false, killed: false, sent: false, opened: false, fellBack: false, durationMs: -1,
-      handle: { exited, kill: () => killPlayback(pb) },
+      path, resolve, reject, settled: false, killed: false, sent: false, opened: false, paused: false, pausing: false,
+      openWaiters: [], fellBack: false, durationMs: -1,
+      handle: { exited, kill: () => killPlayback(pb), pause: () => pausePlayback(pb), resume: () => resumePlayback(pb) },
     };
     if (disposed) { resolve(1); return pb.handle; }
     cancelIdle();
@@ -479,17 +551,20 @@ export function createPlayer(options: PlayerOptions = {}): Player {
     cancelIdle();
     return new Promise<PlayerEvent | undefined>((resolve) => {
       const queue = waiters.get(expect) ?? [];
-      const waiter: Waiter = (event) => { cancel(); resolve(event); };
-      const cancel = timer(() => {
+      const release = () => { cancelTimer(); releases.delete(release); resolve(undefined); };
+      const waiter: Waiter = (event) => { cancelTimer(); releases.delete(release); resolve(event); };
+      const cancelTimer = timer(() => {
         const q = waiters.get(expect);
         const at = q?.indexOf(waiter) ?? -1;
         if (q && at >= 0) q.splice(at, 1);
+        releases.delete(release);
         resolve(undefined);
       }, requestTimeoutMs);
+      releases.add(release);
       queue.push(waiter);
       waiters.set(expect, queue);
       try { h.proc.send(encodeRequest(req)); }
-      catch { cancel(); queue.splice(queue.indexOf(waiter), 1); resolve(undefined); }
+      catch { cancelTimer(); releases.delete(release); queue.splice(queue.indexOf(waiter), 1); resolve(undefined); }
     }).finally(scheduleIdle);
   }
 
