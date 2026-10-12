@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { kokoroEngine, narrationRunner, resolveKokoro } from "../src/kokoro-engine";
 import type { Runner } from "../src/piper-engine";
 import { createNarrationPlan } from "../src/markdown-narration";
+import { LID_MANIFEST_PATH, narrationPaths, PN_READY_RECORD, resolveNarrationPython } from "../src/narration-assets";
 
 function harness() {
   const calls: { cmd: string; args: string[]; stdin?: string }[] = [];
@@ -22,6 +23,22 @@ function harness() {
 }
 
 describe("kokoro engine", () => {
+  test("plan dispatch uses only the managed app-home interpreter after readiness, otherwise existing Kokoro", async () => {
+    const paths = narrationPaths("R");
+    let ready = false;
+    const calls: { cmd: string; args: string[] }[] = [];
+    const engine = kokoroEngine({ python: "legacy-python", script: "s", modelPath: "existing-model", voicesPath: "existing-voices",
+      appHome: "R", voices: { es: "em_alex", en: "af_heart" }, speed: 1, tmpDir: "R", unlink() {},
+      narrationPython: () => resolveNarrationPython("R", p => ready && [paths.python, paths.marker].includes(p), () => PN_READY_RECORD),
+      run: (cmd, args) => { calls.push({ cmd, args }); return { exited: Promise.resolve(0), kill() {} }; } });
+    const plan = createNarrationPlan("synthetic text", "es");
+    await engine.synthesizePlan!(plan, "out.wav").exited;
+    ready = true;
+    await engine.synthesizePlan!(plan, "out.wav").exited;
+    await engine.synthesize!("legacy", "es", "out.wav").exited;
+    expect(calls.map(c => c.cmd)).toEqual(["legacy-python", paths.python, "legacy-python"]);
+    expect(calls[1]!.args).toEqual(expect.arrayContaining(["--lid-manifest", LID_MANIFEST_PATH, "--app-home", "R", "existing-model", "existing-voices"]));
+  });
   test("plan settings are sampled once and speed remains bounded", async () => {
     let reads = 0;
     const calls: string[][] = [];

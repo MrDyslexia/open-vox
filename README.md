@@ -27,16 +27,93 @@ no restart, even while OpenCode is running.
 | `open-vox install [--no-tui]` | Register the plugin and the sidebar block in OpenCode |
 | `open-vox uninstall` | Remove both (settings and downloaded voices are kept) |
 | `open-vox setup kokoro\|piper` | Download a local neural voice engine |
+| `open-vox setup narration` | Explicitly prepare pinned contextual ES/EN detection in a separate CPU environment |
 | `open-vox doctor` / `status` | Check the installation / show current settings |
 | `open-vox voices` | List the voices (`*` marks the current ones) |
 | `open-vox voice <id>` | Change the voice, e.g. `voice em_alex`, `voice bm_george` |
 | `open-vox speed <0.5-2>` | Speaking speed |
 | `open-vox engine auto\|kokoro\|piper\|sapi` | Speech engine |
+| `open-vox language es\|en` | Set the narration base language; preserve both voice slots |
 | `open-vox say <text>` | Speak a test sentence with the current settings |
 | `open-vox config path\|show\|reset` | Inspect or reset the settings file |
 
 Defaults: Spanish `em_alex`, English `af_heart`. Voices whose id starts with `b`
 (for example `bm_george`) are British and use British phonemes automatically.
+
+## Contextual pronunciation (explicit setup)
+
+Kokoro speech availability and contextual pronunciation readiness are separate.
+For full local contextual ES/EN detection, first install Kokoro using the existing
+setup command, then explicitly run:
+
+```powershell
+open-vox setup narration
+open-vox doctor
+open-vox language es
+```
+
+This operation creates `%LOCALAPPDATA%\open-vox\pn-venv`, installs pinned CPU
+dependencies, and downloads **712,465,856 bytes** of model/config/tokenizer assets
+(weights: **711,469,178 bytes**, about 711 MB). Allow approximately **2 GB total**
+for the model and environment; this is a forecast, not measured combined setup
+size, and wheel/cache/Python requirements vary. Torch comes only from PyTorch's
+CPU index; other packages come from anonymous PyPI. Python must have compatible
+64-bit Windows binary wheels. Combined managed installation/inference has not yet
+been validated; the command's dependency probe does not certify model compatibility
+or speech quality.
+
+Existing `kokoro-venv`, ONNX model and voices are reused without modification.
+Missing Kokoro assets produce an instruction to run `setup kokoro`, not a hidden
+large download. Existing engine setup remains unchanged; narration is never
+downloaded by ordinary speech, engine setup, or availability checks.
+
+The approved model is `sagorsarker/codeswitch-spaeng-lid-lince`, pinned at
+`66d0e899b3fcf70d8727e4521c7a9c3f7a1fa73c`, under
+`<app-home>/lid/codeswitch-spaeng-lid-lince/<revision>`. The bundled
+[`resources/lid-model.json`](resources/lid-model.json) records the exact file sizes
+and SHA256 hashes. Setup verifies each staged file before exclusive publication;
+invalid existing files are preserved and reported, never silently overwritten.
+Only owned staging files are cleaned. A failed setup has no new readiness record.
+For an integrity error, inspect the reported managed directory manually before
+retrying; do not uninstall or alter your existing Kokoro environment.
+
+Doctor hashes local files and probes pinned imports/versions without loading model
+weights. An `OK` contextual line means those checks passed, not listening or LID
+accuracy acceptance. `WARN` means explicit degraded dictionary/base fallback.
+Known names/expressions and acronym policies still work without LID, but they do
+**not** satisfy automatic contextual pronunciation of previously unknown terms.
+Piper/SAPI retain bounded text-only speech with reduced pronunciation capability.
+
+### Derived text, limits and privacy
+
+- The original response/history remains unchanged. Markdown becomes a separate
+  bounded structural plan: headings, paragraphs, lists and quotes keep structure;
+  inline technical units retain their meanings; code blocks/tables are omitted
+  with announcements. Visible link labels/image alt text can be spoken; URLs,
+  destinations and HTML are omitted conservatively. Malformed/unclosed HTML may
+  suppress later prose rather than leak markup.
+- Narration retains at most **4000 UTF16 units**, including announcements and
+  numbering. Truncation is diagnosed; indivisible technical units and resolver
+  expansion can fail explicitly instead of being cut. Each Kokoro inference is
+  at most **510 raw phonemes**; adjacent language runs pack inside each block.
+- One existing voice slot is selected from the configured base language and kept
+  across the whole utterance. Language-specific G2P is not translation. Ambiguous,
+  missing or unusable contextual evidence falls back conservatively; softmax scores
+  are uncalibrated, and naturalness is not guaranteed.
+- Settings changes apply to **new utterances**, including changes made while idle.
+  Repeat replays the exact old cached WAV and does not reparse or run inference.
+- Inference is local-only, existing-files-only, CPU, safetensors-only, with remote
+  code disabled. It verifies the bundled model hashes once before loading per
+  synthesis, not per word. No private prose is sent to external inference services
+  or written as a full persistent source trace by default; cached audio remains
+  sensitive local content. Provisioning uses only anonymous public downloads.
+
+`OPEN_VOX_HOME` optionally chooses a different managed app home. Runtime does not
+scan scratch environments or model caches. The helper's optional `--lid-manifest`
+transport argument defaults relative to its own checkout and cannot substitute a
+different checkpoint/hash manifest. No new manual model-path setting is required.
+Wire/source-range and lifecycle acceptance details are tracked in
+[`odd/tasks/pronunciation-normalization.md`](odd/tasks/pronunciation-normalization.md).
 
 Pause is no longer a terminal command. `open-vox pause`, `resume` and `toggle` were
 removed and now fail as unknown commands; use the **Pause** button in the sidebar.
@@ -100,8 +177,9 @@ and registers in `tui.json`; existing entries are preserved.
    assistant reply with `finish: "stop"`, a completion time, no error, no
    summary flag, and permitted text. Tool turns, errors, aborts, compaction,
    child sessions and malformed data are rejected.
-3. `src/speech-text.ts` strips Markdown (code, links, tables, headings) and
-   detects Spanish or English.
+3. `src/markdown-narration.ts` builds a bounded derived structural plan from
+   Markdown; deterministic policies and optional pinned local token classification
+   resolve pronunciation. Piper/SAPI use a reduced flattened text representation.
 4. Engines, re-chosen on every utterance (`auto` order below):
    - `src/kokoro-engine.ts` + `scripts/kokoro_say.py`: [Kokoro](https://github.com/thewh1teagle/kokoro-onnx)
      (82M ONNX model, CPU).
@@ -162,8 +240,9 @@ $env:OV_PLAYER_SMOKE = "1"; bun test test/player.test.ts
 
 - `opencode run` exits right after the session goes idle, which can cut speech
   short. Use the TUI or a server session.
-- Language detection is a word-list heuristic; very short text falls back to
-  English.
+- Contextual ES/EN pronunciation requires explicit `setup narration`. Missing or
+  unusable evidence falls back to policies and the configured base language; no
+  automatic new-term accuracy or listening qualification is claimed.
 - The Voice list covers Kokoro voices only. With the Piper or SAPI engines, use
   `OPEN_VOX_VOICE_*` or the Windows settings instead.
 - Automated sidebar checks use opentui's test renderer; live evidence is limited

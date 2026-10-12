@@ -11,7 +11,8 @@ import { envValue, legacyHomeMigration } from "./brand";
 import { inspectInstall, install, uninstall, type InstallFs } from "./installer";
 import { resolveKokoro } from "./kokoro-engine";
 import { resolvePiper } from "./piper-engine";
-import { nodeDownload, nodeRun, setupKokoro, setupPiper } from "./setup";
+import { nodeDownload, nodeRun, nodeNarrationDownload, nodeNarrationFs, nodeNarrationRun, narrationProbeArgs, setupKokoro, setupNarration, setupPiper } from "./setup";
+import { assertLidDirectory, fileFingerprint, inspectNarration, type NarrationReadiness } from "./narration-assets";
 
 export type CliDeps = {
   out: (line: string) => void;
@@ -29,7 +30,8 @@ export type CliDeps = {
   say: (text: string) => Promise<void>;
   /** Moves the pre-rename data folder to its new location, when applicable. Throws on failure. */
   migrateHome: () => { from: string; to: string } | undefined;
-  setup: (what: "kokoro" | "piper") => Promise<void>;
+  setup: (what: "kokoro" | "piper" | "narration") => Promise<void>;
+  narrationStatus?: (home: string) => Promise<NarrationReadiness>;
 };
 
 const ENGINES: readonly EngineName[] = ["auto", "kokoro", "piper", "sapi"];
@@ -40,6 +42,7 @@ Setup
   install [--no-tui] [--config-dir <dir>]   Register the plugin (and the sidebar block) in OpenCode
   uninstall [--config-dir <dir>]            Remove the plugin and the sidebar block
   setup kokoro|piper                        Download a local neural voice engine
+  setup narration                           Explicit pinned local LID + isolated CPU environment (~2 GB estimate)
   doctor                                    Check the installation
   status                                    Show current settings
 
@@ -76,18 +79,21 @@ function check(label: string, level: "OK" | "WARN" | "FAIL", detail: string) {
   return { label, level, detail };
 }
 
-function doctor(deps: CliDeps): number {
+async function doctor(deps: CliDeps): Promise<number> {
   const home = appHome(deps.env);
   const platform = deps.platform ?? process.platform;
   const state = inspectInstall({ fs: deps.installFs, configDir: deps.configDir });
   const kokoro = resolveKokoro(home, deps.env, deps.exists);
   const piper = resolvePiper(home, deps.env, deps.exists);
+  const narration = await deps.narrationStatus?.(home) ?? { ready: false, code: "missing-managed-environment" };
   const results = [
     check("Platform", platform === "win32" ? "OK" : "FAIL", platform === "win32" ? "Windows" : `${platform} is not supported (Windows only)`),
     check("OpenCode config", deps.exists(deps.configDir) ? "OK" : "FAIL", deps.configDir),
     check("Server plugin", state.plugin ? "OK" : "FAIL", state.plugin ? "installed" : "missing; run: open-vox install"),
     check("Sidebar block", state.tuiFile && state.tuiRegistered ? "OK" : "WARN", state.tuiFile && state.tuiRegistered ? "installed" : "not installed; run: open-vox install"),
     check("Kokoro engine", kokoro ? "OK" : "WARN", kokoro ? "ready" : "not set up; run: open-vox setup kokoro"),
+    check("Contextual narration", narration.ready && kokoro ? "OK" : "WARN",
+      narration.ready && kokoro ? "verified local assets/dependencies (not listening certification)" : `degraded: ${kokoro ? narration.code : "missing-kokoro-assets"}; dictionary/base fallback only; run: open-vox setup narration`),
     check("Piper engine", piper ? "OK" : "WARN", piper ? "ready" : "not set up (optional); run: open-vox setup piper"),
     check("Windows voices (SAPI)", platform === "win32" ? "OK" : "WARN", "built in, used as the last fallback"),
   ];
@@ -195,7 +201,7 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
 
     case "setup": {
       const what = args[0];
-      if (what !== "kokoro" && what !== "piper") return usage(deps, "Usage: open-vox setup kokoro|piper");
+      if (args.length !== 1 || (what !== "kokoro" && what !== "piper" && what !== "narration")) return usage(deps, "Usage: open-vox setup kokoro|piper|narration");
       await deps.setup(what);
       return 0;
     }
@@ -245,6 +251,11 @@ export async function main(argv: string[]): Promise<number> {
     tuiTemplate: () => readFileSync(win32.join(repoRoot, "tui", "open-vox.tsx"), "utf8"),
     exists: (path) => existsSync(path),
     env,
+    narrationStatus: home => inspectNarration(home, {
+      exists: existsSync, read: path => readFileSync(path, "utf8"), fingerprint: fileFingerprint,
+      validateDirectory: assertLidDirectory,
+      probe: (python, expectedVenv) => nodeNarrationRun(python, narrationProbeArgs(expectedVenv)),
+    }),
     migrateHome: () => {
       const plan = legacyHomeMigration(env, existsSync);
       if (plan) renameSync(plan.from, plan.to);
@@ -260,7 +271,8 @@ export async function main(argv: string[]): Promise<number> {
         exists: (path: string) => existsSync(path), run: nodeRun, download: nodeDownload,
         log: (line: string) => console.log(line),
       };
-      await (what === "kokoro" ? setupKokoro(setupDeps) : setupPiper(setupDeps));
+      if (what === "narration") await setupNarration({ ...setupDeps, ...nodeNarrationFs, run: nodeNarrationRun, download: nodeNarrationDownload });
+      else await (what === "kokoro" ? setupKokoro(setupDeps) : setupPiper(setupDeps));
     },
   };
   try {
