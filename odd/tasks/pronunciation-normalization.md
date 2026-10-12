@@ -207,6 +207,10 @@ Historical scratch15-phrase listening was accepted separately; it does not certi
 - Engram mirror: save this full current document only at `agentvoz` / `odd/pronunciation-normalization/tasks`, with prompt capture disabled; no nested historical-memory wrappers or duplicate snapshots. Prior root#1680/continuation#1925 are historical bookkeeping, not the current full snapshot after refresh. Record new readback in the delivery report.
 - [Open-Vox overview](../../README.md)
 
+### Defect: Spanish inverted punctuation (2026-10-12, host check pending user restart)
+
+Live `Hola`-style replies exited the plan child with code 2. Measured: the installed vocabulary lacks `¡ ¿ « » [ ] { }`; ellipsis, em dash, curly double quotes, parentheses stay supported, and the phonemizer already drops apostrophes, hyphens and en dashes. `narration_synthesis.py` now removes `¡`/`¿` from final phonemes only (traced with `rawIndex`, `codepoint`, `to:""`, collapsing a doubled space), keeps `«»`->`"`, and still fails with `unsupported-symbol: U+XXXX` for `[ ] { }`, exotic symbols and symbols inside protected technical text. Packed raw/final ranges now diverge correctly. Tests: 26 synthesis tests (RED 5 fail/5 error), 68 narration tests green. Production-argv child: exit 2 -> 0, 1.9s PCM16 mono 24 kHz WAV. TS untouched.
+
 ## Local preparation context
 
 Original SHAs, test results, host observations and branch states above are historical evidence, not fresh verification. The new local chain is tracked in [PN delivery preparation](pn-main-delivery.md); P3b/P4 remain deferred. No publication is authorized.

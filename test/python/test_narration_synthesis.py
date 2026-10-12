@@ -62,8 +62,8 @@ class SynthesisTests(unittest.TestCase):
         chunk = chunks[0]
         self.assertEqual(chunk['rawPhonemes'], '«a» a «a»')
         self.assertEqual(chunk['phonemes'], '"a" a "a"')
-        self.assertEqual(chunk['mappings'], [{'index': i, 'from': c, 'to': '"'}
-                                            for i, c in [(0, '«'), (2, '»'), (6, '«'), (8, '»')]])
+        self.assertEqual([(m['index'], m['rawIndex'], m['from']) for m in chunk['mappings']],
+                         [(0, 0, '«'), (2, 2, '»'), (6, 6, '«'), (8, 8, '»')])
         for run, start, end in zip(chunk['runs'], [0, 4, 6], [3, 5, 9]):
             self.assertEqual(run['phonemeRange'], {'start': start, 'end': end})
             self.assertEqual(chunk['phonemes'][start:end], run['phonemes'])
@@ -238,8 +238,75 @@ class SynthesisTests(unittest.TestCase):
         chunks = prepare_chunks(envelope, lambda t, l: '«a»', {'a': 1, '"': 2})
         self.assertEqual(chunks[0]['rawPhonemes'], '«a»')
         self.assertEqual(chunks[0]['phonemes'], '"a"')
-        self.assertEqual(chunks[0]['mappings'], [{'index': 0, 'from': '«', 'to': '"'}, {'index': 2, 'from': '»', 'to': '"'}])
+        self.assertEqual(chunks[0]['mappings'], [
+            {'index': 0, 'rawIndex': 0, 'from': '«', 'codepoint': 'U+00AB', 'to': '"'},
+            {'index': 2, 'rawIndex': 2, 'from': '»', 'codepoint': 'U+00BB', 'to': '"'}])
         self.assertEqual(envelope['structuralPlan']['original'], '«local»')
+
+    # --- Prose punctuation absent from the installed Kokoro vocabulary (measured: ¡ ¿ « » [ ] { }) ---
+    SPANISH_VOCAB = {c: 1 for c in 'ˈolaenkɛpwðʝuɾtɪ ,.!?;:"()—…“”'}
+
+    def fails_with_symbol(self, plan, raw, vocab, codepoint):
+        stderr = io.StringIO()
+        with patch.object(sys, 'stderr', stderr), self.assertRaises(ValueError):
+            prepare_chunks(resolve_plan(plan), lambda t, l: raw, vocab)
+        self.assertEqual(stderr.getvalue(), 'unsupported-symbol: ' + codepoint + '\n')
+
+    def test_spanish_inverted_marks_are_removed_from_final_phonemes_only(self):
+        text = '¡Hola! ¿En qué puedo ayudarte hoy?'
+        envelope = resolve_plan(plan_for(text))
+        raw = '¡ˈola! ¿en kˈe pwˈeðo ˌaʝuðˈaɾte ˈoɪ?'
+        vocab = {c: 1 for c in raw if c not in '¡¿'}
+        chunks = prepare_chunks(envelope, lambda t, l: raw, vocab)
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0]['rawPhonemes'], raw)
+        self.assertEqual(chunks[0]['phonemes'], 'ˈola! en kˈe pwˈeðo ˌaʝuðˈaɾte ˈoɪ?')
+        self.assertNotRegex(chunks[0]['phonemes'], '[¡¿]')
+        self.assertIn('!', chunks[0]['phonemes'])
+        self.assertTrue(chunks[0]['phonemes'].endswith('?'))
+        self.assertNotIn('  ', chunks[0]['phonemes'])
+        self.assertEqual([(m['rawIndex'], m['codepoint'], m['to']) for m in chunks[0]['mappings']],
+                         [(0, 'U+00A1', ''), (7, 'U+00BF', '')])
+        self.assertEqual(envelope['structuralPlan']['original'], text)
+
+    def test_removed_symbol_between_spaces_never_leaves_double_space(self):
+        chunks = prepare_chunks(resolve_plan(plan_for('local')), lambda t, l: 'a ¿ a', {'a': 1, ' ': 2})
+        self.assertEqual(chunks[0]['phonemes'], 'a a')
+        self.assertEqual([(m['rawIndex'], m['codepoint']) for m in chunks[0]['mappings']],
+                         [(2, 'U+00BF'), (3, 'U+0020')])
+
+    def test_english_prose_punctuation_in_vocabulary_is_unchanged(self):
+        raw = 'ɪts fˈaɪn — “ˌoʊkˈeɪ” nˈoʊ… (jˈɛs)? '.strip()
+        chunks = prepare_chunks(resolve_plan(plan_for("It's fine - isn't it? (yes)", 'en')), lambda t, l: raw,
+                                {c: 1 for c in raw})
+        self.assertEqual(chunks[0]['phonemes'], raw)
+        self.assertEqual(chunks[0]['mappings'], [])
+
+    def test_unmeasured_or_unsafe_symbols_still_fail_with_generic_codepoint_line(self):
+        for symbol, codepoint in [('[', 'U+005B'), ('}', 'U+007D'), ('☃', 'U+2603')]:
+            with self.subTest(symbol=symbol):
+                self.fails_with_symbol(plan_for('local'), 'a' + symbol, {'a': 1}, codepoint)
+
+    def test_protected_technical_unit_never_gets_punctuation_stripped(self):
+        self.fails_with_symbol(plan_for('¿x', kind='inlineCode'), '¿a', {'a': 1}, 'U+00BF')
+
+    def test_510_limit_counts_final_string_after_adaptation(self):
+        ok = prepare_chunks(resolve_plan(plan_for('x')), lambda t, l: '¿' + 'a' * 510, {'a': 1})
+        self.assertEqual([len(c['phonemes']) for c in ok], [510])
+        with self.assertRaises(ValueError):
+            prepare_chunks(resolve_plan(plan_for('x')), lambda t, l: '¿' + 'a' * 511, {'a': 1})
+
+    def test_packed_ranges_track_raw_and_final_when_a_symbol_is_removed(self):
+        outputs = iter(['¿a', 'a', 'a'])
+        chunk = prepare_chunks(resolve_plan(plan_for('Hola Open editor local')), lambda t, l: next(outputs),
+                               {'a': 1, ' ': 2})[0]
+        self.assertEqual((chunk['rawPhonemes'], chunk['phonemes']), ('¿a a a', 'a a a'))
+        first, second = chunk['runs'][0], chunk['runs'][1]
+        self.assertEqual((first['phonemeRange'], first['rawPhonemeRange']),
+                         ({'start': 0, 'end': 1}, {'start': 0, 'end': 2}))
+        self.assertEqual((second['phonemeRange'], second['rawPhonemeRange']),
+                         ({'start': 2, 'end': 3}, {'start': 3, 'end': 4}))
+        self.assertEqual(chunk['mappings'], [{'index': 0, 'rawIndex': 0, 'from': '¿', 'codepoint': 'U+00BF', 'to': ''}])
 
     def test_invalid_envelope_trace_rejected(self):
         envelope = resolve_plan(plan_for('local'))
