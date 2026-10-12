@@ -6,11 +6,13 @@ import type { Language } from "./speech-text";
 export type EngineName = "auto" | "kokoro" | "piper" | "sapi";
 /** Shared persisted defaults only. Runtime controls such as pause live in memory, per plugin instance. */
 export type Config = {
+  narrationLanguage: Language;
   voices: Record<Language, string>;
   speed: number;
   engine: EngineName;
 };
 export type ConfigPatch = {
+  narrationLanguage?: Language;
   voices?: Partial<Record<Language, string>>;
   speed?: number;
   engine?: EngineName;
@@ -40,6 +42,7 @@ export const KOKORO_VOICES: readonly KokoroVoice[] = [
 ];
 
 export const DEFAULT_CONFIG: Config = {
+  narrationLanguage: "es",
   voices: { es: "em_alex", en: "af_heart" },
   speed: 1,
   engine: "auto",
@@ -62,6 +65,7 @@ export function parseConfig(raw: unknown): Config {
   const input = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
   const voices = input.voices && typeof input.voices === "object" ? (input.voices as Record<string, unknown>) : {};
   return {
+    narrationLanguage: input.narrationLanguage === "en" ? "en" : "es",
     voices: {
       es: validVoice(voices.es, "es") ? voices.es : DEFAULT_CONFIG.voices.es,
       en: validVoice(voices.en, "en") ? voices.en : DEFAULT_CONFIG.voices.en,

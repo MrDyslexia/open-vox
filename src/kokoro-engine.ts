@@ -1,10 +1,11 @@
 import { existsSync, unlinkSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { envValue, homeFor } from "./brand";
-import { DEFAULT_CONFIG, createConfigReader, kokoroLanguageCode } from "./config";
-import { windowsRunner, wavEngine, type Runner } from "./piper-engine";
+import { DEFAULT_CONFIG, MAX_SPEED, MIN_SPEED, createConfigReader, kokoroLanguageCode } from "./config";
+import { wavEngine, type Runner } from "./piper-engine";
 import type { Engine } from "./speech-sink";
 import type { Language } from "./speech-text";
 
@@ -17,6 +18,7 @@ export type KokoroPaths = {
 };
 export type KokoroConfig = KokoroPaths & {
   script: string;
+  appHome?: string;
   /** Read on every utterance so voice and speed changes apply immediately. */
   settings?: () => KokoroSettings;
   run: Runner;
@@ -49,13 +51,14 @@ export function resolveKokoro(
 }
 
 export function kokoroEngine(config: KokoroConfig): Engine {
-  return wavEngine({
+  const make = (plan: boolean) => wavEngine({
     run: config.run,
     tmpDir: config.tmpDir,
     unlink: config.unlink,
     commandFor: (language, wav) => {
       const live = config.settings?.() ?? config;
       const voice = live.voices[language];
+      const speed = Number.isFinite(live.speed) && live.speed >= MIN_SPEED && live.speed <= MAX_SPEED ? live.speed : 1;
       return {
         cmd: config.python,
         args: [
@@ -64,17 +67,58 @@ export function kokoroEngine(config: KokoroConfig): Engine {
           "--voices", config.voicesPath,
           "--voice", voice,
           "--lang", kokoroLanguageCode(voice),
-          "--speed", String(live.speed),
+          "--speed", String(speed),
           "--out", wav,
+          ...(plan ? ["--plan-json", ...(config.appHome ? ["--app-home", config.appHome] : [])] : []),
         ],
       };
     },
   });
+  const engine = make(false);
+  const planned = make(true);
+  engine.synthesizePlan = (plan, wav) => planned.synthesize!(JSON.stringify(plan), plan.defaultLanguage, wav);
+  engine.speakPlan = (plan) => planned(JSON.stringify(plan), plan.defaultLanguage);
+  return engine;
+}
+
+/** Local inference only. Bound and validate helper diagnostics; never forward third-party stderr/prose. */
+export function narrationRunner(onDiagnostic: (code: string) => void = () => {}): Runner {
+  return (cmd, args, stdin) => {
+    const child = spawn(cmd, args, { windowsHide: true, stdio: ["pipe", "pipe", "ignore"], env: {
+      ...process.env, PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8", PYTHONDONTWRITEBYTECODE: "1",
+      HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1", HF_HUB_DISABLE_TELEMETRY: "1",
+      HF_HUB_DISABLE_PROGRESS_BARS: "1", DO_NOT_TRACK: "1",
+    } });
+    let output = "", oversized = false;
+    child.stdout.on("data", (data: Buffer) => {
+      if (output.length + data.length > 8192) oversized = true;
+      if (!oversized) output += data.toString("utf8");
+    });
+    const exited = new Promise<number>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", code => {
+        if (args.includes("--plan-json") && code === 0) {
+          try {
+            const value = JSON.parse(output);
+            if (oversized || Object.keys(value).join() !== "diagnostics" || !Array.isArray(value.diagnostics)
+                || value.diagnostics.length > 32 || !value.diagnostics.every((c: unknown) =>
+                  typeof c === "string" && /^[a-z][a-z0-9-]{0,79}$/.test(c))) throw new Error();
+            for (const c of value.diagnostics) { try { onDiagnostic(c); } catch {} }
+          } catch { resolve(2); return; }
+        }
+        resolve(code ?? 1);
+      });
+    });
+    child.stdin.on("error", () => {});
+    child.stdin.end(stdin ?? "", "utf8");
+    return { exited, kill: () => { child.kill(); } };
+  };
 }
 
 export function defaultKokoroEngine(
   env: Record<string, string | undefined> = process.env,
   getConfig: () => import("./config").Config = createConfigReader(),
+  onDiagnostic?: (code: string) => void,
 ): Engine | undefined {
   const root = homeFor(env);
   const paths = resolveKokoro(root, env);
@@ -82,7 +126,7 @@ export function defaultKokoroEngine(
   const script = fileURLToPath(new URL("../scripts/kokoro_say.py", import.meta.url));
   if (!existsSync(script)) return undefined;
   return kokoroEngine({
-    ...paths, script,
+    ...paths, script, appHome: root,
     // Environment variables stay as explicit overrides on top of the shared config file.
     settings: () => {
       const config = getConfig();
@@ -94,7 +138,7 @@ export function defaultKokoroEngine(
         speed: Number.isFinite(Number(envValue(env, "SPEED"))) && envValue(env, "SPEED") ? Number(envValue(env, "SPEED")) : config.speed,
       };
     },
-    run: windowsRunner,
+    run: narrationRunner(onDiagnostic),
     tmpDir: tmpdir(),
     unlink: (file) => { try { unlinkSync(file); } catch {} },
   });

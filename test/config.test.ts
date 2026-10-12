@@ -16,13 +16,21 @@ function memoryFs(initial?: string): ConfigFs & { files: Map<string, string> } {
 const PATH = "C:\\h\\config.json";
 
 describe("parseConfig", () => {
+  test("narration language is explicit, validated and persisted with readback", () => {
+    const fs = memoryFs();
+    expect(parseConfig({}).narrationLanguage).toBe("es");
+    expect(parseConfig({ narrationLanguage: "fr" }).narrationLanguage).toBe("es");
+    writeConfig({ narrationLanguage: "en" }, PATH, fs);
+    expect(readConfig(PATH, fs).narrationLanguage).toBe("en");
+    expect(JSON.parse(fs.files.get(PATH)!).narrationLanguage).toBe("en");
+  });
   test("defaults to Alex for Spanish, speed 1, auto engine, with no runtime flags", () => {
-    expect(DEFAULT_CONFIG).toEqual({ voices: { es: "em_alex", en: "af_heart" }, speed: 1, engine: "auto" });
+    expect(DEFAULT_CONFIG).toEqual({ voices: { es: "em_alex", en: "af_heart" }, speed: 1, engine: "auto", narrationLanguage: "es" });
     expect(parseConfig(undefined)).toEqual(DEFAULT_CONFIG);
   });
   test("accepts valid values", () => {
     expect(parseConfig({ voices: { es: "ef_dora", en: "bm_george" }, speed: 1.25, engine: "piper" }))
-      .toEqual({ voices: { es: "ef_dora", en: "bm_george" }, speed: 1.25, engine: "piper" });
+      .toEqual({ voices: { es: "ef_dora", en: "bm_george" }, speed: 1.25, engine: "piper", narrationLanguage: "es" });
   });
   test("rejects invalid values field by field, keeping valid ones", () => {
     const r = parseConfig({ voices: { es: "nope", en: "bm_george" }, speed: 99, engine: "weird" });

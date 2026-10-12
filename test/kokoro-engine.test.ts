@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { kokoroEngine, resolveKokoro } from "../src/kokoro-engine";
+import { kokoroEngine, narrationRunner, resolveKokoro } from "../src/kokoro-engine";
 import type { Runner } from "../src/piper-engine";
+import { createNarrationPlan } from "../src/markdown-narration";
 
 function harness() {
   const calls: { cmd: string; args: string[]; stdin?: string }[] = [];
@@ -21,6 +22,39 @@ function harness() {
 }
 
 describe("kokoro engine", () => {
+  test("plan settings are sampled once and speed remains bounded", async () => {
+    let reads = 0;
+    const calls: string[][] = [];
+    const engine = kokoroEngine({ python: "p", script: "s", modelPath: "m", voicesPath: "v", appHome: "R",
+      voices: { es: "x", en: "y" }, speed: 1, tmpDir: "C:\\tmp", unlink() {},
+      settings: () => { reads++; return { voices: { es: reads === 1 ? "em_alex" : "ef_dora", en: "bm_george" }, speed: reads === 1 ? 1.2 : 9 }; },
+      run: (_c, args) => { calls.push(args); return { exited: Promise.resolve(0), kill() {} }; } });
+    const plan = createNarrationPlan("Open editor API", "es");
+    await engine.synthesizePlan!(plan, "one.wav").exited;
+    await engine.synthesizePlan!(plan, "two.wav").exited;
+    expect(reads).toBe(2);
+    expect(calls[0]).toEqual(expect.arrayContaining(["em_alex", "1.2", "--app-home", "R"]));
+    expect(calls[1]).toEqual(expect.arrayContaining(["ef_dora", "1"]));
+  });
+  test("helper runner enforces offline UTF8 transport and only accepts bounded diagnostic JSON", async () => {
+    const diagnostics: string[] = [];
+    const runner = narrationRunner(c => diagnostics.push(c));
+    const code = `const e=process.env; if(!['HF_HUB_OFFLINE','TRANSFORMERS_OFFLINE','HF_HUB_DISABLE_TELEMETRY','PYTHONDONTWRITEBYTECODE'].every(k=>e[k]==='1')||e.PYTHONUTF8!=='1') process.exit(3); console.log(JSON.stringify({diagnostics:['missing-local-assets']}));`;
+    expect(await runner(process.execPath, ["-e", code, "--", "--plan-json"], "{}").exited).toBe(0);
+    expect(diagnostics).toEqual(["missing-local-assets"]);
+    expect(await runner(process.execPath, ["-e", `console.log(JSON.stringify({diagnostics:['private prose']}))`, "--", "--plan-json"], "{}").exited).toBe(2);
+    expect(diagnostics).toHaveLength(1);
+  });
+  test("plan JSON uses the base voice once even with English expressions", async () => {
+    const h = harness();
+    const plan = createNarrationPlan("Hola API. Open editor.", "es");
+    await h.engine.synthesizePlan!(plan, "owned.wav").exited;
+    expect(h.calls).toHaveLength(1);
+    expect(h.calls[0]!.args).toContain("--plan-json");
+    expect(h.calls[0]!.args).toContain("ef_dora");
+    expect(h.calls[0]!.args).not.toContain("af_heart");
+    expect(JSON.parse(h.calls[0]!.stdin!)).toEqual(plan);
+  });
   test("artifact synthesis writes the caller-owned WAV without invoking the player", async () => {
     const h = harness();
     await h.engine.synthesize!("Exact audio", "es", "C:\\owned\\candidate.wav").exited;

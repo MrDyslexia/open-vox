@@ -80,6 +80,16 @@ describe("voice", () => {
 });
 
 describe("speed and engine", () => {
+  test("language controls the base without changing either voice slot", async () => {
+    const h = harness();
+    expect(await runCli(["language", "en"], h.deps)).toBe(0);
+    expect(h.config().narrationLanguage).toBe("en");
+    expect(h.config().voices).toEqual(DEFAULT_CONFIG.voices);
+    expect(await runCli(["language", "fr"], h.deps)).toBe(2);
+    expect(await runCli(["language", "es", "extra"], h.deps)).toBe(2);
+    await runCli(["config", "reset"], h.deps);
+    expect(h.config().narrationLanguage).toBe("es");
+  });
   test("speed accepts the valid range only", async () => {
     expect((await run(["speed", "1.2"])).h.config().speed).toBe(1.2);
     const bad = await run(["speed", "5"]);
@@ -145,7 +155,7 @@ describe("status, config and misc", () => {
     const base = h.deps.writeConfig;
     h.deps.writeConfig = (patch) => { patches.push(patch); return base(patch); };
     await runCli(["config", "reset"], h.deps);
-    expect(patches).toEqual([{ voices: { es: "em_alex", en: "af_heart" }, speed: 1, engine: "auto" }]);
+    expect(patches).toEqual([{ voices: { es: "em_alex", en: "af_heart" }, speed: 1, engine: "auto", narrationLanguage: "es" }]);
   });
   test("setup delegates", async () => {
     const { code, h } = await run(["setup", "kokoro"]);

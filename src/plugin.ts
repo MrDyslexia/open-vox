@@ -9,6 +9,7 @@ import { createSpeechSink, sapiEngine, type Engine, type SpeechSink, type Speech
 import { createPlayer } from "./player";
 import { AudioCache, type AudioStore } from "./audio-cache";
 import { createRepeatControl } from "./repeat-control";
+import { flattenNarrationPlan } from "./narration-plan";
 
 type Result<T> = { data?: T; error?: unknown };
 export type Client = {
@@ -214,8 +215,10 @@ export function liveEngine(
   factories: Factories,
   fallback: Engine = sapiEngine(),
   onChoice?: (name: string) => void,
+  onDiagnostic?: (code: string) => void,
 ): Engine {
   let last = "";
+  const reduced = new Set<Engine>();
   const select = () => {
     const choice = chooseEngine(wanted(), true, factories);
     if (choice.name !== last) { last = choice.name; onChoice?.(choice.name); }
@@ -226,6 +229,22 @@ export function liveEngine(
     const selected = select();
     if (!selected.synthesize) throw new Error("Selected engine cannot generate audio");
     return selected.synthesize(text, language, wav);
+  };
+  const notify = (selected: Engine) => {
+    if (!reduced.has(selected)) { reduced.add(selected); onDiagnostic?.("reduced-pronunciation:text-only-engine"); }
+  };
+  engine.synthesizePlan = (plan, wav) => {
+    const selected = select();
+    if (selected.synthesizePlan) return selected.synthesizePlan(plan, wav);
+    notify(selected);
+    if (!selected.synthesize) throw new Error("Selected engine cannot generate audio");
+    return selected.synthesize(flattenNarrationPlan(plan), plan.defaultLanguage, wav);
+  };
+  engine.speakPlan = plan => {
+    const selected = select();
+    if (selected.speakPlan) return selected.speakPlan(plan);
+    notify(selected);
+    return selected(flattenNarrationPlan(plan), plan.defaultLanguage);
   };
   return engine;
 }
@@ -243,15 +262,18 @@ export function createLiveSink(
   enabled = envValue(env, "DISABLED") !== "1" && process.platform === "win32",
   audio?: { cache: AudioStore; isPaused: () => boolean } & Pick<SpeechSinkOptions, "player" | "playbackTimeoutMs">,
 ): SpeechSink {
+  const diagnostic = (code: string) => log(`narration diagnostic: ${code}`);
   const factories: Factories = {
-    kokoro: memo(() => defaultKokoroEngine(env, config)),
+    kokoro: memo(() => defaultKokoroEngine(env, config, diagnostic)),
     piper: memo(() => defaultPiperEngine(env)),
   };
   const wanted = () => (envValue(env, "ENGINE") ?? config().engine).toLowerCase();
   return createSpeechSink({
     enabled,
     ...audio,
-    engine: liveEngine(wanted, factories, sapiEngine(), (name) => log(`engine=${name}`)),
+    narrationLanguage: () => config().narrationLanguage,
+    engine: liveEngine(wanted, factories, sapiEngine(), (name) => log(`engine=${name}`), diagnostic),
+    onDiagnostic: diagnostic,
     onError: (error) => log(`speech error: ${error instanceof Error ? error.message : String(error)}`),
   });
 }
@@ -259,7 +281,10 @@ export function createLiveSink(
 /** Speaks one text with the current settings and waits for it to finish (used by `open-vox say`). */
 export async function speakOnce(text: string, env: Record<string, string | undefined> = process.env): Promise<void> {
   const errors: string[] = [];
-  const sink = createLiveSink(env, createConfigReader(() => readConfig(), 0), (m) => { if (m.startsWith("speech error")) errors.push(m); });
+  const sink = createLiveSink(env, createConfigReader(() => readConfig(), 0), (m) => {
+    if (m.startsWith("speech error")) errors.push(m);
+    else if (m.startsWith("narration diagnostic")) console.warn(m);
+  });
   await sink({ sessionID: "cli", messageID: "cli", text });
   if (errors.length > 0) throw new Error(errors.join("; "));
 }

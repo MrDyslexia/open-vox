@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { OpenVoxPlugin, chooseEngine, createLiveSink, createOpenVox, createPauseState, withPause } from "../src/plugin";
+import { OpenVoxPlugin, chooseEngine, createLiveSink, createOpenVox, createPauseState, liveEngine, withPause } from "../src/plugin";
+import { createNarrationPlan } from "../src/markdown-narration";
 import { createConfigReader, DEFAULT_CONFIG } from "../src/config";
 import type { SpeechProcess, SpeechSink } from "../src/speech-sink";
 import { encodeCommand, decodeCommand } from "../src/repeat-control";
@@ -131,6 +132,22 @@ describe("live sink player wiring", () => {
 });
 
 describe("chooseEngine", () => {
+  test("plan dispatch selects the actual engine at execution and text fallback never receives JSON", async () => {
+    const seen: string[] = [], diagnostics: string[] = [];
+    const done = { exited: Promise.resolve(0), kill() {} };
+    const kokoro = Object.assign(() => done, { synthesizePlan: (p: any) => { seen.push(`plan:${p.defaultLanguage}`); return done; } });
+    const piper = Object.assign(() => done, { synthesize: (text: string, language: string) => { seen.push(`${language}:${text}`); return done; } });
+    let wanted = "kokoro";
+    const engine = liveEngine(() => wanted, { kokoro: () => kokoro, piper: () => piper }, piper, undefined, c => diagnostics.push(c));
+    const plan = createNarrationPlan("**API** Open editor", "es");
+    wanted = "piper";
+    await engine.synthesizePlan!(plan, "candidate").exited;
+    await engine.synthesizePlan!(plan, "candidate").exited;
+    wanted = "kokoro";
+    await engine.synthesizePlan!(plan, "candidate").exited;
+    expect(seen).toEqual(["es:API Open editor", "es:API Open editor", "plan:es"]);
+    expect(diagnostics).toEqual(["reduced-pronunciation:text-only-engine"]);
+  });
   const kokoro = () => ({ exited: Promise.resolve(0), kill() {} });
   const mk = (k: boolean, p: boolean) => ({ kokoro: () => (k ? kokoro : undefined), piper: () => (p ? kokoro : undefined) });
   test("auto prefers kokoro, then piper, then sapi", () => {
