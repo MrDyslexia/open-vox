@@ -25,6 +25,68 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 const item = (id: string, text: string) => ({ sessionID: "s", messageID: id, text });
 
 describe("speech sink", () => {
+  test("dynamic or static Off rejects admission before PN parsing or synthesis", async () => {
+    let parses = 0, syntheses = 0;
+    const sink = createSpeechSink({ isEnabled: () => false, preparePlan: (text, language) => {
+      parses++; return createNarrationPlan(text, language);
+    }, engine: () => { syntheses++; return { exited: Promise.resolve(0), kill() {} }; } });
+    await sink(item("off", "Do not parse this narration."));
+    expect([parses, syntheses]).toEqual([0, 0]);
+    const fixed = createSpeechSink({ enabled: false, isEnabled: () => true,
+      preparePlan: () => { parses++; throw new Error("static Off must skip parsing"); } });
+    await fixed(item("fixed", "Static Off wins."));
+    expect(parses).toBe(0);
+    await sink.dispose!(); await fixed.dispose!();
+  });
+
+  test("async PN preparation cannot return after observed Off or stop invalidates its generation", async () => {
+    let enabled = true;
+    let finish!: (plan: ReturnType<typeof createNarrationPlan>) => void;
+    const plans: string[] = [], errors: unknown[] = [];
+    const engine = Object.assign(() => { throw new Error("legacy path forbidden"); }, {
+      speakPlan(plan: ReturnType<typeof createNarrationPlan>) {
+        plans.push(plan.original); return { exited: Promise.resolve(0), kill() {} };
+      },
+    });
+    const sink = createSpeechSink({ engine, isEnabled: () => enabled, onError: e => errors.push(e),
+      preparePlan: () => new Promise<ReturnType<typeof createNarrationPlan>>(resolve => { finish = resolve; }) });
+    const disabled = sink(item("disabled", "Disabled before plan returns."));
+    enabled = false;
+    finish(createNarrationPlan("Disabled before plan returns.", "es")); await disabled;
+    enabled = true;
+    const pending = sink(item("old", "Old pending PN plan."));
+    enabled = false; expect(sink.status!()).toBeUndefined(); enabled = true;
+    finish(createNarrationPlan("Old pending PN plan.", "es")); await pending;
+    const stopped = sink(item("stopped", "Stopped plan."));
+    sink.stop(); finish(createNarrationPlan("Stopped plan.", "es")); await stopped;
+    expect(plans).toEqual([]); expect(errors).toEqual([]);
+    const fresh = sink(item("fresh", "New PN plan."));
+    finish(createNarrationPlan("New PN plan.", "es")); await fresh;
+    expect(plans).toEqual(["New PN plan."]);
+    await sink.dispose!();
+  });
+
+  test("async PN preparation rejects safely without executing a fallback text path", async () => {
+    const errors: unknown[] = [];
+    let executions = 0;
+    const sink = createSpeechSink({ preparePlan: async () => { throw new Error("async parser failure"); },
+      onError: e => errors.push(e), engine: () => {
+        executions++; return { exited: Promise.resolve(0), kill() {} };
+      } });
+    await sink(item("failure", "No plan can be prepared."));
+    expect(errors).toHaveLength(1); expect(executions).toBe(0);
+    await sink.dispose!();
+  });
+
+  test("Off during synchronous PN preparation is checked before execution", async () => {
+    let enabled = true, calls = 0;
+    const sink = createSpeechSink({ isEnabled: () => enabled, preparePlan: (text, language) => {
+      enabled = false; return createNarrationPlan(text, language);
+    }, engine: () => { calls++; return { exited: Promise.resolve(0), kill() {} }; } });
+    await sink(item("race", "Disabled during parsing."));
+    expect(calls).toBe(0); await sink.dispose!();
+  });
+
   test("plan preparation contains errors and stops that occur during parsing", async () => {
     const errors: unknown[] = [];
     const h = harness();
@@ -196,6 +258,7 @@ describe("exact-audio replay", () => {
       discard: (file: string) => { removed.push(file); },
       hold: (_file: string) => () => {},
       forget(sessionID: string) { if (last?.sessionID === sessionID) last = undefined; },
+      clear() { last = undefined; },
       dispose() { last = undefined; },
     };
     const engine = Object.assign(() => { throw new Error("must generate an artifact"); }, {
@@ -321,7 +384,7 @@ describe("exact-audio replay", () => {
     const h = harness();
     const cache = {
       candidate: () => "wav-1", current: () => ({ file: "wav-1", sessionID: "s", revision: 1 }),
-      promote: () => true, discard: () => {}, hold: () => () => {}, forget: () => {}, dispose: () => {},
+      promote: () => true, discard: () => {}, hold: () => () => {}, forget: () => {}, clear: () => {}, dispose: () => {},
     };
     const engine = Object.assign(() => { throw new Error("must generate an artifact"); }, {
       synthesize: () => ({ exited: Promise.resolve(0), kill() {} }),
@@ -427,6 +490,7 @@ describe("real pause and resume", () => {
         return () => { if (!released) { released = true; holds.set(file, holds.get(file)! - 1); } };
       },
       forget(sessionID: string) { if (last?.sessionID === sessionID) last = undefined; },
+      clear() { last = undefined; },
       dispose() { last = undefined; },
     };
     const engine = Object.assign(() => { throw new Error("must generate an artifact"); }, {
@@ -458,6 +522,70 @@ describe("real pause and resume", () => {
   const settled = (promise: Promise<unknown>) =>
     Promise.race([promise.then(() => "settled"), new Promise((resolve) => setTimeout(() => resolve("pending"), 25))]);
   const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  test("flag-only Off drops queued synthesis and rejects late candidate success; On accepts only new work", async () => {
+    let enabled = true;
+    const h = pauseHarness({ isEnabled: () => enabled });
+    const running = h.sink(item("running", "In-flight PN synthesis."));
+    const queued = h.sink(item("queued", "Old queued PN synthesis."));
+    await tick(); enabled = false;
+    h.base.procs[0]!.finish();
+    await Promise.all([running, queued]);
+    expect(h.cache.current()).toBeUndefined(); expect(h.players).toHaveLength(0);
+    expect(h.base.procs).toHaveLength(1); expect(h.errors).toEqual([]);
+    enabled = true; await tick(); expect(h.base.procs).toHaveLength(1);
+    const fresh = h.sink(item("fresh", "New PN synthesis."));
+    await tick(); h.base.procs[1]!.finish(); await tick();
+    expect(h.players).toHaveLength(1); h.players[0]!.finish(); await fresh;
+    await h.sink.dispose();
+  });
+
+  test("flag-only Off cancels frozen playback without a callback and releases its owned hold", async () => {
+    let enabled = true;
+    const h = pauseHarness({ isEnabled: () => enabled });
+    const { narration, playback } = await h.startPlayback();
+    h.setPaused(true); await tick(); enabled = false;
+    await wait(60);
+    const cancelled = playback.killed;
+    h.sink.stop(); await narration;
+    expect(cancelled).toBe(true); expect(h.holds.get("wav-1")).toBe(0);
+    expect(h.sink.status()).toBeUndefined();
+    enabled = true; h.setPaused(false); await tick();
+    expect(playback.resumes).toBe(0); expect(h.errors).toEqual([]);
+    await h.sink.dispose();
+  });
+
+  test("a synthesis ignoring cancellation cannot promote after On and cannot revive its queue", async () => {
+    let enabled = true;
+    const h = pauseHarness({ isEnabled: () => enabled });
+    const active = h.sink(item("active", "A late successful synthesis."));
+    const queued = h.sink(item("queued", "Must not return after On."));
+    await tick();
+    const proc = h.base.procs[0]!;
+    proc.kill = () => { proc.killed = true; }; // cancellation requested; process exits later
+    enabled = false; await wait(60);
+    const cancelled = proc.killed;
+    enabled = true; proc.finish();
+    // Cleanup also bounds this regression if a broken gate lets playback start.
+    await tick(); h.sink.stop(); await Promise.all([active, queued]);
+    expect(cancelled).toBe(true); expect(h.base.procs).toHaveLength(1);
+    expect(h.players).toHaveLength(0); expect(h.cache.current()).toBeUndefined();
+    expect(h.holds.get("wav-1")).toBe(0); expect(h.errors).toEqual([]);
+    await h.sink.dispose();
+  });
+
+  test("Off status and Repeat hide retained audio without deleting protected cached data", async () => {
+    let enabled = true;
+    const h = pauseHarness({ isEnabled: () => enabled });
+    const { narration, playback } = await h.startPlayback();
+    playback.finish(); await narration;
+    const retained = h.cache.current();
+    enabled = false;
+    expect(h.sink.status()).toBeUndefined(); await h.sink.repeat("s", 1);
+    expect(h.players).toHaveLength(1); expect(h.cache.current()).toEqual(retained);
+    enabled = true; await tick(); expect(h.players).toHaveLength(1);
+    await h.sink.dispose();
+  });
 
   test("pause freezes the active playback: no kill, job pending, hold kept, backstop silent", async () => {
     const h = pauseHarness({ timeoutMs: 20, playbackTimeoutMs: 20 });
