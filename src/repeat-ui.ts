@@ -1,10 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { CONTROL_TTL, decodeCommand, encodeCommand, type ControlAction, type ControlMessage } from "./repeat-control";
 
-/** What the sidebar renders. `paused` is the CONFIRMED plugin state; undefined means nothing is confirmed. */
-export type SidebarView = { paused: boolean | undefined; canControl: boolean; canRepeat: boolean };
+/** Confirmed instance state only; undefined is neutral, never an optimistic On/Off. */
+export type SidebarView = { paused: boolean | undefined; enabled: boolean | undefined; canControl: boolean; canRepeat: boolean };
 export const sameView = (a: SidebarView, b: SidebarView) =>
-  a.paused === b.paused && a.canControl === b.canControl && a.canRepeat === b.canRepeat;
+  a.paused === b.paused && a.enabled === b.enabled && a.canControl === b.canControl && a.canRepeat === b.canRepeat;
+
+export const canPause = (view: SidebarView) => view.canControl && view.enabled === true;
+export const serviceIcon = (view: SidebarView): { tone: "on" | "off" | "unknown"; clickable: boolean } => ({
+  tone: view.enabled === undefined ? "unknown" : view.enabled ? "on" : "off",
+  clickable: view.enabled !== undefined && view.canControl,
+});
 
 type UiClient = { tui: { publish(parameters: {
   directory: string;
@@ -54,7 +60,7 @@ export function createRepeatUi(options: {
     // The accepted instance reports its latest pause/audio state right away (restrictions must not wait
     // for settlement); the lease keeps its original expiry, so only a settled reply can extend it.
     else if (status && status.expires > now() && status.instance === m.instance)
-      status = { ...status, paused: m.paused, revision: m.revision };
+      status = { ...status, paused: m.paused, enabled: m.enabled, revision: m.revision };
     options.onChange();
   });
   /** The confirmed status for this session, or undefined when nothing validated and unexpired exists. */
@@ -69,8 +75,9 @@ export function createRepeatUi(options: {
     const current = confirmed(sessionID);
     return {
       paused: current ? current.paused === true : undefined,
+      enabled: current ? current.enabled !== false : undefined,
       canControl: !!current && !sending,
-      canRepeat: !!current && !sending && !current.paused && current.revision! > 0,
+      canRepeat: !!current && !sending && current.enabled !== false && !current.paused && current.revision! > 0,
     };
   };
   const available = (sessionID: string) => view(sessionID).canRepeat;
@@ -115,9 +122,15 @@ export function createRepeatUi(options: {
     control,
     /** Sends the explicit opposite of the CONFIRMED pause state; with no confirmation it does nothing. */
     async togglePause(sessionID: string): Promise<void> {
-      const paused = view(sessionID).paused;
-      if (paused === undefined) return;
+      const { paused, enabled } = view(sessionID);
+      if (paused === undefined || enabled !== true) return;
       await control(sessionID, paused ? "resume" : "pause");
+    },
+    /** Request the opposite confirmed service state, including On while Off; never optimistic. */
+    async toggleEnabled(sessionID: string): Promise<void> {
+      const enabled = view(sessionID).enabled;
+      if (enabled === undefined) return;
+      await control(sessionID, enabled ? "disable" : "enable");
     },
     async repeat(sessionID: string): Promise<void> {
       if (!available(sessionID)) return;

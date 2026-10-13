@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { createRepeatUi, buttonHandlers, publishAttached, sameView } from "../src/repeat-ui";
+import * as repeatUi from "../src/repeat-ui";
 import { createOpencodeClient } from "@opencode-ai/sdk/v2";
 import { readFileSync } from "node:fs";
 import { encodeCommand, decodeCommand, type ControlMessage } from "../src/repeat-control";
@@ -110,10 +111,10 @@ test("confirmed pause and explicit backend unavailability override renewal eligi
 test("a paused or audio-less instance still accepts control and shows the confirmed state", async () => {
   for (const [state, paused] of [[{ paused: true }, true], [{ revision: 0 }, false]] as const) {
     const h = renewalHarness(); await h.accept();
-    expect(h.ui.view("s")).toEqual({ paused: false, canControl: true, canRepeat: true });
+    expect(h.ui.view("s")).toEqual({ paused: false, enabled: true, canControl: true, canRepeat: true });
     h.time(2750); h.ui.refresh("s"); await Promise.resolve();
     h.reply(undefined, state);
-    expect(h.ui.view("s")).toEqual({ paused, canControl: true, canRepeat: false });
+    expect(h.ui.view("s")).toEqual({ paused, enabled: true, canControl: true, canRepeat: false });
     h.time(3000); expect(h.ui.view("s").canControl).toBe(true);
     h.ui.dispose();
   }
@@ -121,7 +122,7 @@ test("a paused or audio-less instance still accepts control and shows the confir
 
 test("control needs a validated unexpired status for the displayed session; there is no optimistic state", async () => {
   const none = renewalHarness();
-  expect(none.ui.view("s")).toEqual({ paused: undefined, canControl: false, canRepeat: false });
+  expect(none.ui.view("s")).toEqual({ paused: undefined, enabled: undefined, canControl: false, canRepeat: false });
   await none.ui.togglePause("s");
   expect(none.sent).toHaveLength(0);
   none.ui.refresh("s"); await Promise.resolve(); // hello sent, no reply yet
@@ -132,7 +133,7 @@ test("control needs a validated unexpired status for the displayed session; ther
   const h = renewalHarness(); await h.accept();
   await h.ui.togglePause("other"); await h.ui.togglePause("");
   expect(h.sent.filter((m) => m.kind === "control")).toHaveLength(0);
-  h.time(3000); expect(h.ui.view("s")).toEqual({ paused: undefined, canControl: false, canRepeat: false });
+  h.time(3000); expect(h.ui.view("s")).toEqual({ paused: undefined, enabled: undefined, canControl: false, canRepeat: false });
   await h.ui.togglePause("s");
   expect(h.sent.filter((m) => m.kind === "control")).toHaveLength(0);
   h.ui.dispose();
@@ -156,7 +157,7 @@ test("togglePause publishes an explicit action for the confirmed state and asks 
   expect(h.ui.view("s").paused).toBe(false);
   // The confirmed reply to the fresh challenge drives the display and the next explicit action.
   h.reply(hellos()[1], { paused: true });
-  expect(h.ui.view("s")).toEqual({ paused: true, canControl: true, canRepeat: false });
+  expect(h.ui.view("s")).toEqual({ paused: true, enabled: true, canControl: true, canRepeat: false });
   await h.ui.togglePause("s");
   expect(h.sent.filter((m) => m.kind === "control").at(-1)).toMatchObject({ action: "resume" });
   expect(new Set(h.sent.filter((m) => m.kind === "control").map((m) => m.requestID)).size).toBe(2);
@@ -169,7 +170,7 @@ test("only one control publication is in flight and repeat is unavailable while 
   h.transport(() => new Promise<void>((done) => { resolve = done; }));
   const first = h.ui.togglePause("s"), second = h.ui.togglePause("s");
   expect(h.sent.filter((m) => m.kind === "control")).toHaveLength(1);
-  expect(h.ui.view("s")).toEqual({ paused: false, canControl: false, canRepeat: false });
+  expect(h.ui.view("s")).toEqual({ paused: false, enabled: true, canControl: false, canRepeat: false });
   await h.ui.repeat("s");
   expect(h.sent.filter((m) => m.kind === "repeat")).toHaveLength(0);
   h.transport(async () => {});
@@ -182,7 +183,7 @@ test("a control transport failure invalidates the status and leaves no optimisti
   const h = renewalHarness(); await h.accept();
   h.transport(async (m) => { if (m.kind === "control") throw new Error("transport failed"); });
   await h.ui.togglePause("s");
-  expect(h.ui.view("s")).toEqual({ paused: undefined, canControl: false, canRepeat: false });
+  expect(h.ui.view("s")).toEqual({ paused: undefined, enabled: undefined, canControl: false, canRepeat: false });
   expect(h.sent.filter((m) => m.kind === "hello")).toHaveLength(1);
   h.ui.dispose();
 });
@@ -191,7 +192,7 @@ test("session changes and replies from a second instance drop the displayed stat
   const h = renewalHarness(); await h.accept();
   h.time(2750); h.ui.refresh("s"); await Promise.resolve();
   h.reply(undefined, { instance: "b" });
-  expect(h.ui.view("s")).toEqual({ paused: undefined, canControl: false, canRepeat: false });
+  expect(h.ui.view("s")).toEqual({ paused: undefined, enabled: undefined, canControl: false, canRepeat: false });
   await h.ui.togglePause("s");
   expect(h.sent.filter((m) => m.kind === "control")).toHaveLength(0);
   h.ui.dispose();
@@ -268,9 +269,9 @@ test("sidebar Pause goes through the confirmed control channel, not config.json 
 });
 
 test("sameView compares every rendered field", () => {
-  const base = { paused: false, canControl: true, canRepeat: true };
+  const base = { paused: false, enabled: true, canControl: true, canRepeat: true };
   expect(sameView(base, { ...base })).toBe(true);
-  for (const change of [{ paused: true }, { paused: undefined }, { canControl: false }, { canRepeat: false }])
+  for (const change of [{ paused: true }, { paused: undefined }, { enabled: false }, { enabled: undefined }, { canControl: false }, { canRepeat: false }])
     expect(sameView(base, { ...base, ...change })).toBe(false);
 });
 
@@ -333,4 +334,97 @@ test("a transport that never settles cannot accumulate challenge publications", 
   expect(calls).toBe(1);
   expect(ui.available("s")).toBe(false);
   ui.dispose();
+});
+
+test("service starts neutral, rejects unconfirmed/stale/conflicting targets and retains legacy enabled status", async () => {
+  const none = renewalHarness();
+  expect(none.ui.view("s").enabled).toBeUndefined();
+  await none.ui.toggleEnabled("s");
+  expect(none.sent).toHaveLength(0); none.ui.dispose();
+  const h = renewalHarness(); await h.accept(); // no enabled field: compatible older status
+  expect(h.ui.view("s").enabled).toBe(true);
+  await h.ui.toggleEnabled("other"); await h.ui.toggleEnabled("");
+  expect(h.sent.filter(m => m.kind === "control")).toHaveLength(0);
+  h.time(2750); h.ui.refresh("s"); await Promise.resolve();
+  h.reply(undefined, { challenge: "wrong", enabled: false });
+  h.reply(undefined, { sessionID: "other", enabled: false });
+  h.reply(undefined, { enabled: "false" as any });
+  expect(h.ui.view("s").enabled).toBe(true);
+  h.reply(undefined, { instance: "conflict", enabled: false });
+  expect(h.ui.view("s").enabled).toBeUndefined();
+  await h.ui.toggleEnabled("s"); expect(h.sent.filter(m => m.kind === "control")).toHaveLength(0);
+  h.ui.dispose(); await h.ui.toggleEnabled("s");
+});
+
+test("On/Off sends nonce-targeted explicit requests and waits for confirmed replies without optimism", async () => {
+  const h = renewalHarness(); await h.accept();
+  const firstHello = h.sent[0]!;
+  await h.ui.toggleEnabled("s");
+  expect(h.sent.find(m => m.kind === "control")).toMatchObject({ instance: "a", sessionID: "s", action: "disable", expires: 3250 });
+  expect(h.ui.view("s").enabled).toBe(true);
+  h.reply(firstHello, { enabled: false }); expect(h.ui.view("s").enabled).toBe(true);
+  h.reply(undefined, { enabled: false, revision: 3 });
+  expect(h.ui.view("s")).toEqual({ paused: false, enabled: false, canControl: true, canRepeat: false });
+  expect(repeatUi.canPause(h.ui.view("s"))).toBe(false);
+  await h.ui.togglePause("s"); await h.ui.repeat("s");
+  expect(h.sent.filter(m => m.kind === "control")).toHaveLength(1);
+  expect(h.sent.filter(m => m.kind === "repeat")).toHaveLength(0);
+  await h.ui.toggleEnabled("s");
+  const controls = h.sent.filter(m => m.kind === "control");
+  expect(controls.at(-1)?.action).toBe("enable");
+  expect(new Set(controls.map(m => m.requestID)).size).toBe(2);
+  expect(h.ui.view("s").enabled).toBe(false);
+  h.reply(undefined, { enabled: true, revision: 0 });
+  expect(h.ui.view("s").enabled).toBe(true); expect(h.ui.available("s")).toBe(false);
+  h.ui.dispose();
+});
+
+test("confirmed Off renews its lease and still permits On while Pause/Repeat remain blocked", async () => {
+  const h = renewalHarness(); await h.accept();
+  h.time(2750); h.ui.refresh("s"); await Promise.resolve(); h.reply(undefined, { enabled: false, revision: 0 });
+  h.time(3000); expect(h.ui.view("s").enabled).toBe(false);
+  h.time(4500); h.ui.refresh("s"); await Promise.resolve(); h.reply(undefined, { enabled: false, revision: 0 });
+  h.time(4750); expect(repeatUi.serviceIcon(h.ui.view("s"))).toEqual({ tone: "off", clickable: true });
+  await h.ui.toggleEnabled("s"); expect(h.sent.filter(m => m.kind === "control").at(-1)?.action).toBe("enable");
+  h.time(7000); await h.ui.toggleEnabled("s");
+  expect(h.sent.filter(m => m.kind === "control")).toHaveLength(1); h.ui.dispose();
+});
+
+test("service requests serialize with Pause and recover from failed transport only after fresh confirmation", async () => {
+  const h = renewalHarness(); await h.accept();
+  h.time(2750); h.ui.refresh("s"); await Promise.resolve(); h.reply(undefined, { paused: true });
+  let finish!: () => void;
+  h.transport(() => new Promise<void>(r => { finish = r; }));
+  const first = h.ui.toggleEnabled("s"), second = h.ui.toggleEnabled("s"), pause = h.ui.togglePause("s");
+  expect(h.sent.filter(m => m.kind === "control")).toHaveLength(1);
+  expect(repeatUi.serviceIcon(h.ui.view("s"))).toEqual({ tone: "on", clickable: false });
+  h.transport(async () => {}); finish(); await Promise.all([first, second, pause]);
+  h.reply();
+  h.transport(async m => { if (m.kind === "control") throw new Error("transport failed"); });
+  await h.ui.toggleEnabled("s"); expect(h.ui.view("s").enabled).toBeUndefined();
+  h.transport(async () => {}); h.time(5000); h.ui.refresh("s"); await Promise.resolve(); h.reply();
+  h.time(5250); expect(h.ui.view("s").enabled).toBe(true); h.ui.dispose();
+});
+
+test("service icon uses confirmed On/Off/neutral state and Pause requires a confirmed enabled service", () => {
+  const base = { paused: false, enabled: true, canControl: true, canRepeat: true };
+  expect(repeatUi.serviceIcon(base)).toEqual({ tone: "on", clickable: true });
+  expect(repeatUi.serviceIcon({ ...base, paused: true })).toEqual({ tone: "on", clickable: true });
+  expect(repeatUi.serviceIcon({ ...base, enabled: false })).toEqual({ tone: "off", clickable: true });
+  expect(repeatUi.serviceIcon({ ...base, enabled: undefined })).toEqual({ tone: "unknown", clickable: false });
+  expect(repeatUi.canPause(base)).toBe(true);
+  expect(repeatUi.canPause({ ...base, enabled: false })).toBe(false);
+  expect(repeatUi.canPause({ ...base, canControl: false })).toBe(false);
+});
+
+test("sidebar service control uses theme colors, confirmed gates and no persisted state or rate UI", () => {
+  const source = readFileSync(new URL("../tui/open-vox.tsx", import.meta.url), "utf8");
+  expect(source).toContain("repeat.toggleEnabled("); expect(source).toContain("serviceIcon(");
+  expect(source).toContain("canPause(");
+  expect(source).toContain("theme().success"); expect(source).toContain("theme().error");
+  expect(source).not.toMatch(/#[0-9a-fA-F]{6}/);
+  expect(source).not.toMatch(/writeConfig\(\s*\{\s*(enabled|paused)/);
+  expect(source).not.toMatch(/toggleRate|playbackRate|setRate/);
+  expect(source).toMatch(/button\(\(\) => "Voice", chooseVoice, undefined, true\)/);
+  expect(source).toContain("writeConfig({ voices:");
 });

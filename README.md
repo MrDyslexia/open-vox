@@ -164,7 +164,15 @@ An old `paused` entry in `config.json` is ignored and dropped on the next write.
 ## Sidebar block
 
 `open-vox install` adds a small **open-vox** block to the OpenCode sidebar with
-three buttons:
+an instance-local service icon and three buttons:
+
+- **Service On/Off**: the title icon shows confirmed On (green), Off (red), or
+  unconfirmed (neutral and not clickable). Off cancels this instance's work,
+  clears Pause without resuming and deletes retained WAV audio after holds release.
+  On permits new narration only; it restores neither discarded audio nor position.
+  Pause/Repeat are unavailable while Off; Voice remains available. State is held
+  in memory, not shared config. A statically unavailable instance cannot be enabled.
+  Playback-rate controls are separate future work, not part of this service control.
 
 - **Pause / Resume**: freezes the narration that is playing (same audio, same
   position) and **Resume** continues it from there, without synthesizing again.

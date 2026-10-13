@@ -2,7 +2,7 @@
 
 Preserve the delivered pronunciation-normalization (PN) pipeline while adding
 instance-scoped service On/Off and playback rates in small, coherent work units.
-Bootstrap and U01–U05 are complete; PN service lifecycle is bound. Next: **U06**.
+Bootstrap and U01–U06 are complete; confirmed service UI is bound. Next: **U07**.
 
 ## Objective and authorization
 
@@ -17,8 +17,9 @@ Port only the missing behavior onto the exact PN delivery baseline instead.
 - U02 completed protocol and explicit pause/resume dispatch without runtime binding.
 - U03 completed PN sink gates and promise preparation without runtime binding.
 - U04 completed state/lifecycle/wrapper helpers without actual-instance binding.
-- Current authorization: U05 PN binding in `src/plugin.ts`, `test/wiring.test.ts`
-  and task evidence only; no speed/UI work. Stop before U06.
+- U05 completed actual PN instance service binding and cache lifecycle checks.
+- Current authorization: U06 repeat UI/TSX, focused tests, README and task evidence
+  only. Voice/theme semantics stay intact; no playback-rate work. Stop before U07.
 - No network, publication, PR edits, push, main merge, rebase, destructive reset,
   original checkout changes, host/config/environment changes, downloads, installs,
   package/lock writes, or writes through the dependency junction are authorized.
@@ -95,14 +96,14 @@ documentation, compress code, or claim an exception to meet the ceiling.
 | [x] U03 | PN sink enabled checks at admission, post-plan, pump, status, Repeat | 195–240 forecast; observed below | U01–U02 |
 | [x] U04 | Enabled state / Off lifecycle wrapper; forward `stopSession` | 165–205 forecast; observed below | U03 |
 | [x] U05 | Wire On/Off to actual PN instance; clear cache, cancel, combine counters | 300–375 forecast; observed below | U01–U04 |
-| [ ] U06 | Service UI confirmed state and TSX | 255–290 | U05 |
+| [x] U06 | Service UI confirmed state and TSX | 255–290 forecast; observed below | U05 |
 | [ ] U07 | Closed rate wire: 1 / 1.5 / 2 and safe dispatch | 165–190 | U06 |
 | [ ] U08 | Existing-player rate regression tests only | 240–255 | U07 |
 | [ ] U09 | Runtime rates preserve cached PN audio | 365–395 | U07–U08 |
 | [ ] U10 | Confirmed rate UI | 280–310 | U09 |
 
 U09 is the hardest ceiling: preserve all necessary regression tests. Bootstrap
-contained no source materialization; U01–U05 are complete. U06–U10 remain open.
+contained no source materialization; U01–U06 are complete. U07–U10 remain open.
 
 ## Future routes and verification
 
@@ -166,7 +167,7 @@ record actual harness scenario/outcome or an explicit boundary-specific N/A.
 
 ## Next step
 
-Stop after U05. Next is U06 confirmed service UI state and TSX.
+Stop after U06. Next is U07 closed playback-rate wire and safe dispatch.
 Reconcile this tracker with full Engram mirror `odd/unified-playback-narration/tasks`
 in project `agentvoz`; preserve the 400-line closing guard for every later unit.
 
@@ -279,3 +280,31 @@ in project `agentvoz`; preserve the 400-line closing guard for every later unit.
 - Rollback boundary: U05 plugin binding, focused tests and task evidence only;
   preserve U01–U04, authoritative PN source plan, defaults and bootstrap backups.
 - Observed A+D: production 20, tests 210, docs 43; total 273 <= 400. Commit SHA is in the U05 receipt.
+
+## U06 evidence
+
+- Prior boundary / U05 commit: `29c57244b6156b5c3d307d9cb0e9620c643f509c`.
+- Sidebar enabled state is neutral until confirmed. Explicit On/Off requests use
+  the confirmed instance/nonce/TTL; clicks never optimistically change the state.
+  Off keeps service control available, but gates Pause/Repeat. Voice is unchanged.
+- Renewal copies enabled state immediately for the accepted instance without
+  extending its old lease until settlement. Wrong/malformed/stale/conflicting
+  replies and failed transport cannot confirm state; fresh discovery can recover.
+- Title icon uses theme success/error/textMuted and a confirmed click guard;
+  default button styling, voice config/dialog mouse-up behavior and route binding
+  remain intact. No transient service state is written to config or rate UI added.
+- Historical attempt (not rerun): focused RED 124 pass / 10 fail, 455 assertions,
+  exit 1; GREEN 134 pass / 0 fail, 510 assertions, exit 0 with the command below.
+- `bun run typecheck` and `git diff --check` passed. Existing Bun TSX transpilation
+  proves syntax, and the extracted registration callback checks public slot props;
+  tsc excludes TSX. Source guards cover theme/Voice wiring, not a mounted renderer.
+  No full suite, actual-host visual, audibility or model proof is claimed.
+- Rollback boundary: U06 sidebar controller/TSX, tests, README and task evidence;
+  retain U01–U05 PN lifecycle, defaults and all bootstrap safeguards.
+- Recovery preserved the interrupted 217-line partial diff without rewriting code.
+  Only this evidence was reconciled; the earlier done marker was not commit proof.
+- Fresh: `bun test test/repeat-ui.test.ts test/wiring.test.ts` yielded 134 pass /
+  0 fail, 510 assertions, exit 0. Typecheck and closing diff check passed (exit 0).
+  No RED was recreated. TSX/slot proof remains syntax/extracted-callback only.
+  U06 closes locally with its commit receipt; U07 requires the next bounded writer.
+- Observed A+D: production 58, tests 114, docs 51; total 223 <= 400. Commit SHA is in the U06 receipt.

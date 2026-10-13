@@ -7,7 +7,7 @@
 import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import { For, createMemo, createSignal, onCleanup } from "solid-js"
 import { KOKORO_VOICES, readConfig, writeConfig } from "../src/config"
-import { createRepeatUi, buttonHandlers, publishAttached, sameView } from "../src/repeat-ui"
+import { createRepeatUi, buttonHandlers, canPause, publishAttached, sameView, serviceIcon } from "../src/repeat-ui"
 
 const id = "open-vox"
 
@@ -25,14 +25,20 @@ function Block(props: { api: TuiPluginApi; sessionID: string }) {
     const route = props.api.route.current
     return route.name === "session" && route.params?.sessionID === props.sessionID ? props.sessionID : ""
   }
-  // paused is undefined until the plugin instance confirms its state; nothing is optimistic.
-  const [view, setView] = createSignal({ paused: undefined, canControl: false, canRepeat: false }, { equals: sameView })
+  // Pause and service state remain neutral until confirmed by this instance.
+  const [view, setView] = createSignal({ paused: undefined, enabled: undefined, canControl: false, canRepeat: false }, { equals: sameView })
   const repeat = createRepeatUi({
     subscribe: (receive) => props.api.event.on("tui.command.execute", (event) => receive(event.properties.command)),
     publish: (command) => publishAttached(props.api.client, props.api.state.path.directory, command),
     onChange: () => setView(repeat.view(session())),
   })
   const paused = () => view().paused === true
+  const icon = () => serviceIcon(view())
+  const iconColor = () => ({ on: theme().success, off: theme().error, unknown: theme().textMuted })[icon().tone]
+  const toggleService = buttonHandlers(
+    () => { void repeat.toggleEnabled(session()) },
+    () => !icon().clickable || !serviceIcon(repeat.view(session())).clickable,
+  )
   const repeatTimer = setInterval(() => {
     repeat.refresh(session())
     setView(repeat.view(session()))
@@ -86,14 +92,21 @@ function Block(props: { api: TuiPluginApi; sessionID: string }) {
 
   return (
     <box flexDirection="column" gap={1}>
-      <text fg={theme().text} width="100%" wrapMode="word">
-        <b>Open-Vox</b>
-        <span style={{ fg: theme().textMuted }}>{` ES ${label(config().voices.es)} / EN ${label(config().voices.en)}`}</span>
-        <span style={{ fg: paused() ? theme().warning : theme().textMuted }}>{paused() ? " paused" : ""}</span>
-      </text>
+      <box flexDirection="row" gap={1}>
+        <box flexShrink={0} width={1} onMouseDown={toggleService.onMouseDown}>
+          <text fg={iconColor()}>{icon().tone === "unknown" ? "\u25CB" : "\u25CF"}</text>
+        </box>
+        <text fg={theme().text} flexGrow={1} wrapMode="word">
+          <b>Open-Vox</b>
+          <span style={{ fg: theme().textMuted }}>{` ES ${label(config().voices.es)} / EN ${label(config().voices.en)}`}</span>
+          <span style={{ fg: view().enabled === false ? theme().error : paused() ? theme().warning : theme().textMuted }}>
+            {view().enabled === false ? " off" : paused() ? " paused" : ""}
+          </span>
+        </text>
+      </box>
       <box flexDirection="row" gap={1}>
         {button(() => (paused() ? "Resume" : "Pause"), () => { void repeat.togglePause(session()) }, paused, false,
-          () => !view().canControl || !repeat.view(session()).canControl)}
+          () => !canPause(view()) || !canPause(repeat.view(session())))}
         {button(() => "Voice", chooseVoice, undefined, true)}
         {button(() => "Repeat", () => { void repeat.repeat(session()) }, undefined, false,
           () => !view().canRepeat || !repeat.available(session()))}
