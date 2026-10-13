@@ -108,24 +108,45 @@ export function createCoordinator(client: Client, directory: string, sink: Sink 
 }
 
 
-/** Runtime pause flag of one plugin instance: in memory only, never read from or written to config.json. */
-export type PauseState = { isPaused: () => boolean; setPaused: (paused: boolean) => void };
+/** Instance-local pause/service state; never persisted to config.json. */
+export type PauseState = {
+  isPaused: () => boolean;
+  setPaused: (paused: boolean) => void;
+  isEnabled: () => boolean;
+  setEnabled: (enabled: boolean) => void;
+};
 
 /**
  * `onPause` runs exactly once per false->true edge and `onResume` exactly once per true->false edge. The
  * flag is already updated when either runs, so queued and in-flight work sees the new state. Both are
  * contained: a failing callback never changes the flag or escapes.
  */
-export function createPauseState(onPause: () => void, onResume?: () => void): PauseState {
-  let paused = false;
+export function createPauseState(onPause: () => void, onResume?: () => void,
+  service: { onDisable?: () => void; capable?: boolean } = {}): PauseState {
+  let paused = false, enabled = service.capable !== false;
   return {
     isPaused: () => paused,
     setPaused(next) {
-      if (next === paused) return;
+      // Runtime Off has nothing to pause; unsupported hosts retain legacy pause behavior.
+      if (next === paused || (next && !enabled && service.capable !== false)) return;
       paused = next;
       try { (next ? onPause : onResume)?.(); } catch {}
     },
+    isEnabled: () => enabled,
+    setEnabled(next) {
+      if (next === enabled || service.capable === false) return;
+      enabled = next;
+      if (next) return; // On permits future work; it never resumes discarded audio.
+      paused = false;
+      try { service.onDisable?.(); } catch {}
+    },
   };
+}
+
+/** Stop owned work before invalidation; a failing step must not skip the next. */
+export function disableService(sink: SpeechSink, cache?: Pick<AudioStore, "clear">): void {
+  try { sink.stop(); } catch {}
+  try { cache?.clear(); } catch {}
 }
 
 /** Pause edge of a sink: a real pause when the sink supports it, otherwise the old behavior (stop). */
@@ -174,17 +195,17 @@ export function createOpenVox(client: Client, directory: string, sink: SpeechSin
   } };
 }
 
-/** Skips new narrations while paused; stop(), pause() and resume() always pass through. */
-export function withPause(sink: SpeechSink, isPaused: () => boolean): SpeechSink {
+/** Gate narration/status/Repeat; lifecycle methods retain their original forwarding. */
+export function withPause(sink: SpeechSink, isPaused: () => boolean, isEnabled: () => boolean = () => true): SpeechSink {
   const wrapped = (async (selection: Selection) => {
-    if (isPaused()) return;
+    if (isPaused() || !isEnabled()) return;
     await sink(selection);
   }) as SpeechSink;
   wrapped.stop = () => sink.stop();
   if (sink.pause) wrapped.pause = () => sink.pause!();
   if (sink.resume) wrapped.resume = () => sink.resume!();
-  wrapped.status = () => sink.status?.();
-  wrapped.repeat = async (sessionID, revision, expires) => { if (!isPaused()) await sink.repeat?.(sessionID, revision, expires); };
+  wrapped.status = () => isEnabled() ? sink.status?.() : undefined;
+  wrapped.repeat = async (sessionID, revision, expires) => { if (!isPaused() && isEnabled()) await sink.repeat?.(sessionID, revision, expires); };
   if (sink.stopSession) wrapped.stopSession = (sessionID) => sink.stopSession!(sessionID);
   wrapped.removeSession = (sessionID) => sink.removeSession?.(sessionID);
   wrapped.dispose = async () => { await sink.dispose?.(); };

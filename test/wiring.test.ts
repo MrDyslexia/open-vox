@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { OpenVoxPlugin, chooseEngine, createLiveSink, createOpenVox, createPauseState, liveEngine, withPause } from "../src/plugin";
+import * as plugin from "../src/plugin";
 import { createNarrationPlan } from "../src/markdown-narration";
 import { createConfigReader, DEFAULT_CONFIG } from "../src/config";
 import { createSpeechSink, type Engine, type SpeechProcess, type SpeechSink } from "../src/speech-sink";
@@ -365,6 +366,97 @@ function instance(nonce: string) {
 }
 
 describe("pause state", () => {
+  test("Off updates both flags before its callback and never resumes; On only permits future work", () => {
+    const edges: string[] = [], observed: boolean[][] = [];
+    const state: ReturnType<typeof createPauseState> = createPauseState(
+      () => { edges.push("pause"); }, () => { edges.push("resume"); },
+      { onDisable: () => { edges.push("disable"); observed.push([state.isEnabled(), state.isPaused()]); } });
+    expect([state.isEnabled(), state.isPaused()]).toEqual([true, false]);
+    state.setPaused(true); state.setEnabled(false); state.setEnabled(false);
+    expect(observed).toEqual([[false, false]]);
+    expect(edges).toEqual(["pause", "disable"]);
+    state.setPaused(true); state.setPaused(false);
+    expect(edges).toEqual(["pause", "disable"]);
+    state.setEnabled(true); state.setEnabled(true);
+    expect([state.isEnabled(), state.isPaused()]).toEqual([true, false]);
+    expect(edges).toEqual(["pause", "disable"]);
+    state.setPaused(true); state.setEnabled(false);
+    expect(edges).toEqual(["pause", "disable", "pause", "disable"]);
+  });
+
+  test("unsupported static capability cannot be enabled, but retains legacy pause behavior", () => {
+    const edges: string[] = [];
+    const state = createPauseState(() => { edges.push("pause"); }, undefined,
+      { capable: false, onDisable: () => { edges.push("disable"); } });
+    expect(state.isEnabled()).toBe(false);
+    state.setEnabled(true); state.setEnabled(false);
+    expect(state.isEnabled()).toBe(false); expect(edges).toEqual([]);
+    state.setPaused(true); expect(state.isPaused()).toBe(true);
+    expect(edges).toEqual(["pause"]);
+  });
+
+  test("a throwing disable callback cannot restore enabled or paused state", () => {
+    const state = createPauseState(() => {}, undefined, { onDisable: () => { throw new Error("disable failed"); } });
+    state.setPaused(true);
+    expect(() => state.setEnabled(false)).not.toThrow();
+    expect([state.isEnabled(), state.isPaused()]).toEqual([false, false]);
+  });
+
+  test("disableService stops before invalidation and attempts both steps despite errors", () => {
+    const f = fakeSink(), order: string[] = [];
+    f.sink.stop = () => { order.push("stop"); throw new Error("stop failed"); };
+    const cache = { clear: () => { order.push("clear"); throw new Error("clear failed"); } };
+    expect(() => plugin.disableService(f.sink, cache)).not.toThrow();
+    expect(order).toEqual(["stop", "clear"]);
+    expect(() => plugin.disableService(f.sink)).not.toThrow();
+    expect(order).toEqual(["stop", "clear", "stop"]);
+  });
+
+  test("Off helper chain observes flags before stop then clear, with no resume on re-enable", () => {
+    const f = fakeSink(), order: string[] = [];
+    const state = createPauseState(() => f.sink.pause!(), () => f.sink.resume!(),
+      { onDisable: () => plugin.disableService(f.sink, { clear: () => { order.push("clear"); } }) });
+    f.sink.stop = () => { order.push(`stop:${state.isEnabled()}:${state.isPaused()}`); };
+    state.setPaused(true); state.setEnabled(false); state.setEnabled(true);
+    expect(order).toEqual(["stop:false:false", "clear"]);
+    expect(f.resumes()).toBe(0);
+  });
+
+  test("withPause hides disabled work/audio while preserving legacy defaults and cleanup methods", async () => {
+    const f = fakeSink();
+    let enabled = false, repeats = 0, removed = "", disposed = 0;
+    f.sink.status = () => ({ sessionID: "s", revision: 4 });
+    f.sink.repeat = async () => { repeats++; };
+    f.sink.removeSession = id => { removed = id; };
+    f.sink.dispose = async () => { disposed++; };
+    const gated = withPause(f.sink, () => false, () => enabled);
+    const selection = { sessionID: "s", messageID: "m", text: "New work" };
+    await gated(selection); await gated.repeat!("s", 4);
+    expect([f.spoken, repeats, gated.status!()]).toEqual([[], 0, undefined]);
+    gated.stop(); gated.pause!(); gated.resume!(); gated.removeSession!("s"); await gated.dispose!();
+    expect([f.stops(), f.pauses(), f.resumes(), removed, disposed]).toEqual([1, 1, 1, "s", 1]);
+    enabled = true; expect(f.spoken).toEqual([]);
+    await gated(selection); await gated.repeat!("s", 4);
+    expect([f.spoken, repeats]).toEqual([["New work"], 1]);
+    const plain = withPause(f.sink, () => false);
+    expect(plain.status!()).toEqual({ sessionID: "s", revision: 4 });
+  });
+
+  test("withPause forwards stopSession through stopFor while Off; unscoped errors remain global", async () => {
+    const f = fakeSink(), sessions: string[] = [];
+    f.sink.stopSession = id => { sessions.push(id); };
+    const gated = withPause(f.sink, () => false, () => false);
+    const hooks = createOpenVox(client, "/d", gated);
+    await hooks.event!({ event: { type: "session.error", properties: { sessionID: "other" } } } as any);
+    await hooks.event!({ event: user("new-user", 1) });
+    await hooks.event!({ event: user("new-user", 1) });
+    expect(sessions).toEqual(["other", "ses_a"]); expect(f.stops()).toBe(0);
+    await hooks.event!({ event: { type: "session.error", properties: {} } } as any);
+    expect(f.stops()).toBe(1);
+    await hooks.dispose!();
+    expect(withPause(fakeSink().sink, () => false).stopSession).toBeUndefined();
+  });
+
   test("setPaused fires onPause exactly once per false->true edge and never on resume or repeats", () => {
     let pauses = 0;
     const pause = createPauseState(() => { pauses++; });

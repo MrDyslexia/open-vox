@@ -2,7 +2,7 @@
 
 Preserve the delivered pronunciation-normalization (PN) pipeline while adding
 instance-scoped service On/Off and playback rates in small, coherent work units.
-Bootstrap and U01–U03 are complete; service runtime binding is pending. Next: **U04**.
+Bootstrap and U01–U04 are complete; service runtime binding is pending. Next: **U05**.
 
 ## Objective and authorization
 
@@ -15,8 +15,9 @@ Port only the missing behavior onto the exact PN delivery baseline instead.
   mocks in `test/speech-sink.test.ts` and `test/wiring.test.ts`, and this tracker.
   `odd/tasks/playback-controls.md` was allowed but unchanged in U01.
 - U02 completed protocol and explicit pause/resume dispatch without runtime binding.
-- Current authorization: U03 in `src/speech-sink.ts`, `test/speech-sink.test.ts`
-  and task documents only. Preserve PN preparation/generation; stop before U04.
+- U03 completed PN sink gates and promise preparation without runtime binding.
+- Current authorization: U04 state/lifecycle/withPause helpers in `src/plugin.ts`,
+  focused `test/wiring.test.ts` and task documents only; stop before U05 binding.
 - No network, publication, PR edits, push, main merge, rebase, destructive reset,
   original checkout changes, host/config/environment changes, downloads, installs,
   package/lock writes, or writes through the dependency junction are authorized.
@@ -91,7 +92,7 @@ documentation, compress code, or claim an exception to meet the ceiling.
 | [x] U01 | Cache clear/invalidation and compatible mocks | 170–195 forecast; observed below | baseline |
 | [x] U02 | Service wire and safe dispatch | 145–175 forecast; observed below | U01 |
 | [x] U03 | PN sink enabled checks at admission, post-plan, pump, status, Repeat | 195–240 forecast; observed below | U01–U02 |
-| [ ] U04 | Enabled state / Off lifecycle wrapper; forward `stopSession` | 165–205 | U03 |
+| [x] U04 | Enabled state / Off lifecycle wrapper; forward `stopSession` | 165–205 forecast; observed below | U03 |
 | [ ] U05 | Wire On/Off to actual PN instance; clear cache, cancel, combine counters | 300–375 | U01–U04 |
 | [ ] U06 | Service UI confirmed state and TSX | 255–290 | U05 |
 | [ ] U07 | Closed rate wire: 1 / 1.5 / 2 and safe dispatch | 165–190 | U06 |
@@ -100,7 +101,7 @@ documentation, compress code, or claim an exception to meet the ceiling.
 | [ ] U10 | Confirmed rate UI | 280–310 | U09 |
 
 U09 is the hardest ceiling: preserve all necessary regression tests. Bootstrap
-contained no source materialization; U01–U03 are complete. U04–U10 remain open.
+contained no source materialization; U01–U04 are complete. U05–U10 remain open.
 
 ## Future routes and verification
 
@@ -164,7 +165,7 @@ record actual harness scenario/outcome or an explicit boundary-specific N/A.
 
 ## Next step
 
-Stop after U03. Next is U04 instance enabled state / Off lifecycle wrapper.
+Stop after U04. Next is U05 actual-instance On/Off binding and cache cancellation.
 Reconcile this tracker with full Engram mirror `odd/unified-playback-narration/tasks`
 in project `agentvoz`; preserve the 400-line closing guard for every later unit.
 
@@ -229,3 +230,25 @@ in project `agentvoz`; preserve the 400-line closing guard for every later unit.
 - Rollback boundary: U03 sink gate/promise preparation, focused tests and evidence;
   retain U01/U02, PN source plan/scoped cancellation and bootstrap backup refs.
 - Observed A+D: production 37, tests 126, docs 38; total 201 <= 400. Commit SHA is in the U03 receipt.
+
+## U04 evidence
+
+- Prior boundary / U03 commit: `2071fb7085e9c9a4015eb77365196ab3073d02ed`.
+- State defaults enabled when capable. Off updates enabled/paused before callbacks,
+  clears pause without resume and invokes disable once per edge. On flips only
+  enabled; unsupported static capability cannot be overridden by runtime enable.
+- `disableService` attempts stop before cache clear and contains each failure.
+  `withPause` gates narration/status/Repeat with a default-true enabled reader;
+  lifecycle forwarding and optional `stopSession` are retained unchanged.
+- RED: `bun test test/wiring.test.ts` produced 82 pass / 6 fail, 177 assertions,
+  exit 1 (missing state/helper/disabled wrapper gates). GREEN: same command
+  produced 88 pass / 0 fail, 199 assertions, exit 0.
+- `bun run typecheck` and `git diff --check` passed. Deterministic state/helper
+  harness verifies flag/callback ordering, containment, no resurrection, static
+  capability and scoped stop forwarding through existing `stopFor`; duplicate user
+  events and unscoped-error global cancellation retain their behavior.
+- No full suite or real audio/host proof; N/A for this helper-only boundary.
+  Actual plugin binding, speed and source-plan/sink changes are outside U04.
+- Rollback boundary: U04 state/lifecycle/wrapper helpers, focused tests and evidence;
+  preserve U01–U03, PN scoped cancellation and all bootstrap safeguards.
+- Observed A+D: production 41, tests 92, docs 35; total 168 <= 400. Commit SHA is in the U04 receipt.
