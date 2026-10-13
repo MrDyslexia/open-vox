@@ -2,7 +2,8 @@
 
 Preserve the delivered pronunciation-normalization (PN) pipeline while adding
 instance-scoped service On/Off and playback rates in small, coherent work units.
-Bootstrap and U01–U09 are complete; PN-preserving rates are bound. Next: **U10**.
+Bootstrap and U01–U10 implementation units are complete.
+**Final integrated verification is pending**; focused unit proof is not feature closure.
 
 ## Objective and authorization
 
@@ -21,8 +22,9 @@ Port only the missing behavior onto the exact PN delivery baseline instead.
 - U06 completed confirmed service UI and its bounded recovery checkpoint.
 - U07 completed closed rate wire and safe explicit dispatch without rate binding.
 - U08 qualified the existing player rate API with deterministic regression tests.
-- Current authorization: U09 instance rate binding, focused PN tests and task
-  evidence only; no UI changes or real host/audio execution. Stop before U10.
+- U09 bound PN-preserving instance rates without changing player/synthesis APIs.
+- Current authorization: U10 confirmed rate UI, focused tests, README and task
+  evidence only. Stop before final integrated verification; no host/audio execution.
 - No network, publication, PR edits, push, main merge, rebase, destructive reset,
   original checkout changes, host/config/environment changes, downloads, installs,
   package/lock writes, or writes through the dependency junction are authorized.
@@ -103,10 +105,11 @@ documentation, compress code, or claim an exception to meet the ceiling.
 | [x] U07 | Closed rate wire: 1 / 1.5 / 2 and safe dispatch | 165–190 forecast; observed below | U06 |
 | [x] U08 | Existing-player rate regression tests only | 240–255 forecast; observed below | U07 |
 | [x] U09 | Runtime rates preserve cached PN audio | 365–395 forecast; observed below | U07–U08 |
-| [ ] U10 | Confirmed rate UI | 280–310 | U09 |
+| [x] U10 | Confirmed rate UI | 280–310 forecast; observed below | U09 |
 
 U09 is the hardest ceiling: preserve all necessary regression tests. Bootstrap
-contained no source materialization; U01–U09 are complete. U10 remains open.
+contained no source materialization; U01–U10 implementation is complete.
+Final integrated verification remains pending and requires the next parent-led gate.
 
 ## Future routes and verification
 
@@ -170,7 +173,7 @@ record actual harness scenario/outcome or an explicit boundary-specific N/A.
 
 ## Next step
 
-Stop after U09. Next is U10 confirmed playback-rate UI.
+Stop after U10. Next is final integrated verification, pending parent authorization.
 Reconcile this tracker with full Engram mirror `odd/unified-playback-narration/tasks`
 in project `agentvoz`; preserve the 400-line closing guard for every later unit.
 
@@ -384,3 +387,26 @@ in project `agentvoz`; preserve the 400-line closing guard for every later unit.
 - Rollback boundary: U09 plugin rate binding, focused wiring tests and task evidence;
   retain U01–U08 PN lifecycle, player API, defaults and original backup safeguards.
 - Observed A+D: production 28, tests 196, docs 41; total 265 <= 400. Commit SHA is in the U09 receipt.
+
+## U10 evidence
+
+- Prior boundary / U09 commit: `9fdc81a4bf229ecc738001da23e191c0bf29e140`.
+- Added confirmed rate view/renewal/equality, neutral labels and explicit cycle
+  targets 1→1.5→2→1. Paused changes work; Off/unconfirmed/incapable state is blocked.
+  Refused or unconfirmed clicks repeat the same target rather than advancing locally.
+- Rate control uses a second three-slot row with cached and fresh confirmation
+  guards. Service/theme, Pause/Repeat, Voice mouse-up dialog and public slot binding
+  remain intact. No config, synthesis speed, defaults or PN runtime writes.
+- RED: `bun test test/repeat-ui.test.ts test/wiring.test.ts` yielded 138 pass /
+  15 fail, 590 assertions, exit 1. GREEN: same command yielded 153 pass / 0 fail,
+  652 assertions, no skips, exit 0. Typecheck and diff check passed.
+- Deterministic UI tests cover nonce/session/lease/conflict/malformed reply rejection,
+  explicit targets, serialization, transport recovery and no optimistic advancement.
+  Bun TSX transpilation proves syntax; extracted registration checks slot props.
+  Source guards check row/button/Voice wiring, not a mounted renderer; tsc excludes TSX.
+- README distinguishes stored preference from audible acknowledgment and documents
+  missing-ack/fallback limits. No full suite, model, actual host or audio proof ran.
+- Rollback boundary: U10 sidebar rate UI, focused tests, README and task evidence;
+  preserve U01–U09 PN binding and all original byte/index/ref/backup safeguards.
+- Observed A+D: production 38, tests 130, docs 54; total 222 <= 400. Commit SHA is in the U10 receipt.
+- Final integrated verification remains pending; no complete-feature claim is made.

@@ -1,13 +1,13 @@
 // @ts-nocheck
 /** @jsxImportSource @opentui/solid */
-// OpenCode TUI plugin: a small open-vox block in the sidebar with two buttons.
+// OpenCode TUI plugin: confirmed instance controls in the sidebar.
 // `open-vox install` copies this file into the OpenCode config directory and rewrites
 // the "../src/config" import below to an absolute URL, so it resolves solid and opentui
 // from OpenCode's own dependencies (a second copy would break reactivity).
 import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import { For, createMemo, createSignal, onCleanup } from "solid-js"
 import { KOKORO_VOICES, readConfig, writeConfig } from "../src/config"
-import { createRepeatUi, buttonHandlers, canPause, publishAttached, sameView, serviceIcon } from "../src/repeat-ui"
+import { createRepeatUi, buttonHandlers, canPause, canSetSpeed, publishAttached, sameView, serviceIcon, speedLabel } from "../src/repeat-ui"
 
 const id = "open-vox"
 
@@ -25,8 +25,8 @@ function Block(props: { api: TuiPluginApi; sessionID: string }) {
     const route = props.api.route.current
     return route.name === "session" && route.params?.sessionID === props.sessionID ? props.sessionID : ""
   }
-  // Pause and service state remain neutral until confirmed by this instance.
-  const [view, setView] = createSignal({ paused: undefined, enabled: undefined, canControl: false, canRepeat: false }, { equals: sameView })
+  // Pause, service and playback preference remain neutral until confirmed by this instance.
+  const [view, setView] = createSignal({ paused: undefined, enabled: undefined, canControl: false, canRepeat: false, playbackSpeed: undefined }, { equals: sameView })
   const repeat = createRepeatUi({
     subscribe: (receive) => props.api.event.on("tui.command.execute", (event) => receive(event.properties.command)),
     publish: (command) => publishAttached(props.api.client, props.api.state.path.directory, command),
@@ -110,6 +110,15 @@ function Block(props: { api: TuiPluginApi; sessionID: string }) {
         {button(() => "Voice", chooseVoice, undefined, true)}
         {button(() => "Repeat", () => { void repeat.repeat(session()) }, undefined, false,
           () => !view().canRepeat || !repeat.available(session()))}
+      </box>
+      {/* A second three-slot row keeps the rate button as wide as the existing buttons.
+          It displays only confirmed preference, highlights non-1x and stays usable while paused. */}
+      <box flexDirection="row" gap={1}>
+        {button(() => speedLabel(view().playbackSpeed), () => { void repeat.cycleSpeed(session()) },
+          () => view().playbackSpeed !== undefined && view().playbackSpeed !== 1, false,
+          () => !canSetSpeed(view()) || !canSetSpeed(repeat.view(session())))}
+        <box flexGrow={1} flexBasis={0} minWidth={8} />
+        <box flexGrow={1} flexBasis={0} minWidth={8} />
       </box>
     </box>
   )
