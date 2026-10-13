@@ -2,7 +2,7 @@
 
 Preserve the delivered pronunciation-normalization (PN) pipeline while adding
 instance-scoped service On/Off and playback rates in small, coherent work units.
-Bootstrap and U01–U07 are complete; closed rate wire is ready. Next: **U08**.
+Bootstrap and U01–U08 are complete; player rate regressions pass. Next: **U09**.
 
 ## Objective and authorization
 
@@ -19,8 +19,9 @@ Port only the missing behavior onto the exact PN delivery baseline instead.
 - U04 completed state/lifecycle/wrapper helpers without actual-instance binding.
 - U05 completed actual PN instance service binding and cache lifecycle checks.
 - U06 completed confirmed service UI and its bounded recovery checkpoint.
-- Current authorization: U07 closed rate wire/safe dispatch, focused tests and task
-  evidence only; no live rate binding or UI changes. Stop before U08.
+- U07 completed closed rate wire and safe explicit dispatch without rate binding.
+- Current authorization: U08 existing-player regression tests and task evidence
+  only; no production changes or real host/audio execution. Stop before U09.
 - No network, publication, PR edits, push, main merge, rebase, destructive reset,
   original checkout changes, host/config/environment changes, downloads, installs,
   package/lock writes, or writes through the dependency junction are authorized.
@@ -99,12 +100,12 @@ documentation, compress code, or claim an exception to meet the ceiling.
 | [x] U05 | Wire On/Off to actual PN instance; clear cache, cancel, combine counters | 300–375 forecast; observed below | U01–U04 |
 | [x] U06 | Service UI confirmed state and TSX | 255–290 forecast; observed below | U05 |
 | [x] U07 | Closed rate wire: 1 / 1.5 / 2 and safe dispatch | 165–190 forecast; observed below | U06 |
-| [ ] U08 | Existing-player rate regression tests only | 240–255 | U07 |
+| [x] U08 | Existing-player rate regression tests only | 240–255 forecast; observed below | U07 |
 | [ ] U09 | Runtime rates preserve cached PN audio | 365–395 | U07–U08 |
 | [ ] U10 | Confirmed rate UI | 280–310 | U09 |
 
 U09 is the hardest ceiling: preserve all necessary regression tests. Bootstrap
-contained no source materialization; U01–U07 are complete. U08–U10 remain open.
+contained no source materialization; U01–U08 are complete. U09–U10 remain open.
 
 ## Future routes and verification
 
@@ -168,7 +169,7 @@ record actual harness scenario/outcome or an explicit boundary-specific N/A.
 
 ## Next step
 
-Stop after U07. Next is U08 existing-player rate regression tests only.
+Stop after U08. Next is U09 runtime rates preserving cached PN audio.
 Reconcile this tracker with full Engram mirror `odd/unified-playback-narration/tasks`
 in project `agentvoz`; preserve the 400-line closing guard for every later unit.
 
@@ -332,3 +333,25 @@ in project `agentvoz`; preserve the 400-line closing guard for every later unit.
 - Rollback boundary: U07 wire/helpers, dispatch note, focused tests and task evidence;
   preserve U01–U06, PN source-plan lifecycle, original bytes/indexes/refs and backups.
 - Observed A+D: production 30, tests 121, docs 36; total 187 <= 400. Commit SHA is in the U07 receipt.
+
+## U08 evidence
+
+- Prior boundary / U07 commit: `fce9fa5558ecd76a578df6a5e34378abf3110bb4`.
+- Ported the 225-line P4 player test delta from snapshot `483bbcc` relative to
+  `d40f0da`; retained existing tests/guards and added missing-ack/file-byte checks.
+  `src/player.ts` and `scripts/player.ps1` remain unchanged from the PN baseline.
+- Authorized TDD exception: regression coverage for already implemented behavior;
+  no meaningful observed RED, no removed implementation and no product defect found.
+- `bun test test/player.test.ts`: 71 pass / 4 skip / 0 fail, 240 assertions, exit 0.
+  `bun run typecheck` and `git diff --check` passed. Four real-host smoke tests
+  (two existing, two added) remain opt-in under `OV_PLAYER_SMOKE=1`, not executed.
+- Fake-host/timer harness proves stored/live/paused rates, idle/crash replacement
+  ordering, boundary normalization and watchdog scaling/re-arming. Same-file replay
+  preserves fixture bytes and never resets the stored rate; this is not PN sink/
+  cache/synthesis proof. Watchdog uses a fresh full-duration/rate budget, not remainder.
+- Missing acknowledgment returns the stored preference despite an old reported rate;
+  fallback stores rate without changing its playback. Neither proves audible success.
+  No full suite, real host, audibility or model qualification ran.
+- Rollback boundary: U08 player regression tests and task evidence only; preserve
+  production API, U01–U07, original tracked bytes/indexes/refs and durable backups.
+- Observed A+D: production 0, tests 259, docs 35; total 294 <= 400. Commit SHA is in the U08 receipt.
