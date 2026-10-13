@@ -57,6 +57,7 @@ Controls (apply immediately, no restart)
   speed <0.5-2>                             Speaking speed
   engine auto|kokoro|piper|sapi             Speech engine
   language es|en                           Narration base language (one voice per utterance)
+  narration-backend [torch|onnx]           Show or select the contextual LID backend (default torch; onnx needs setup narration-onnx)
   say <text>                                Speak a test sentence
   config path|show|reset                    Inspect or reset the settings file
 `;
@@ -121,6 +122,7 @@ function status(deps: CliDeps): void {
   deps.out(`speed: ${config.speed}`);
   deps.out(`engine: ${config.engine}`);
   deps.out(`narration language: ${config.narrationLanguage}`);
+  deps.out(`narration backend: ${config.narrationBackend}`);
   deps.out(`plugin: ${state.plugin ? "installed" : "not installed"}`);
   deps.out(`sidebar block: ${state.tuiFile && state.tuiRegistered ? "installed" : "not installed"}`);
   deps.out(`config file: ${deps.configPath}`);
@@ -169,6 +171,23 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
       if (args.length !== 1 || (language !== "es" && language !== "en")) return usage(deps, "Usage: open-vox language es|en");
       deps.writeConfig({ narrationLanguage: language });
       deps.out(`Narration language set to ${language}.`);
+      return 0;
+    }
+    case "narration-backend": {
+      const backend = args[0];
+      const USAGE = "Usage: open-vox narration-backend [torch|onnx]";
+      if (args.length === 0) { deps.out(`Narration backend: ${deps.readConfig().narrationBackend}.`); return 0; }
+      if (args.length !== 1 || (backend !== "torch" && backend !== "onnx")) return usage(deps, USAGE);
+      if (backend === "onnx") {
+        let ready = false;
+        try { ready = (await deps.narrationOnnxStatus?.(appHome(deps.env)))?.ready === true; } catch { ready = false; }
+        if (!ready) {
+          deps.err("The ONNX backend is not ready, so the backend was not changed. Provision it first: open-vox setup narration-onnx --lid-source <dir>");
+          return 1;
+        }
+      }
+      deps.writeConfig({ narrationBackend: backend });
+      deps.out(`Narration backend set to ${backend}.`);
       return 0;
     }
     case "engine": {
@@ -238,7 +257,7 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
       if (sub === "path") { deps.out(deps.configPath); return 0; }
       if (sub === "show") { deps.out(JSON.stringify(deps.readConfig(), null, 2)); return 0; }
       if (sub === "reset") {
-        deps.writeConfig({ voices: { es: "em_alex", en: "af_heart" }, speed: 1, engine: "auto", narrationLanguage: "es" });
+        deps.writeConfig({ voices: { es: "em_alex", en: "af_heart" }, speed: 1, engine: "auto", narrationLanguage: "es", narrationBackend: "torch" });
         deps.out("Settings reset to defaults.");
         return 0;
       }

@@ -98,10 +98,26 @@ are installed from anonymous PyPI, binary wheels only, into
 fails with nothing written; the readiness record is written last.
 
 This command does **not** activate the ONNX backend: narration still uses the
-Torch detector. Selecting the backend is a separate, later step. `open-vox doctor`
-shows a separate informational "Contextual narration (ONNX)" line; an environment
-that was never provisioned is reported as `INFO ... not provisioned` and never
-makes doctor fail.
+Torch detector. `open-vox doctor` shows a separate informational "Contextual
+narration (ONNX)" line; an environment that was never provisioned is reported as
+`INFO ... not provisioned` and never makes doctor fail.
+
+Selecting the backend is an explicit, separate step:
+
+```powershell
+open-vox narration-backend           # show the current backend (default: torch)
+open-vox narration-backend onnx      # refused unless the ONNX environment is ready
+open-vox narration-backend torch     # always allowed
+```
+
+`onnx` is persisted only after the same readiness check `doctor` uses passes;
+otherwise the command exits non-zero, changes nothing and points to
+`open-vox setup narration-onnx --lid-source <dir>`. When `onnx` is selected, each
+narration run uses one matching set: the ONNX interpreter, the ONNX manifest and
+the managed ONNX model directory. If the ONNX environment later stops being ready,
+speech falls back to the Torch set without failing and a single
+`onnx-backend-unavailable` diagnostic is logged. Existing config files without the
+setting keep using Torch.
 
 Doctor hashes local files and probes pinned imports/versions without loading model
 weights. An `OK` contextual line means those checks passed, not listening or LID
