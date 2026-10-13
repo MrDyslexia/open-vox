@@ -2,7 +2,7 @@
 
 Preserve the delivered pronunciation-normalization (PN) pipeline while adding
 instance-scoped service On/Off and playback rates in small, coherent work units.
-The current bootstrap creates safeguards and this plan only. Next unit: **U01**.
+Bootstrap safeguards are complete; U01 adds cache invalidation only. Next: **U02**.
 
 ## Objective and authorization
 
@@ -10,8 +10,10 @@ The original P3b/P4 playback work predates the delivered PN source-plan pipeline
 Copying the old plugin wholesale would lose scoped cancellation and PN behavior.
 Port only the missing behavior onto the exact PN delivery baseline instead.
 
-- Local source integration is authorized for subsequent units, not this bootstrap.
-- Bootstrap edits are limited to `odd/tasks/unified-playback-narration.md`.
+- Bootstrap was document-only; subsequent authorization permits U01 source work.
+- U01 edits: `src/audio-cache.ts`, `test/audio-cache.test.ts`, compatible cache
+  mocks in `test/speech-sink.test.ts` and `test/wiring.test.ts`, and this tracker.
+  `odd/tasks/playback-controls.md` is also allowed but unchanged. U02 is not authorized.
 - No network, publication, PR edits, push, main merge, rebase, destructive reset,
   original checkout changes, host/config/environment changes, downloads, installs,
   package/lock writes, or writes through the dependency junction are authorized.
@@ -83,7 +85,7 @@ documentation, compress code, or claim an exception to meet the ceiling.
 
 | Task | Coherent outcome | Estimated authored A+D | Dependencies |
 |---|---|---|---|
-| [ ] U01 | Cache clear/invalidation and compatible mocks | 170–195 | baseline |
+| [x] U01 | Cache clear/invalidation and compatible mocks | 170–195 forecast; observed below | baseline |
 | [ ] U02 | Service wire and safe dispatch | 145–175 | U01 |
 | [ ] U03 | PN sink enabled checks at admission, post-plan, pump, status, Repeat | 195–240 | U01–U02 |
 | [ ] U04 | Enabled state / Off lifecycle wrapper; forward `stopSession` | 165–205 | U03 |
@@ -94,8 +96,8 @@ documentation, compress code, or claim an exception to meet the ceiling.
 | [ ] U09 | Runtime rates preserve cached PN audio | 365–395 | U07–U08 |
 | [ ] U10 | Confirmed rate UI | 280–310 | U09 |
 
-U09 is the hardest ceiling: preserve all necessary regression tests. No source
-materialization or implementation is part of bootstrap. All boxes remain open.
+U09 is the hardest ceiling: preserve all necessary regression tests. Bootstrap
+contained no source materialization; only U01 is complete. U02–U10 remain open.
 
 ## Future routes and verification
 
@@ -153,13 +155,32 @@ record actual harness scenario/outcome or an explicit boundary-specific N/A.
   or writes through the junction are permitted.
 - From the new checkout, `bun run typecheck` passed (`tsc --noEmit`, exit 0).
   No full tests, host activation, backend provisioning or runtime proof ran.
-- Integration behavior and PN regression proof remain **pending U01–U10**.
+- At bootstrap, integration and PN regression proof remained pending U01–U10.
 - Bootstrap commit identity belongs in the memory receipt; this document cannot
   embed its own final hash. A future U01 update may record that observed SHA.
 
 ## Next step
 
-Start U01 only after reconciling this repository-relative document with its full
-Engram mirror at `odd/unified-playback-narration/tasks` in project `agentvoz`.
-Recheck original preservation, prepare deterministic cache invalidation tests,
-and retain the 400-line closing guard. Bootstrap stops before that source work.
+Stop after U01. U02 service wire/safe dispatch requires the next authorization.
+Reconcile this tracker with full Engram mirror `odd/unified-playback-narration/tasks`
+in project `agentvoz`; preserve the 400-line closing guard for every later unit.
+
+## U01 evidence
+
+- Prior boundary: bootstrap `a7288890fa48bcd8c559a26c3d9a27b84dca6dc4`.
+- `AudioStore.clear()` removes retained eligibility, retires owned candidates,
+  rejects late promotion, preserves monotonic revisions and defers held deletion
+  until the final release. Vanished files no longer consume candidate slots.
+- Deterministic cache harness checks multiple/idempotent releases, stale candidates,
+  Repeat without synthesis/playback, fresh promotion, foreign ownership, non-file
+  safety and existing forget/dispose behavior. PN product files are unchanged.
+- RED: `bun test test/audio-cache.test.ts test/speech-sink.test.ts test/wiring.test.ts`
+  produced 133 pass / 5 fail (missing `clear`), 334 assertions, exit 1.
+- GREEN: same command produced 138 pass / 0 fail, 374 assertions, exit 0.
+- `bun run typecheck` passed after correcting a test-only nullable assertion;
+  `git diff --check` passed. No full suite ran; real audio/host proof is N/A for
+  this cache boundary. No product refactor was needed.
+- Rollback boundary: U01 cache contract/implementation, its tests/mocks and this
+  task evidence only; preserve baseline PN, bootstrap and durable backup refs.
+- Observed authored A+D: production 14, tests/mocks 119, documentation 43; total
+  176 <= 400. The U01 memory receipt records the actual behavior commit identity.

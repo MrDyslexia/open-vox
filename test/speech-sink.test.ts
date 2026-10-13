@@ -196,6 +196,7 @@ describe("exact-audio replay", () => {
       discard: (file: string) => { removed.push(file); },
       hold: (_file: string) => () => {},
       forget(sessionID: string) { if (last?.sessionID === sessionID) last = undefined; },
+      clear() { last = undefined; },
       dispose() { last = undefined; },
     };
     const engine = Object.assign(() => { throw new Error("must generate an artifact"); }, {
@@ -321,7 +322,7 @@ describe("exact-audio replay", () => {
     const h = harness();
     const cache = {
       candidate: () => "wav-1", current: () => ({ file: "wav-1", sessionID: "s", revision: 1 }),
-      promote: () => true, discard: () => {}, hold: () => () => {}, forget: () => {}, dispose: () => {},
+      promote: () => true, discard: () => {}, hold: () => () => {}, forget: () => {}, clear: () => {}, dispose: () => {},
     };
     const engine = Object.assign(() => { throw new Error("must generate an artifact"); }, {
       synthesize: () => ({ exited: Promise.resolve(0), kill() {} }),
@@ -427,6 +428,7 @@ describe("real pause and resume", () => {
         return () => { if (!released) { released = true; holds.set(file, holds.get(file)! - 1); } };
       },
       forget(sessionID: string) { if (last?.sessionID === sessionID) last = undefined; },
+      clear() { last = undefined; },
       dispose() { last = undefined; },
     };
     const engine = Object.assign(() => { throw new Error("must generate an artifact"); }, {

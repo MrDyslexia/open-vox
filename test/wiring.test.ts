@@ -260,7 +260,7 @@ describe("open-vox wiring", () => {
 describe("live sink player wiring", () => {
   const cache = {
     candidate: () => "unused.wav", current: () => ({ file: "kept.wav", sessionID: "ses_a", revision: 1 }),
-    promote: () => true, discard: () => {}, hold: () => () => {}, forget: () => {}, dispose: () => {},
+    promote: () => true, discard: () => {}, hold: () => () => {}, forget: () => {}, clear: () => {}, dispose: () => {},
   };
   const config = () => createConfigReader(() => DEFAULT_CONFIG, 0);
 
