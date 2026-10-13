@@ -56,6 +56,29 @@ def technical(text):
     return bool(re.search(r'[\d/\\:@=<>+*|&%${}\[\]]|^[-~.]|--|[\w][.-][\w]|[\w$]\(|\)[\w$]', text))
 
 
+LEADING_PROSE = '("\'\u00ab\u201c\u2018\u00bf\u00a1'
+TRAILING_PROSE = ':;,!?.\u2026)"\'\u201d\u00bb\u2019'
+
+
+def core_range(atom, offset=0):
+    """Absolute (start, end) of an atom without prose punctuation on its edges.
+
+    Only sentence/quote/parenthesis marks are stripped. Technical syntax
+    characters ([ ] { } < > $ / \\ @ = + * | & % - ~) are never edge-stripped. A
+    closing parenthesis is kept when it balances an opening one inside the core
+    so call syntax such as foo(bar) stays one indivisible unit.
+    """
+    start, end = 0, len(atom)
+    while start < end and atom[start] in LEADING_PROSE:
+        start += 1
+    while end > start and atom[end - 1] in TRAILING_PROSE:
+        core = atom[start:end]
+        if atom[end - 1] == ')' and core.count(')') <= core.count('('):
+            break
+        end -= 1
+    return offset + start, offset + end
+
+
 def language_evidence(start, end, evidence):
     selected = [entry for entry in evidence if entry['start'] < end and entry['end'] > start]
     if not selected:
@@ -116,8 +139,9 @@ def block_decisions(block, policy, base, evidence):
         position = end
     # Complex non-whitespace technical units are indivisible before policy matching.
     for match in re.finditer(r'\S+', text):
-        if technical(match.group()) and not overlaps(match.start(), match.end(), decisions):
-            decisions.append((match.start(), match.end(), base, 'protected-technical', None, []))
+        start, end = core_range(match.group(), match.start())
+        if start < end and technical(text[start:end]) and not overlaps(start, end, decisions):
+            decisions.append((start, end, base, 'protected-technical', None, []))
     for dictionary, reason in (('acronyms', 'policy-acronym'), ('names', 'policy-name'),
                                ('expressions', 'policy-expression')):
         entries = policy[dictionary]

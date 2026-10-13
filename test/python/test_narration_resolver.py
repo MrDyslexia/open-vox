@@ -232,6 +232,71 @@ class ResolverTests(unittest.TestCase):
         self.assertEqual(units(resolve_plan(plain, Detector([token(0, 11)])))[0]['spokenText'], 'get user name')
         self.assertEqual(units(resolve_plan(plain, Detector([])))[0]['spokenText'], 'getUserName')
 
+    def test_edge_prose_punctuation_does_not_protect_words(self):
+        text = 'Para dar PN por aceptado (I05.5), escuchá esto en OpenCode: textos'
+        spans = [('Para', 'spa'), ('dar', 'spa'), ('PN', 'spa'), ('por', 'spa'), ('aceptado', 'spa'),
+                 ('escuchá', 'spa'), ('esto', 'spa'), ('en', 'spa'), ('Open', 'en'), ('C', 'en'),
+                 ('ode', 'en'), ('textos', 'spa')]
+        evidence, cursor = [], 0
+        for word, label in spans:
+            start = text.index(word, cursor)
+            evidence.append(token(start, start + len(word), label))
+            cursor = start + len(word)
+        result = resolve_plan(plan_for(text), Detector(evidence))
+        by_text = {u['text']: u for u in units(result)}
+        self.assertEqual((by_text['OpenCode']['language'], by_text['OpenCode']['reason'],
+                          by_text['OpenCode']['spokenText']), ('en', 'english-identifier', 'open code'))
+        colon = next(u for u in units(result) if u['text'].startswith(':'))
+        self.assertEqual((colon['reason'], colon['language']), ('neutral', 'es'))
+        self.assertEqual(by_text['I05.5']['reason'], 'protected-technical')
+        comma = next(u for u in units(result) if u['text'].startswith('),'))
+        self.assertEqual(comma['reason'], 'neutral')
+        self.assertEqual(''.join(u['text'] for u in units(result)), text)
+
+    def test_trailing_and_wrapping_prose_marks_are_outside_the_word(self):
+        cases = [('deployment:', 'deployment', ':'), ('API:', 'API', ':'), ('deployment?', 'deployment', '?'),
+                 ('deployment!', 'deployment', '!'), ('deployment,', 'deployment', ','),
+                 ('deployment;', 'deployment', ';'), ('deployment?!', 'deployment', '?!'),
+                 ('OpenCode:)', 'OpenCode', ':)'), ('deployment…', 'deployment', '…'),
+                 ('(deployment)', 'deployment', None), ('"deployment"', 'deployment', None),
+                 ('«deployment»', 'deployment', None), ('¿deployment?', 'deployment', None),
+                 ('“deployment”', 'deployment', None), ('(deployment):', 'deployment', None)]
+        for atom, word, tail in cases:
+            with self.subTest(atom=atom):
+                result = resolve_plan(plan_for(atom), Detector([]))
+                self.assertFalse(any(u['reason'] == 'protected-technical' for u in units(result)))
+                target = next(u for u in units(result) if u['text'] == word)
+                self.assertEqual(target['reason'], 'policy-acronym' if word == 'API' else 'fallback-missing')
+                self.assertTrue(all(u['reason'] == 'neutral' for u in units(result) if u['text'] != word))
+                self.assertEqual(''.join(u['text'] for u in units(result)), atom)
+                if tail:
+                    self.assertIn(tail, [u['text'] for u in units(result)])
+
+    def test_pure_prose_punctuation_atoms_are_neutral(self):
+        for text in ['a : b', 'a ... b', '¿ a', 'a …']:
+            with self.subTest(text=text):
+                result = resolve_plan(plan_for(text), Detector([]))
+                self.assertFalse(any(u['reason'] == 'protected-technical' for u in units(result)))
+
+    def test_technical_cores_stay_protected_with_or_without_edge_marks(self):
+        atoms = ['https://x.com/a', 'src/a/b.ts', '/etc/hosts', '--flag', '-x', 'foo.bar', '.gitignore', '~/x',
+                 'foo-bar', 'foo(bar)', 'foo()', '$VAR', 'x=1', 'v1.2.3', 'arr[0]', '{}', '<tag>',
+                 'C:\\path', '10:30', 'key:value', 'file.txt']
+        for atom in atoms:
+            for suffix in ['', '.', ',', ':', ';', '?!', '…', ')']:
+                for prefix in ['', '"']:
+                    wrapped = prefix + atom + suffix
+                    if suffix == ')' and atom.count('(') >= atom.count(')') and '(' in atom:
+                        continue
+                    with self.subTest(atom=wrapped):
+                        result = resolve_plan(plan_for(wrapped), Detector([token(0, len(wrapped))]))
+                        protected = ''.join(u['text'] for u in units(result) if u['reason'] == 'protected-technical')
+                        self.assertEqual(protected, atom)
+                        self.assertEqual(''.join(u['text'] for u in units(result)), wrapped)
+        result = resolve_plan(plan_for('(https://x.com/a), ok'), Detector([]))
+        self.assertEqual([u['text'] for u in units(result) if u['reason'] == 'protected-technical'],
+                         ['https://x.com/a'])
+
 
 if __name__ == '__main__':
     unittest.main()
