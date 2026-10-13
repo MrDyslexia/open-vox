@@ -1,5 +1,22 @@
 import { randomUUID } from "node:crypto";
-import { CONTROL_TTL, decodeCommand, encodeCommand, type ControlMessage } from "./repeat-control";
+import { CONTROL_TTL, decodeCommand, encodeCommand, nextPlaybackSpeed, speedAction,
+  type ControlAction, type ControlMessage, type PlaybackSpeed } from "./repeat-control";
+
+/** Confirmed instance state only; undefined is neutral, never an optimistic On/Off. */
+export type SidebarView = { paused: boolean | undefined; enabled: boolean | undefined; canControl: boolean; canRepeat: boolean; playbackSpeed: PlaybackSpeed | undefined };
+export const sameView = (a: SidebarView, b: SidebarView) =>
+  a.paused === b.paused && a.enabled === b.enabled && a.canControl === b.canControl && a.canRepeat === b.canRepeat &&
+  a.playbackSpeed === b.playbackSpeed;
+
+export const canPause = (view: SidebarView) => view.canControl && view.enabled === true;
+/** Rate cycling also requires a confirmed value; paused playback still accepts it. */
+export const canSetSpeed = (view: SidebarView) => canPause(view) && view.playbackSpeed !== undefined;
+/** Confirmed stored preference, not audible host acknowledgment; neutral until discovered. */
+export const speedLabel = (speed: PlaybackSpeed | undefined) => speed === undefined ? "Speed" : `${speed.toFixed(1)}x`;
+export const serviceIcon = (view: SidebarView): { tone: "on" | "off" | "unknown"; clickable: boolean } => ({
+  tone: view.enabled === undefined ? "unknown" : view.enabled ? "on" : "off",
+  clickable: view.enabled !== undefined && view.canControl,
+});
 
 type UiClient = { tui: { publish(parameters: {
   directory: string;
@@ -10,7 +27,7 @@ type UiClient = { tui: { publish(parameters: {
 export async function publishAttached(client: UiClient, directory: string, command: string): Promise<void> {
   const result = await client.tui.publish({ directory, body: { type: "tui.command.execute", properties: { command } } },
     { signal: AbortSignal.timeout(CONTROL_TTL) });
-  if (result.error || !result.data) throw new Error("Repeat transport failed");
+  if (result.error || !result.data) throw new Error("Control transport failed");
 }
 
 export function buttonHandlers(action: () => void, disabled: () => boolean = () => false, onRelease = false) {
@@ -27,9 +44,9 @@ export function createRepeatUi(options: {
   id?: () => string;
 }) {
   const now = options.now ?? Date.now, id = options.id ?? randomUUID;
-  let pending: { challenge: string; sessionID: string; expires: number; settle: number } | undefined;
+  let pending: { challenge: string; sessionID: string; expires: number; settle: number; reply?: ControlMessage } | undefined;
   let status: ControlMessage | undefined;
-  let conflict = false, disposed = false, sending = false;
+  let conflict = false, disposed = false, sending = false, discovering = false;
   async function send(command: string): Promise<void> {
     if (disposed || sending) return;
     sending = true;
@@ -41,31 +58,95 @@ export function createRepeatUi(options: {
     if (disposed || m?.kind !== "status") return;
     if (!pending || m.challenge !== pending.challenge || m.sessionID !== pending.sessionID ||
         m.expires !== pending.expires || m.expires <= now()) return;
-    if (status && status.instance !== m.instance) conflict = true;
-    status = m;
+    if ((pending.reply && pending.reply.instance !== m.instance) ||
+        (status && status.expires > now() && status.instance !== m.instance))
+      conflict = true;
+    pending.reply = m;
+    if (conflict) status = undefined;
+    // The accepted instance reports its latest pause/audio state right away (restrictions must not wait
+    // for settlement); the lease keeps its original expiry, so only a settled reply can extend it.
+    else if (status && status.expires > now() && status.instance === m.instance)
+      status = { ...status, paused: m.paused, enabled: m.enabled, playbackSpeed: m.playbackSpeed, revision: m.revision };
     options.onChange();
   });
-  const available = (sessionID: string, paused: boolean) => !disposed && !sending && !paused && !conflict &&
-    !!pending && pending.sessionID === sessionID && now() >= pending.settle &&
-    !!status && status.sessionID === sessionID && !status.paused && status.revision! > 0 && status.expires > now();
+  /** The confirmed status for this session, or undefined when nothing validated and unexpired exists. */
+  const confirmed = (sessionID: string) => {
+    // Renewal candidates earn their own settlement; the accepted lease keeps its original expiry.
+    if (!disposed && !discovering && !conflict && pending?.reply && now() >= pending.settle && pending.expires > now())
+      status = pending.reply;
+    return !disposed && !conflict && !!status && status.sessionID === sessionID && status.expires > now()
+      ? status : undefined;
+  };
+  const view = (sessionID: string): SidebarView => {
+    const current = confirmed(sessionID);
+    return {
+      paused: current ? current.paused === true : undefined,
+      enabled: current ? current.enabled !== false : undefined,
+      playbackSpeed: current ? current.playbackSpeed ?? 1 : undefined,
+      canControl: !!current && !sending,
+      canRepeat: !!current && !sending && current.enabled !== false && !current.paused && current.revision! > 0,
+    };
+  };
+  const available = (sessionID: string) => view(sessionID).canRepeat;
+  const refresh = (sessionID: string) => {
+    if (disposed) return;
+    // Route/session invalidation must not wait for an outstanding transport operation.
+    if (!sessionID || (pending && pending.sessionID !== sessionID)) {
+      pending = undefined; status = undefined; conflict = false; options.onChange();
+    }
+    if (!sessionID || discovering || sending) return;
+    if (pending?.sessionID === sessionID && pending.expires > now() + 400) return;
+    pending = { challenge: id(), sessionID, expires: now() + CONTROL_TTL, settle: now() + 250 };
+    conflict = false;
+    const challenge = pending.challenge;
+    const command = encodeCommand({ kind: "hello", challenge, sessionID, expires: pending.expires });
+    discovering = true;
+    void (async () => {
+      try { await options.publish(command); }
+      catch {
+        if (pending?.challenge === challenge) { status = undefined; conflict = true; }
+      } finally { discovering = false; if (!disposed) options.onChange(); }
+    })();
+    options.onChange();
+  };
+  /** Publishes one control action to the confirmed instance, never optimistic and never concurrent. */
+  async function control(sessionID: string, action: ControlAction): Promise<void> {
+    const target = confirmed(sessionID);
+    if (!target || sending) return;
+    try {
+      await send(encodeCommand({ kind: "control", instance: target.instance, sessionID, action,
+        requestID: id(), expires: now() + CONTROL_TTL }));
+    } catch { status = undefined; conflict = true; if (!disposed) options.onChange(); return; }
+    // Drop the in-flight challenge so the existing refresh path asks for a fresh status right away;
+    // a late reply to the old challenge can no longer be accepted.
+    pending = undefined;
+    refresh(sessionID);
+  }
   return {
     available,
-    refresh(sessionID: string) {
-      if (disposed || sending) return;
-      if (!sessionID) {
-        pending = undefined; status = undefined; options.onChange(); return;
-      }
-      if (pending?.sessionID === sessionID && pending.expires > now() + 400) return;
-      pending = { challenge: id(), sessionID, expires: now() + CONTROL_TTL, settle: now() + 250 };
-      status = undefined; conflict = false;
-      const challenge = pending.challenge;
-      void send(encodeCommand({ kind: "hello", challenge, sessionID, expires: pending.expires })).catch(() => {
-        if (pending?.challenge === challenge) { status = undefined; conflict = true; options.onChange(); }
-      });
-      options.onChange();
+    view,
+    refresh,
+    control,
+    /** Sends the explicit opposite of the CONFIRMED pause state; with no confirmation it does nothing. */
+    async togglePause(sessionID: string): Promise<void> {
+      const { paused, enabled } = view(sessionID);
+      if (paused === undefined || enabled !== true) return;
+      await control(sessionID, paused ? "resume" : "pause");
     },
-    async repeat(sessionID: string, paused: boolean): Promise<void> {
-      if (!available(sessionID, paused)) return;
+    /** Request the opposite confirmed service state, including On while Off; never optimistic. */
+    async toggleEnabled(sessionID: string): Promise<void> {
+      const enabled = view(sessionID).enabled;
+      if (enabled === undefined) return;
+      await control(sessionID, enabled ? "disable" : "enable");
+    },
+    /** Publish the next explicit target from confirmed state; an unconfirmed click never advances it. */
+    async cycleSpeed(sessionID: string): Promise<void> {
+      const current = view(sessionID);
+      if (!canSetSpeed(current)) return;
+      await control(sessionID, speedAction(nextPlaybackSpeed(current.playbackSpeed)));
+    },
+    async repeat(sessionID: string): Promise<void> {
+      if (!available(sessionID)) return;
       try {
         await send(encodeCommand({ kind: "repeat", instance: status!.instance, sessionID,
           revision: status!.revision, requestID: id(), expires: now() + CONTROL_TTL }));
