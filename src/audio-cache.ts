@@ -4,7 +4,7 @@ import { dirname, join, resolve, basename } from "node:path";
 import { tmpdir } from "node:os";
 
 export type CachedAudio = { file: string; sessionID: string; revision: number };
-export type AudioStore = Pick<AudioCache, "candidate" | "current" | "promote" | "discard" | "hold" | "forget" | "dispose">;
+export type AudioStore = Pick<AudioCache, "candidate" | "current" | "promote" | "discard" | "hold" | "forget" | "clear" | "dispose">;
 export const audioCacheRoot = () => join(tmpdir(), "open-vox-audio-v1");
 type Liveness = "live" | "dead" | "unknown";
 const noncePattern = /^[a-f0-9-]{36}$/;
@@ -117,7 +117,8 @@ export class AudioCache {
   }
 
   promote(file: string, sessionID: string): boolean {
-    if (this.disposed || !this.owns(file) || !validWav(file)) { this.discard(file); return false; }
+    // Retired candidates must not return after cancellation, even while still held.
+    if (this.disposed || this.retired.has(file) || !this.owns(file) || !validWav(file)) { this.discard(file); return false; }
     const previous = this.last;
     this.last = { file, sessionID, revision: ++this.revision };
     if (previous && previous.file !== file) this.discard(previous.file);
@@ -143,6 +144,8 @@ export class AudioCache {
     this.retired.add(file);
     if (this.holds.has(file)) return;
     try {
+      // A vanished artifact must not continue occupying a candidate slot.
+      if (!existsSync(file)) { this.files.delete(file); this.retired.delete(file); return; }
       if (!this.owns(file)) return;
       unlinkSync(file);
       this.files.delete(file); this.retired.delete(file);
@@ -154,6 +157,13 @@ export class AudioCache {
     const file = this.last.file;
     this.last = undefined;
     this.discard(file);
+  }
+
+  /** Invalidate owned audio without resetting revisions; held files retire on release. */
+  clear(): void {
+    this.last = undefined;
+    for (const file of this.files) this.discard(file);
+    this.finishDisposal();
   }
 
   dispose(): void {

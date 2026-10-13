@@ -1,4 +1,5 @@
 import copy
+import re
 import unittest
 
 from test_narration_plan import plan_for
@@ -231,6 +232,153 @@ class ResolverTests(unittest.TestCase):
         plain = plan_for('getUserName')
         self.assertEqual(units(resolve_plan(plain, Detector([token(0, 11)])))[0]['spokenText'], 'get user name')
         self.assertEqual(units(resolve_plan(plain, Detector([])))[0]['spokenText'], 'getUserName')
+
+    def test_edge_prose_punctuation_does_not_protect_words(self):
+        text = 'Para dar PN por aceptado (I05.5), escuchá esto en OpenCode: textos'
+        spans = [('Para', 'spa'), ('dar', 'spa'), ('PN', 'spa'), ('por', 'spa'), ('aceptado', 'spa'),
+                 ('escuchá', 'spa'), ('esto', 'spa'), ('en', 'spa'), ('Open', 'en'), ('C', 'en'),
+                 ('ode', 'en'), ('textos', 'spa')]
+        evidence, cursor = [], 0
+        for word, label in spans:
+            start = text.index(word, cursor)
+            evidence.append(token(start, start + len(word), label))
+            cursor = start + len(word)
+        result = resolve_plan(plan_for(text), Detector(evidence))
+        by_text = {u['text']: u for u in units(result)}
+        self.assertEqual((by_text['OpenCode']['language'], by_text['OpenCode']['reason'],
+                          by_text['OpenCode']['spokenText']), ('en', 'english-identifier', 'open code'))
+        colon = next(u for u in units(result) if u['text'].startswith(':'))
+        self.assertEqual((colon['reason'], colon['language']), ('neutral', 'es'))
+        self.assertEqual(by_text['I05.5']['reason'], 'protected-technical')
+        comma = next(u for u in units(result) if u['text'].startswith('),'))
+        self.assertEqual(comma['reason'], 'neutral')
+        self.assertEqual(''.join(u['text'] for u in units(result)), text)
+
+    def test_trailing_and_wrapping_prose_marks_are_outside_the_word(self):
+        cases = [('deployment:', 'deployment', ':'), ('API:', 'API', ':'), ('deployment?', 'deployment', '?'),
+                 ('deployment!', 'deployment', '!'), ('deployment,', 'deployment', ','),
+                 ('deployment;', 'deployment', ';'), ('deployment?!', 'deployment', '?!'),
+                 ('OpenCode:)', 'OpenCode', ':)'), ('deployment…', 'deployment', '…'),
+                 ('(deployment)', 'deployment', None), ('"deployment"', 'deployment', None),
+                 ('«deployment»', 'deployment', None), ('¿deployment?', 'deployment', None),
+                 ('“deployment”', 'deployment', None), ('(deployment):', 'deployment', None)]
+        for atom, word, tail in cases:
+            with self.subTest(atom=atom):
+                result = resolve_plan(plan_for(atom), Detector([]))
+                self.assertFalse(any(u['reason'] == 'protected-technical' for u in units(result)))
+                target = next(u for u in units(result) if u['text'] == word)
+                self.assertEqual(target['reason'], 'policy-acronym' if word == 'API' else 'fallback-missing')
+                self.assertTrue(all(u['reason'] == 'neutral' for u in units(result) if u['text'] != word))
+                self.assertEqual(''.join(u['text'] for u in units(result)), atom)
+                if tail:
+                    self.assertIn(tail, [u['text'] for u in units(result)])
+
+    def test_pure_prose_punctuation_atoms_are_neutral(self):
+        for text in ['a : b', 'a ... b', '¿ a', 'a …']:
+            with self.subTest(text=text):
+                result = resolve_plan(plan_for(text), Detector([]))
+                self.assertFalse(any(u['reason'] == 'protected-technical' for u in units(result)))
+
+    def test_technical_cores_stay_protected_with_or_without_edge_marks(self):
+        atoms = ['https://x.com/a', 'src/a/b.ts', '/etc/hosts', '--flag', '-x', 'foo.bar', '.gitignore', '~/x',
+                 'foo-1', 'foo(bar)', 'foo()', '$VAR', 'x=1', 'v1.2.3', 'arr[0]', '{}', '<tag>',
+                 'C:\\path', '10:30', 'key:value', 'file.txt']
+        for atom in atoms:
+            for suffix in ['', '.', ',', ':', ';', '?!', '…', ')']:
+                for prefix in ['', '"']:
+                    wrapped = prefix + atom + suffix
+                    if suffix == ')' and atom.count('(') >= atom.count(')') and '(' in atom:
+                        continue
+                    with self.subTest(atom=wrapped):
+                        result = resolve_plan(plan_for(wrapped), Detector([token(0, len(wrapped))]))
+                        protected = ''.join(u['text'] for u in units(result) if u['reason'] == 'protected-technical')
+                        self.assertEqual(protected, atom)
+                        self.assertEqual(''.join(u['text'] for u in units(result)), wrapped)
+        result = resolve_plan(plan_for('(https://x.com/a), ok'), Detector([]))
+        self.assertEqual([u['text'] for u in units(result) if u['reason'] == 'protected-technical'],
+                         ['https://x.com/a'])
+
+    @staticmethod
+    def tagged(text, english):
+        """Stub detector evidence: every letter run is `en` if listed, else `spa`."""
+        return [token(m.start(), m.end(), 'en' if m.group().lower() in english else 'spa')
+                for m in re.finditer(r'[^\W\d_]+', text)]
+
+    def test_hyphenated_prose_compounds_are_routed_per_word(self):
+        english = {'back', 'end', 'real', 'time', 'e', 'mail', 'well', 'known', 'state', 'of', 'the', 'art'}
+        cases = [
+            ('Necesitamos un back-end más real-time para el e-mail well-known.', 'es',
+             {'back': 'en', 'end': 'en', 'real': 'en', 'time': 'en', 'mail': 'en', 'well': 'en', 'known': 'en',
+              'Necesitamos': 'es', 'más': 'es'}),
+            ('We need a state-of-the-art back-end (real-time), e-mail: well-known.', 'en',
+             {'state': 'en', 'of': 'en', 'the': 'en', 'art': 'en', 'back': 'en', 'real': 'en'}),
+            ('Un anti-patrón bien-conocido.', 'es', {'anti': 'es', 'patrón': 'es', 'bien': 'es', 'conocido': 'es'}),
+        ]
+        for text, language, expected in cases:
+            with self.subTest(text=text):
+                result = resolve_plan(plan_for(text, language), Detector(self.tagged(text, english)))
+                found = units(result)
+                self.assertFalse(any(u['reason'] == 'protected-technical' for u in found))
+                self.assertEqual(''.join(u['text'] for u in found), text)
+                by_text = {u['text']: u for u in found}
+                for word, lang in expected.items():
+                    self.assertEqual(by_text[word]['language'], lang, word)
+                    self.assertEqual(by_text[word]['reason'], 'detected-unanimous', word)
+
+
+    def test_slash_alternatives_are_routed_per_word(self):
+        english = {'and', 'or', 'open', 'code', 'opencode', 'claude', 'on', 'off'}
+        cases = [('Usamos y/o OpenCode/Claude aquí.', {'y': 'es', 'o': 'es', 'OpenCode': 'en', 'Claude': 'en'}),
+                 ('Use and/or on/off here.', {'and': 'en', 'or': 'en', 'on': 'en', 'off': 'en'})]
+        for text, expected in cases:
+            with self.subTest(text=text):
+                language = 'es' if text.startswith('Usamos') else 'en'
+                result = resolve_plan(plan_for(text, language), Detector(self.tagged(text, english)))
+                found = units(result)
+                self.assertFalse(any(u['reason'] == 'protected-technical' for u in found))
+                self.assertEqual(''.join(u['text'] for u in found), text)
+                by_text = {u['text']: u for u in found}
+                for word, lang in expected.items():
+                    self.assertEqual(by_text[word]['language'], lang, word)
+                    self.assertTrue(by_text[word]['reason'].startswith('detected-unanimous')
+                                    or by_text[word]['reason'] == 'english-identifier', word)
+
+
+    def test_compound_negative_matrix_stays_protected(self):
+        atoms = ['--flag', '-x', 'a--b', 'foo-1', 'v2-beta', 'foo_bar-baz', 'a-b.c', 'anti-patrón.x',
+                 'a-b-c-d-e-f', '-foo-bar', 'foo-bar-', 'src/app', 'usr/bin', 'docs/readme', 'read/write',
+                 '/etc/hosts', './x', '~/x', 'a/b/c', 'and/or/not', 'http://x.com/a', 'C:\\x', 'foo/bar.txt',
+                 'y/o/e', 'key:value', '10:30', '2026-10-13', 'and/', '/or', 'and//or', 'averyveryveryverylong/x',
+                 'a/1', 'and/or.txt']
+        for atom in atoms:
+            for wrap in [('', ''), ('', '.'), ('', ','), ('', ':'), ('(', ')'), ('"', '".')]:
+                text = wrap[0] + atom + wrap[1]
+                with self.subTest(text=text):
+                    result = resolve_plan(plan_for(text), Detector([token(0, len(text))]))
+                    protected = ''.join(u['text'] for u in units(result) if u['reason'] == 'protected-technical')
+                    self.assertEqual(protected, atom)
+
+                    self.assertEqual(''.join(u['text'] for u in units(result)), text)
+
+    def test_abbreviations_stay_protected(self):
+        for atom in ('e.g.', 'U.S.', 'i.e.', 'e.g.,'):
+            with self.subTest(atom=atom):
+                result = resolve_plan(plan_for('ver ' + atom + ' ok'), Detector([]))
+                self.assertTrue(any(u['reason'] == 'protected-technical' for u in units(result)))
+
+    def test_kebab_identifier_is_prose_only_outside_protected_code(self):
+        english = {'my', 'component'}
+        text = 'my-component'
+        prose = units(resolve_plan(plan_for(text, 'es'), Detector(self.tagged(text, english))))
+        self.assertFalse(any(u['reason'] == 'protected-technical' for u in prose))
+        self.assertEqual([u['language'] for u in prose if u['text'] in english], ['en', 'en'])
+        code = units(resolve_plan(plan_for(text, 'es', kind='inlineCode'), Detector(self.tagged(text, english))))
+        self.assertEqual([(u['text'], u['reason'], u['language']) for u in code],
+                         [(text, 'protected-technical', 'es')])
+        for plain in ('and/or', 'OpenCode/Claude', 'e-mail'):
+            with self.subTest(plain=plain):
+                code = units(resolve_plan(plan_for(plain, 'es', kind='inlineCode'), Detector([token(0, len(plain))])))
+                self.assertEqual([u['reason'] for u in code], ['protected-technical'])
 
 
 if __name__ == '__main__':

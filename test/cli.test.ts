@@ -200,7 +200,7 @@ describe("status, config and misc", () => {
     const base = h.deps.writeConfig;
     h.deps.writeConfig = (patch) => { patches.push(patch); return base(patch); };
     await runCli(["config", "reset"], h.deps);
-    expect(patches).toEqual([{ voices: { es: "em_alex", en: "af_heart" }, speed: 1, engine: "auto", narrationLanguage: "es" }]);
+    expect(patches).toEqual([{ voices: { es: "em_alex", en: "af_heart" }, speed: 1, engine: "auto", narrationLanguage: "es", narrationBackend: "torch" }]);
   });
   test("setup delegates", async () => {
     const { code, h } = await run(["setup", "kokoro"]);
@@ -332,5 +332,71 @@ describe("ONNX narration provisioning and doctor", () => {
     const withOk = await runCli(["doctor"], ok.deps);
     expect(ok.out.join("\n")).toMatch(/OK\s+Contextual narration \(ONNX\): verified local assets\/dependencies.*not selected/);
     expect(withBad).toBe(withOk);
+  });
+});
+
+describe("narration-backend", () => {
+  const ready = { ready: true, code: "verified-local-assets-and-dependencies" };
+  const notReady = { ready: false, code: "missing-managed-environment" };
+  const counted = (overrides: Partial<CliDeps> = {}) => {
+    const h = harness(overrides);
+    const writes: unknown[] = [];
+    const base = h.deps.writeConfig;
+    h.deps.writeConfig = patch => { writes.push(patch); return base(patch); };
+    return { h, writes };
+  };
+  test("no argument prints the current backend and defaults to torch; nothing is written", async () => {
+    const { h, writes } = counted();
+    expect(await runCli(["narration-backend"], h.deps)).toBe(0);
+    expect(h.out).toEqual(["Narration backend: torch."]);
+    expect(writes).toEqual([]);
+  });
+  test("torch always succeeds without consulting ONNX readiness", async () => {
+    let probed = 0;
+    const { h } = counted({ narrationOnnxStatus: async () => { probed++; return notReady; } });
+    h.deps.writeConfig({ narrationBackend: "onnx" });
+    expect(await runCli(["narration-backend", "torch"], h.deps)).toBe(0);
+    expect(h.config().narrationBackend).toBe("torch");
+    expect(h.out).toEqual(["Narration backend set to torch."]);
+    expect(probed).toBe(0);
+  });
+  test("onnx is persisted only when ONNX readiness holds", async () => {
+    const homes: string[] = [];
+    const { h } = counted({ env: { LOCALAPPDATA: "C:\\L" }, narrationOnnxStatus: async home => { homes.push(home); return ready; } });
+    expect(await runCli(["narration-backend", "onnx"], h.deps)).toBe(0);
+    expect(h.config().narrationBackend).toBe("onnx");
+    expect(h.out).toEqual(["Narration backend set to onnx."]);
+    expect(homes).toHaveLength(1);
+    expect(await runCli(["narration-backend"], h.deps)).toBe(0);
+    expect(h.out.at(-1)).toBe("Narration backend: onnx.");
+  });
+  test.each([
+    ["not ready", { narrationOnnxStatus: async () => notReady }],
+    ["integrity failure", { narrationOnnxStatus: async () => ({ ready: false, code: "local-model-integrity-failed" }) }],
+    ["inspector throws", { narrationOnnxStatus: async () => { throw new Error("boom"); } }],
+    ["inspector not wired", {}],
+  ] as const)("onnx refuses when %s: nonzero exit, nothing persisted, actionable message", async (_name, overrides) => {
+    const { h, writes } = counted(overrides as Partial<CliDeps>);
+    expect(await runCli(["narration-backend", "onnx"], h.deps)).toBe(1);
+    expect(writes).toEqual([]);
+    expect(h.config().narrationBackend).toBe("torch");
+    expect(h.err.join("\n")).toContain("open-vox setup narration-onnx --lid-source <dir>");
+    expect(h.out).toEqual([]);
+  });
+  test.each([[["narration-backend", "fp16"]], [["narration-backend", "torch", "x"]], [["narration-backend", "ONNX"]], [["narration-backend", ""]]])(
+    "%j is a usage error that writes nothing", async argv => {
+      const { h, writes } = counted({ narrationOnnxStatus: async () => ready });
+      expect(await runCli(argv, h.deps)).toBe(2);
+      expect(writes).toEqual([]);
+      expect(h.err.join("\n")).toContain("Usage: open-vox narration-backend [torch|onnx]");
+    });
+  test("help, status and config reset know the backend; reset returns to torch", async () => {
+    expect((await run(["help"])).h.out.join("\n")).toContain("narration-backend [torch|onnx]");
+    const { h } = counted({ narrationOnnxStatus: async () => ready });
+    await runCli(["narration-backend", "onnx"], h.deps);
+    await runCli(["status"], h.deps);
+    expect(h.out.join("\n")).toContain("narration backend: onnx");
+    await runCli(["config", "reset"], h.deps);
+    expect(h.config().narrationBackend).toBe("torch");
   });
 });
