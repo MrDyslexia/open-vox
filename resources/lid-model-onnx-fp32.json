@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "backend": "onnx-fp32",
+  "derivedFrom": {
+    "checkpoint": "sagorsarker/codeswitch-spaeng-lid-lince",
+    "revision": "66d0e899b3fcf70d8727e4521c7a9c3f7a1fa73c"
+  },
+  "runtime": { "numpy": "2.5.3", "onnxruntime": "1.31", "tokenizers": "0.23.3" },
+  "files": [
+    { "filename": "model.onnx", "bytes": 709298327, "sha256": "a322d9809cd37c9002c70bb182953b59646d730d51aa93a6dc4ea4eca7283f86" },
+    { "filename": "tokenizer/config.json", "bytes": 991, "sha256": "af40913ef475ebd5cead533258a0a1cdb0e6ea563fb7ecc36fe20106ce58f9bd" },
+    { "filename": "tokenizer/special_tokens_map.json", "bytes": 112, "sha256": "303df45a03609e4ead04bc3dc1536d0ab19b5358db685b6f3da123d05ec200e3" },
+    { "filename": "tokenizer/tokenizer.json", "bytes": 3039058, "sha256": "f5c46e5898b5fa17c8541b336dd904a1021568c2a25356436ae2b1b5fd9409f7" },
+    { "filename": "tokenizer/tokenizer_config.json", "bytes": 49, "sha256": "0f6d13e6f4da6f9e24f22ada6bc3be571123d858d7c0c05a8a7cd55a9c23c2e8" },
+    { "filename": "tokenizer/vocab.txt", "bytes": 995526, "sha256": "fe0fda7c425b48c516fc8f160d594c8022a0808447475c1a7c6d6479763f310c" }
+  ]
+}

@@ -118,6 +118,17 @@ Historical PN-01–PN-05 tasks stay open as umbrella items: PN-01 language/conte
 - Closure: 14 files, 986 additions / 41 deletions at `f43c3db` (over budget; no exception inferred).
 - Rollback: remove I04 provisioning/doctor/docs; never uninstall the user's Kokoro environment.
 
+### PN-I05 — Standalone ONNX FP32 LID backend, inactive (IN PROGRESS, 2026-10-13)
+Direction (Engram #2229 evidence, #2232 integration limits, #2250 resume runbook): replace the Torch/Transformers detector runtime with the original token classifier exported to ONNX FP32, run with onnxruntime + tokenizers + numpy only. No int8, Lingua, LLM student or retraining; no new studies. Units, in order:
+- [x] **I05.1 Backend, manifest, tests (inactive).** `scripts/narration_lid_onnx.py`, `resources/lid-model-onnx-fp32.json`, `test/python/test_narration_lid_onnx.py`. Keep nine labels, Unicode offsets, 510/512 windows, whole-word evidence, non-binary fallback, original source and protected controls. Not selected from the plugin; active install, defaults and `main` unchanged. Backend identity/hashes recorded separately from the strict schema-1 `narration_synthesis` contract.
+  - Observed evidence: RED = `python -m unittest discover -s test/python -p "test_narration_*.py"` gave 69 tests/1 import error (module absent) on top of the 68-test baseline; GREEN = new file 31 tests OK (1 skip: symlink creation unavailable), full Python narration suite 99 OK/1 skip with the managed `pn-venv` interpreter (numpy 2.5.3, onnxruntime 1.31.0, tokenizers 0.23.3), `bun test` 418 pass/2 skip/0 fail, `tsc --noEmit` exit 0. The real-asset integration test runs against hard-linked reference files in an exact-set directory (layout: `model.onnx` plus `tokenizer/*`) and pins only high-confidence labels (score > 0.8); it skips when assets or runtime are absent (system Python without numpy: 31 tests OK/3 skips). Nothing imports the module outside its tests; backend marker lives in result field `backend`, schema-1 `identity` keys unchanged.
+- [ ] I05.2 Reproducible packaging, tokenizers full LICENSE, bundle (local verified bundle; ~709 MB graph never a plain Git file).
+- [ ] I05.3 `setup`/`doctor` for a dedicated environment (versions, import origin, hashes).
+- [ ] I05.4 Coherent explicit interpreter/backend/manifest selection.
+- [ ] I05.5 Regression and listening in the installed host (separate permission).
+- [ ] I05.6 Controlled activation (separate permission).
+Reference assets (temporary, verified present 2026-10-13): `<reference-assets>`; `assets/model.onnx` 709,298,327 B SHA256 `a322d980…a7283f86`, `assets/tokenizer/tokenizer.json` SHA256 `f5c46e58…b2409f7` (both match). Baseline at start: branch `feat/pn-implementation`, HEAD `dfc1307`, worktree clean, tracking `origin/PN-01`.
+
 ### Operational evidence (HEAD `f3d9025`, source unchanged during runs)
 - Offline run (`pn-offline-result-v2.json`): detector `available`, no fallback; `health`/`check`/`deployment`/ES `timeout` retained `en` evidence (`detected-unanimous`); `getUserName` -> `get user name`; API `a pe i` (ES) / `ay pee eye` (EN).
 
