@@ -2,8 +2,9 @@
 
 Preserve the delivered pronunciation-normalization (PN) pipeline while adding
 instance-scoped service On/Off and playback rates in small, coherent work units.
-Bootstrap and U01–U10 implementation units are complete.
-**Final integrated verification is pending**; focused unit proof is not feature closure.
+**Local integration is complete with independent deterministic/static verification.**
+Bootstrap and U01–U10 are complete; final evidence below anchors the verified code.
+This is not production-host, mounted-renderer, listening, CI or legal qualification.
 
 ## Objective and authorization
 
@@ -23,8 +24,9 @@ Port only the missing behavior onto the exact PN delivery baseline instead.
 - U07 completed closed rate wire and safe explicit dispatch without rate binding.
 - U08 qualified the existing player rate API with deterministic regression tests.
 - U09 bound PN-preserving instance rates without changing player/synthesis APIs.
-- Current authorization: U10 confirmed rate UI, focused tests, README and task
-  evidence only. Stop before final integrated verification; no host/audio execution.
+- U10 completed confirmed rate UI; independent final verification followed.
+- Current authorization: passive task-document closure only. Source/tests are
+  frozen; no suites are rerun and no host/audio execution or publication is authorized.
 - No network, publication, PR edits, push, main merge, rebase, destructive reset,
   original checkout changes, host/config/environment changes, downloads, installs,
   package/lock writes, or writes through the dependency junction are authorized.
@@ -109,7 +111,7 @@ documentation, compress code, or claim an exception to meet the ceiling.
 
 U09 is the hardest ceiling: preserve all necessary regression tests. Bootstrap
 contained no source materialization; U01–U10 implementation is complete.
-Final integrated verification remains pending and requires the next parent-led gate.
+Independent final verification completed at the code anchor recorded below.
 
 ## Future routes and verification
 
@@ -173,7 +175,8 @@ record actual harness scenario/outcome or an explicit boundary-specific N/A.
 
 ## Next step
 
-Stop after U10. Next is final integrated verification, pending parent authorization.
+Local integration and passive evidence closure are complete. Await explicit parent
+authorization for any host qualification or publication; neither is performed here.
 Reconcile this tracker with full Engram mirror `odd/unified-playback-narration/tasks`
 in project `agentvoz`; preserve the 400-line closing guard for every later unit.
 
@@ -409,4 +412,71 @@ in project `agentvoz`; preserve the 400-line closing guard for every later unit.
 - Rollback boundary: U10 sidebar rate UI, focused tests, README and task evidence;
   preserve U01–U09 PN binding and all original byte/index/ref/backup safeguards.
 - Observed A+D: production 38, tests 130, docs 54; total 222 <= 400. Commit SHA is in the U10 receipt.
-- Final integrated verification remains pending; no complete-feature claim is made.
+- At U10 closure, final integrated verification was pending; see final evidence below.
+
+## Final independent verification and local closure
+
+Verified code: `3e92d0c5c5854c332e144a8da3bc617a5c65c0f4` on
+`feat/unified-playback-narration`, based on delivered PN `4c080cb`.
+Evidence source: independent verifier record #2412 in project `agentvoz`.
+This passive document update reruns no suite and changes no source/test bytes.
+
+| Independent check (run once) | Observed result |
+|---|---|
+| `bun test` | 577 pass, 4 skip, 0 fail; 2295 assertions across 23 files |
+| `bun run typecheck` | Exit 0 |
+| Existing PN interpreter, `-B -m unittest discover`, pattern `test_*.py` | 121 run: 120 pass, 1 skip; OK |
+| Current diff and `4c080cb..HEAD` diff checks | Clean |
+
+Four Bun skips are opt-in real-player/audio-host smoke cases with
+`OV_PLAYER_SMOKE` unset. The Python skip is the unavailable symlink-capability
+case `IntegrityTests.test_symlinked_asset_is_rejected`; no failed case is hidden.
+Real ONNX nine-score inference, pinned labels and backend-selection
+`build_detector`/`resolve_plan` tests ran using existing assets/interpreter;
+the Bun real pinned-asset fingerprint case also ran. No install/download occurred.
+
+Composed PN tests use the real source parser, sink, cache, wire and player
+orchestration with fake synthesis/host processes. Their retained-WAV/counter proof
+is separate from real model proof, not integrated audible or renderer qualification.
+Scoped `stopSession` in both wrappers, post-plan enabled/generation checks, clear
+and exact retained file/revision/bytes with fixed voice/synthesis speed passed.
+P3b/P4 donor review established no blocking functional omission; the stale donor
+PN tracker was intentionally not imported.
+
+Protected scripts/resources/narration core/Markdown/Kokoro engine/config/package/
+lock/player blobs and modes are identical to PN baseline `4c080cb`; raw working
+hashes also matched. Unauthorized changed paths were empty. Original checkout
+tracked bytes (46 original, 76 delivery, 75 PN files), indexes, statuses and refs
+matched checkpoint blob `264d5c47f5ae3126c7e27fe39c585a3f4d41d107`.
+Main `5fe4faf`, original PN `20040db`, delivery `4c080cb` and original P4 `d40f0da`
+remain unchanged. All eleven unstaged P4 files match raw backup `6b0263e`;
+binary diff fingerprint remains `192d7d31cb262051d889c4cd1841622254d5307c`.
+Both P4 backup trees remain `0a7b5ce8e34d5652fbf61828439127e701bd0471`.
+Three verifier-created untracked bytecode files under `scripts/__pycache__/`
+remain unstaged and untouched. Published frozen PN PRs 1–16 were not changed.
+
+### Unit commit map and authored budget
+
+These commits link to the detailed historical evidence above; each full unit
+includes its tests/docs and stays below the hard 400 authored A+D ceiling.
+
+| Unit | Commit | Authored A+D |
+|---|---|---|
+| Bootstrap | `a728889` | 165 |
+| U01 | `12a9841` | 176 |
+| U02 | `f4a2d6c` | 145 |
+| U03 | `2071fb7` | 201 |
+| U04 | `f97d195` | 168 |
+| U05 | `29c5724` | 273 |
+| U06 | `d845cf1` | 223 |
+| U07 | `fce9fa5` | 187 |
+| U08 | `01c6a80` | 294 |
+| U09 | `9fdc81a` | 265 |
+| U10 | `3e92d0c` | 222 |
+
+Stored playback rate is not audible host acknowledgment. A newly activated host,
+mounted UI/listening behavior, CI and legal clearance remain untested/unestablished.
+The unified branch is local, unpublished and not the active host checkout. External
+installed-loader hashes were not independently checkpointed. No native review
+receipt is fabricated. Any host qualification or publication needs new explicit
+authorization; this passive closure makes no deployment or production-ready claim.
