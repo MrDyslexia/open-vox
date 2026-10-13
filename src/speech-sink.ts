@@ -1,6 +1,8 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import type { Selection } from "./final-response";
-import { detectLanguage, prepareSpeech, type Language } from "./speech-text";
+import { type Language } from "./speech-text";
+import { createNarrationPlan } from "./markdown-narration";
+import { defaultNarrationPolicies, flattenNarrationPlan, type NarrationPlan } from "./narration-plan";
 import type { AudioStore } from "./audio-cache";
 import type { AudioStatus } from "./repeat-control";
 
@@ -20,9 +22,16 @@ export type SpeechProcess = {
 export type Spawn = (args: string[], stdin: string) => SpeechProcess;
 export type Engine = ((text: string, language: Language) => SpeechProcess) & {
   synthesize?: (text: string, language: Language, wav: string) => SpeechProcess;
+  synthesizePlan?: (plan: NarrationPlan, wav: string) => SpeechProcess;
+  speakPlan?: (plan: NarrationPlan) => SpeechProcess;
 };
 export type SpeechSink = ((selection: Selection) => Promise<void>) & {
   stop(): void;
+  /**
+   * Cancels narration that belongs to one session: its queued jobs and, only when it is the active job, the
+   * current synthesis or playback. Other sessions keep their place and the cache is not forgotten.
+   */
+  stopSession?: (sessionID: string) => void;
   /**
    * Freezes the active cached playback in place (real pause) and cancels everything that has no audio yet:
    * queued jobs and a synthesis in flight. A playback that cannot be frozen is stopped instead.
@@ -51,10 +60,14 @@ export type SpeechSinkOptions = {
   /** Time a playback handle gets to acknowledge `pause()`/`resume()` before it is stopped instead. */
   pauseTimeoutMs?: number;
   maxLength?: number;
+  narrationLanguage?: Language | (() => Language);
+  preparePlan?: (...args: Parameters<typeof createNarrationPlan>) => NarrationPlan | Promise<NarrationPlan>;
+  onDiagnostic?: (code: string) => void;
   onError?: (error: unknown) => void;
   cache?: AudioStore;
   player?: (wav: string) => SpeechProcess;
   isPaused?: () => boolean;
+  isEnabled?: () => boolean;
   now?: () => number;
 };
 
@@ -101,7 +114,7 @@ export function playWav(wav: string, spawn: Spawn = windowsSpawn): SpeechProcess
   return spawn(["-NoProfile", "-NonInteractive", "-Command", script], "");
 }
 
-type Job = { sessionID: string; text?: string; language?: Language; revision?: number; expires?: number; done: () => void };
+type Job = { sessionID: string; plan?: NarrationPlan; revision?: number; expires?: number; done: () => void };
 
 /** The process the pump is waiting on, with its backstop timer under the sink's control. */
 type Active = { proc: SpeechProcess; audible: boolean; arm(): void; disarm(): void };
@@ -126,6 +139,9 @@ export function createSpeechSink(options: SpeechSinkOptions = {}): SpeechSink {
   const timeoutMs = options.timeoutMs ?? 120_000;
   const pauseTimeoutMs = options.pauseTimeoutMs ?? 3_000;
   const report = (error: unknown) => { try { options.onError?.(error); } catch {} };
+  const diagnostic = (code: string) => { try { options.onDiagnostic?.(code); } catch {} };
+  let reducedReported = false;
+  const reduced = () => { if (!reducedReported) { reducedReported = true; diagnostic("reduced-pronunciation:text-only-engine"); } };
   const queue: Job[] = [];
   let current: Active | undefined;
   let frozen: Frozen | undefined;
@@ -136,6 +152,12 @@ export function createSpeechSink(options: SpeechSinkOptions = {}): SpeechSink {
   let idle = Promise.resolve();
   const cache = options.cache;
   const paused = () => options.isPaused?.() ?? false;
+  // Observing Off permanently invalidates pending work; On never revives that generation.
+  const enabled = () => {
+    const on = options.enabled !== false && (options.isEnabled?.() ?? true);
+    if (!on) sink.stop();
+    return on;
+  };
   const now = options.now ?? Date.now;
 
   /** `audible` marks the cached-audio playback, the only process that can be frozen instead of stopped. */
@@ -150,11 +172,16 @@ export function createSpeechSink(options: SpeechSinkOptions = {}): SpeechSink {
     const active: Active = { proc, audible, arm, disarm };
     current = active;
     arm();
+    // A predicate has no notification channel. Observe it even while playback is frozen.
+    const gate = options.isEnabled ? setInterval(() => {
+      try { enabled(); } catch (error) { report(error); sink.stop(); }
+    }, 20) : undefined;
     try {
       const code = await proc.exited;
       if (timedOut) throw new Error("speech process timed out");
       return code;
     } finally {
+      if (gate) clearInterval(gate);
       disarm();
       if (frozen?.active === active) { frozen.abort?.(); frozen = undefined; }
       current = undefined;
@@ -190,19 +217,19 @@ export function createSpeechSink(options: SpeechSinkOptions = {}): SpeechSink {
   }
 
   async function freeze(f: Frozen): Promise<void> {
-    if (frozen !== f || f.paused) return;
+    if (!enabled() || frozen !== f || f.paused) return;
     f.active.disarm();                 // a frozen playback is not bounded by the backstop
     const result = await acknowledge(f, () => f.active.proc.pause!());
-    if (frozen !== f) return;
+    if (!enabled() || frozen !== f) return;
     if (result === "ok") { f.paused = true; return; }
     // "declined" is the normal answer of a playback that cannot pause (e.g. fallback), so it is not an error.
     degrade(f, result === "failed" ? "player did not acknowledge pause; playback stopped" : undefined);
   }
 
   async function thaw(f: Frozen): Promise<void> {
-    if (frozen !== f || !f.paused) return;
+    if (!enabled() || frozen !== f || !f.paused) return;
     const result = await acknowledge(f, () => f.active.proc.resume!());
-    if (frozen !== f) return;
+    if (!enabled() || frozen !== f) return;
     if (result !== "ok") { degrade(f, "player did not acknowledge resume; playback stopped"); return; }
     f.paused = false;
     if (!f.want) f.active.arm();       // fresh budget: the time spent paused is not counted
@@ -218,15 +245,19 @@ export function createSpeechSink(options: SpeechSinkOptions = {}): SpeechSink {
         let candidate: string | undefined;
         let release: (() => void) | undefined;
         activeSession = job.sessionID;
-        const valid = () => !disposed && mine === generation && !paused() && (job.expires === undefined || job.expires > now());
+        const valid = () => enabled() && !disposed && mine === generation && !paused() && (job.expires === undefined || job.expires > now());
         try {
           if (!valid()) continue;
           if (cache) {
-            if (job.text !== undefined) {
-              if (!engine.synthesize) throw new Error("Engine cannot produce cached audio");
+            if (job.plan !== undefined) {
+              if (!engine.synthesizePlan && !engine.synthesize) throw new Error("Engine cannot produce cached audio");
               candidate = cache.candidate();
               release = cache.hold(candidate);
-              const code = await run(engine.synthesize(job.text, job.language!, candidate));
+              if (!engine.synthesizePlan) reduced();
+              if (!valid()) continue;
+              const proc = engine.synthesizePlan ? engine.synthesizePlan(job.plan, candidate)
+                : engine.synthesize!(flattenNarrationPlan(job.plan), job.plan.defaultLanguage, candidate);
+              const code = await run(proc);
               if (code !== 0) throw new Error(`synthesis process exited with code ${code}`);
               if (!valid()) continue;
               if (!cache.promote(candidate, job.sessionID)) throw new Error("Invalid generated audio");
@@ -239,8 +270,11 @@ export function createSpeechSink(options: SpeechSinkOptions = {}): SpeechSink {
             release = cache.hold(audio.file);
             const code = await run((options.player ?? playWav)(audio.file), options.playbackTimeoutMs ?? timeoutMs, true);
             if (code !== 0 && valid()) report(new Error(`player exited with code ${code}`));
-          } else if (job.text !== undefined) {
-            const code = await run(engine(job.text, job.language!));
+          } else if (job.plan !== undefined) {
+            if (!engine.speakPlan) reduced();
+            if (!valid()) continue;
+            const code = await run(engine.speakPlan ? engine.speakPlan(job.plan)
+              : engine(flattenNarrationPlan(job.plan), job.plan.defaultLanguage));
             if (code !== 0 && valid()) report(new Error(`speech process exited with code ${code}`));
           }
         } catch (error) {
@@ -257,26 +291,47 @@ export function createSpeechSink(options: SpeechSinkOptions = {}): SpeechSink {
     }
   }
 
-  const sink = ((selection: Selection) => {
-    if (disposed || options.enabled === false || paused()) return Promise.resolve();
-    const text = prepareSpeech(selection.text, options.maxLength);
-    if (!text) return Promise.resolve();
+  const sink = (async (selection: Selection) => {
+    if (disposed || !enabled() || paused()) return;
+    const mine = generation;
+    let plan: NarrationPlan;
+    try {
+      const language = typeof options.narrationLanguage === "function" ? options.narrationLanguage() : options.narrationLanguage ?? "es";
+      const policy = options.maxLength === undefined ? defaultNarrationPolicies : {
+        ...defaultNarrationPolicies, maxNarrationLength: Math.min(4000, options.maxLength),
+      };
+      const prepared = (options.preparePlan ?? createNarrationPlan)(selection.text, language, policy);
+      plan = prepared instanceof Promise ? await prepared : prepared;
+      if (disposed || !enabled() || mine !== generation || paused()) return;
+      if (plan.outcome !== "complete") diagnostic(`narration-limit:${plan.outcome}`);
+      if (plan.outcome === "unsplittable") throw new Error("Narration contains an unsplittable technical unit");
+    } catch (error) { report(error); return Promise.resolve(); }
+    // Preparation callbacks/diagnostics may invalidate this selection synchronously.
+    if (disposed || !enabled() || mine !== generation || paused() || !flattenNarrationPlan(plan)) return;
     return new Promise<void>((resolve) => {
       while (queue.length >= maxPending) queue.shift()!.done();
-      queue.push({ sessionID: selection.sessionID, text, language: detectLanguage(text), done: resolve });
+      queue.push({ sessionID: selection.sessionID, plan, done: resolve });
       if (!running) idle = pump();
     });
   }) as SpeechSink;
 
-  sink.stop = () => {
+  /** Cancels the active job. A stopped playback is discarded even when frozen: it is never resumed, and
+   *  killing it lets the pump close the file and release the cache hold. */
+  const cancelActive = () => {
     generation++;
-    while (queue.length > 0) queue.shift()!.done();
-    // A stopped playback is discarded even when frozen: it is never resumed, and killing it lets the
-    // pump close the file and release the cache hold.
     const f = frozen;
     frozen = undefined;
     f?.abort?.();
     try { current?.proc.kill(); } catch {}
+  };
+  sink.stop = () => {
+    while (queue.length > 0) queue.shift()!.done();
+    cancelActive();
+  };
+  // Jobs read the generation when they start, so queued jobs of other sessions are not invalidated by the bump.
+  sink.stopSession = (sessionID) => {
+    for (let i = queue.length - 1; i >= 0; i--) if (queue[i]!.sessionID === sessionID) queue.splice(i, 1)[0]!.done();
+    if (activeSession === sessionID) cancelActive();
   };
   /**
    * Real pause. What can be held is held: the active cached playback keeps its place, its job and its cache
@@ -285,6 +340,7 @@ export function createSpeechSink(options: SpeechSinkOptions = {}): SpeechSink {
    * a handle without pause support) is stopped instead, and resume() then has nothing to do.
    */
   sink.pause = () => {
+    if (!enabled()) return;
     while (queue.length > 0) queue.shift()!.done();
     const active = current;
     if (disposed || !active) return;
@@ -297,12 +353,14 @@ export function createSpeechSink(options: SpeechSinkOptions = {}): SpeechSink {
     target.ops = target.ops.then(() => freeze(target)).catch(() => {});   // one failed step must not wedge the chain
   };
   sink.resume = () => {
+    if (!enabled()) return;
     const f = frozen;
     if (!f) return;
     f.want = false;
     f.ops = f.ops.then(() => thaw(f)).catch(() => {});
   };
   sink.status = () => {
+    if (!enabled()) return;
     const audio = cache?.current();
     return !disposed && options.enabled !== false && audio ? { sessionID: audio.sessionID, revision: audio.revision } : undefined;
   };
