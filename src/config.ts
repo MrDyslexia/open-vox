@@ -4,18 +4,22 @@ import { homeFor } from "./brand";
 import type { Language } from "./speech-text";
 
 export type EngineName = "auto" | "kokoro" | "piper" | "sapi";
+/** Contextual language-detector backend. `torch` is the default; `onnx` is explicit opt-in. */
+export type NarrationBackend = "torch" | "onnx";
 /** Shared persisted defaults only. Runtime controls such as pause live in memory, per plugin instance. */
 export type Config = {
   narrationLanguage: Language;
   voices: Record<Language, string>;
   speed: number;
   engine: EngineName;
+  narrationBackend: NarrationBackend;
 };
 export type ConfigPatch = {
   narrationLanguage?: Language;
   voices?: Partial<Record<Language, string>>;
   speed?: number;
   engine?: EngineName;
+  narrationBackend?: NarrationBackend;
 };
 export type ConfigFs = {
   read: (path: string) => string;
@@ -46,6 +50,7 @@ export const DEFAULT_CONFIG: Config = {
   voices: { es: "em_alex", en: "af_heart" },
   speed: 1,
   engine: "auto",
+  narrationBackend: "torch",
 };
 
 const ENGINES: readonly EngineName[] = ["auto", "kokoro", "piper", "sapi"];
@@ -72,6 +77,7 @@ export function parseConfig(raw: unknown): Config {
     },
     speed: validSpeed(input.speed) ? input.speed : DEFAULT_CONFIG.speed,
     engine: ENGINES.includes(input.engine as EngineName) ? (input.engine as EngineName) : DEFAULT_CONFIG.engine,
+    narrationBackend: input.narrationBackend === "onnx" ? "onnx" : "torch",
   };
 }
 

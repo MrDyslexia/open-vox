@@ -13,6 +13,8 @@ import { resolveKokoro } from "./kokoro-engine";
 import { resolvePiper } from "./piper-engine";
 import { nodeDownload, nodeRun, nodeNarrationDownload, nodeNarrationFs, nodeNarrationRun, narrationProbeArgs, setupKokoro, setupNarration, setupPiper } from "./setup";
 import { assertLidDirectory, fileFingerprint, inspectNarration, type NarrationReadiness } from "./narration-assets";
+import { assertOnnxLidStructure, inspectNarrationOnnx } from "./narration-onnx-assets";
+import { nodeNarrationOnnxFs, onnxProbeArgs, setupNarrationOnnx } from "./setup-onnx";
 
 export type CliDeps = {
   out: (line: string) => void;
@@ -30,8 +32,10 @@ export type CliDeps = {
   say: (text: string) => Promise<void>;
   /** Moves the pre-rename data folder to its new location, when applicable. Throws on failure. */
   migrateHome: () => { from: string; to: string } | undefined;
-  setup: (what: "kokoro" | "piper" | "narration") => Promise<void>;
+  setup: (what: "kokoro" | "piper" | "narration" | "narration-onnx", options?: { lidSource: string }) => Promise<void>;
   narrationStatus?: (home: string) => Promise<NarrationReadiness>;
+  /** Optional ONNX readiness; when absent the doctor prints no ONNX line at all. */
+  narrationOnnxStatus?: (home: string) => Promise<NarrationReadiness>;
 };
 
 const ENGINES: readonly EngineName[] = ["auto", "kokoro", "piper", "sapi"];
@@ -43,6 +47,7 @@ Setup
   uninstall [--config-dir <dir>]            Remove the plugin and the sidebar block
   setup kokoro|piper                        Download a local neural voice engine
   setup narration                           Explicit pinned local LID + isolated CPU environment (~2 GB estimate)
+  setup narration-onnx --lid-source <dir>   Explicit ONNX FP32 LID (~709 MB, local source, no torch); does not activate it
   doctor                                    Check the installation
   status                                    Show current settings
 
@@ -52,6 +57,7 @@ Controls (apply immediately, no restart)
   speed <0.5-2>                             Speaking speed
   engine auto|kokoro|piper|sapi             Speech engine
   language es|en                           Narration base language (one voice per utterance)
+  narration-backend [torch|onnx]           Show or select the contextual LID backend (default torch; onnx needs setup narration-onnx)
   say <text>                                Speak a test sentence
   config path|show|reset                    Inspect or reset the settings file
 `;
@@ -75,7 +81,7 @@ function listVoices(deps: CliDeps): void {
   deps.out("(* = current)");
 }
 
-function check(label: string, level: "OK" | "WARN" | "FAIL", detail: string) {
+function check(label: string, level: "OK" | "WARN" | "FAIL" | "INFO", detail: string) {
   return { label, level, detail };
 }
 
@@ -97,6 +103,14 @@ async function doctor(deps: CliDeps): Promise<number> {
     check("Piper engine", piper ? "OK" : "WARN", piper ? "ready" : "not set up (optional); run: open-vox setup piper"),
     check("Windows voices (SAPI)", platform === "win32" ? "OK" : "WARN", "built in, used as the last fallback"),
   ];
+  if (deps.narrationOnnxStatus) {
+    const onnx = await deps.narrationOnnxStatus(home);
+    const label = "Contextual narration (ONNX)";
+    results.splice(results.findIndex(r => r.label === "Contextual narration") + 1, 0,
+      onnx.ready ? check(label, "OK", "verified local assets/dependencies (inactive backend, not selected; not listening certification)")
+        : onnx.code === "missing-managed-environment" ? check(label, "INFO", "not provisioned (optional, inactive); run: open-vox setup narration-onnx --lid-source <dir>")
+          : check(label, "WARN", `degraded: ${onnx.code}; inactive backend only; run: open-vox setup narration-onnx --lid-source <dir>`));
+  }
   for (const r of results) deps.out(`${r.level.padEnd(4)} ${r.label}: ${r.detail}`);
   return results.some((r) => r.level === "FAIL") ? 1 : 0;
 }
@@ -108,6 +122,7 @@ function status(deps: CliDeps): void {
   deps.out(`speed: ${config.speed}`);
   deps.out(`engine: ${config.engine}`);
   deps.out(`narration language: ${config.narrationLanguage}`);
+  deps.out(`narration backend: ${config.narrationBackend}`);
   deps.out(`plugin: ${state.plugin ? "installed" : "not installed"}`);
   deps.out(`sidebar block: ${state.tuiFile && state.tuiRegistered ? "installed" : "not installed"}`);
   deps.out(`config file: ${deps.configPath}`);
@@ -158,6 +173,23 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
       deps.out(`Narration language set to ${language}.`);
       return 0;
     }
+    case "narration-backend": {
+      const backend = args[0];
+      const USAGE = "Usage: open-vox narration-backend [torch|onnx]";
+      if (args.length === 0) { deps.out(`Narration backend: ${deps.readConfig().narrationBackend}.`); return 0; }
+      if (args.length !== 1 || (backend !== "torch" && backend !== "onnx")) return usage(deps, USAGE);
+      if (backend === "onnx") {
+        let ready = false;
+        try { ready = (await deps.narrationOnnxStatus?.(appHome(deps.env)))?.ready === true; } catch { ready = false; }
+        if (!ready) {
+          deps.err("The ONNX backend is not ready, so the backend was not changed. Provision it first: open-vox setup narration-onnx --lid-source <dir>");
+          return 1;
+        }
+      }
+      deps.writeConfig({ narrationBackend: backend });
+      deps.out(`Narration backend set to ${backend}.`);
+      return 0;
+    }
     case "engine": {
       const name = args[0] as EngineName | undefined;
       if (!name || !ENGINES.includes(name)) return usage(deps, `Engine must be one of: ${ENGINES.join(", ")}.`);
@@ -201,6 +233,14 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
 
     case "setup": {
       const what = args[0];
+      if (what === "narration-onnx") {
+        const source = args[2];
+        if (args.length !== 3 || args[1] !== "--lid-source" || !source?.trim() || source.startsWith("-")) {
+          return usage(deps, "Usage: open-vox setup narration-onnx --lid-source <dir>");
+        }
+        await deps.setup(what, { lidSource: source });
+        return 0;
+      }
       if (args.length !== 1 || (what !== "kokoro" && what !== "piper" && what !== "narration")) return usage(deps, "Usage: open-vox setup kokoro|piper|narration");
       await deps.setup(what);
       return 0;
@@ -217,7 +257,7 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
       if (sub === "path") { deps.out(deps.configPath); return 0; }
       if (sub === "show") { deps.out(JSON.stringify(deps.readConfig(), null, 2)); return 0; }
       if (sub === "reset") {
-        deps.writeConfig({ voices: { es: "em_alex", en: "af_heart" }, speed: 1, engine: "auto", narrationLanguage: "es" });
+        deps.writeConfig({ voices: { es: "em_alex", en: "af_heart" }, speed: 1, engine: "auto", narrationLanguage: "es", narrationBackend: "torch" });
         deps.out("Settings reset to defaults.");
         return 0;
       }
@@ -265,13 +305,20 @@ export async function main(argv: string[]): Promise<number> {
       const { speakOnce } = await import("./plugin");
       await speakOnce(text);
     },
-    setup: async (what) => {
+    narrationOnnxStatus: home => inspectNarrationOnnx(home, {
+      exists: existsSync, read: path => readFileSync(path, "utf8"), fingerprint: fileFingerprint,
+      validateDirectory: assertOnnxLidStructure,
+      probe: (python, expectedVenv) => nodeNarrationRun(python, onnxProbeArgs(expectedVenv)),
+    }),
+    setup: async (what, options) => {
       const setupDeps = {
         home: appHome(env), systemPython: envValue(env, "PYTHON") || "python",
         exists: (path: string) => existsSync(path), run: nodeRun, download: nodeDownload,
         log: (line: string) => console.log(line),
       };
-      if (what === "narration") await setupNarration({ ...setupDeps, ...nodeNarrationFs, run: nodeNarrationRun, download: nodeNarrationDownload });
+      if (what === "narration-onnx") {
+        await setupNarrationOnnx({ ...setupDeps, ...nodeNarrationOnnxFs, run: nodeNarrationRun, lidSource: options?.lidSource });
+      } else if (what === "narration") await setupNarration({ ...setupDeps, ...nodeNarrationFs, run: nodeNarrationRun, download: nodeNarrationDownload });
       else await (what === "kokoro" ? setupKokoro(setupDeps) : setupPiper(setupDeps));
     },
   };
