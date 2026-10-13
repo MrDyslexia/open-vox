@@ -49,10 +49,57 @@ def identifier_words(text):
     return ' '.join(part.lower() for part in split.split())
 
 
+def latin_word(text):
+    """True for a non-empty run of Latin letters (accents/combining marks allowed)."""
+    return bool(text) and all(
+        unicodedata.category(c).startswith('M')
+        or (c.isalpha() and unicodedata.name(c, '').startswith('LATIN')) for c in text) \
+        and text[0].isalpha()
+
+
+# Closed list of short function words that form prose slash alternatives
+# (and/or, y/o, on/off, yes/no, he/she, ...). Compared case-insensitively.
+ALTERNATIVE_WORDS = frozenset({
+    'and', 'or', 'but', 'not', 'nor', 'on', 'off', 'in', 'out', 'yes', 'no', 'he', 'she', 'his', 'her',
+    'y', 'o', 'e', 'u', 'ni', 'si', 'sí', 'él', 'ella', 'el', 'la', 'los', 'las', 'un', 'una'})
+
+
+def prose_compound(text):
+    """True when a whitespace-atom core is a plain-prose compound, not technical.
+
+    Hyphen compound: 2..5 Latin-letter parts (accents allowed; no digits,
+    underscores, dots or any other symbol) joined by single '-' with no leading
+    or trailing '-'. Each part is then routed by the detector like any word.
+    Unmarked kebab-case identifiers (my-component) therefore read as prose; real
+    code reaches this module as protected inline code / code blocks, which are
+    protected by segment kind before this function is consulted.
+
+    Slash alternative: exactly 2 Latin-letter parts, each at most 12 characters,
+    joined by one '/', with no digits, dots, underscores, backslashes or colons,
+    AND either (a) at least one part contains an uppercase letter
+    (OpenCode/Claude, I/O), or (b) both parts are in ALTERNATIVE_WORDS (and/or,
+    y/o, on/off). Everything else stays protected as path-like: src/app,
+    usr/bin, docs/readme, read/write, a/b/c, /etc/hosts, ./x, ~/x, foo/bar.txt.
+    """
+    if '-' in text:
+        parts = text.split('-')
+        return 2 <= len(parts) <= 5 and all(latin_word(part) for part in parts)
+    if '/' in text:
+        parts = text.split('/')
+        if len(parts) != 2 or not all(latin_word(part) and len(part) <= 12 for part in parts):
+            return False
+        return (any(c.isupper() for c in text)
+                or all(part.lower() in ALTERNATIVE_WORDS for part in parts))
+    return False
+
+
 def technical(text):
     # Parentheses alone are prose delimiters, not evidence of a command. Inline
     # code remains conservative below; attached call syntax is protected here.
     # Dollar syntax must be reserved before lexical_ranges skips its prefix.
+    # Plain hyphen/slash compounds are prose (see prose_compound).
+    if prose_compound(text):
+        return False
     return bool(re.search(r'[\d/\\:@=<>+*|&%${}\[\]]|^[-~.]|--|[\w][.-][\w]|[\w$]\(|\)[\w$]', text))
 
 
