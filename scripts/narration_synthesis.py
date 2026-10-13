@@ -10,6 +10,7 @@ import math
 import os
 from pathlib import Path
 import re
+import sys
 
 from narration_lid import CHECKPOINT, REVISION, sanitize_evidence
 from narration_plan import flatten_blocks, source_slice, utf16_length, validate_plan
@@ -135,6 +136,51 @@ def language_runs(block, base):
     return runs
 
 
+QUOTE_MAP = {'\u00ab': '"', '\u00bb': '"'}
+# Measured against the installed vocabulary: the phonemizer keeps these marks but the vocabulary has no
+# symbol for them. The closing ? / ! keeps the prosody, so the Spanish opening marks are dropped.
+SPANISH_OPENING_MARKS = '\u00a1\u00bf'
+
+
+def unsupported_symbol(char):
+    """One generic diagnostic line: a codepoint only, never user prose."""
+    code = 'U+%04X' % ord(char)
+    try:
+        sys.stderr.write('unsupported-symbol: ' + code + '\n')
+    except Exception:
+        pass
+    raise ValueError('unsupported-symbol:' + code)
+
+
+def adapt_phonemes(raw, vocab, protected=''):
+    """Final-phoneme adaptation. Raw phonemes stay untouched; every change is traced.
+
+    Mappings: angular quotes -> ASCII quote (existing); inverted ? and ! are removed (a removal that
+    would leave two spaces also removes the extra space). Opening marks that belong to protected
+    technical text are not adapted. Any other symbol outside the vocabulary fails explicitly.
+    """
+    final, mappings = [], []
+    for raw_index, char in enumerate(raw):
+        if char in QUOTE_MAP:
+            replacement = QUOTE_MAP[char]
+        elif char in SPANISH_OPENING_MARKS and char not in protected:
+            replacement = ''
+        else:
+            replacement = char
+        if replacement == ' ' and char == ' ' and final and final[-1] == ' ' and mappings \
+                and mappings[-1]['rawIndex'] == raw_index - 1 and mappings[-1]['to'] == '':
+            replacement = ''  # the removed symbol sat between two spaces
+        if replacement != char:
+            mappings.append({'index': len(final), 'rawIndex': raw_index, 'from': char,
+                             'codepoint': 'U+%04X' % ord(char), 'to': replacement})
+        if replacement:
+            if replacement not in vocab:
+                unsupported_symbol(replacement if replacement == char else char)
+            final.append(replacement)
+    return ''.join(final), mappings
+
+
+
 def prepare_chunks(envelope, phonemize, vocab):
     resolved = validate_envelope(envelope)
     chunks = []
@@ -155,10 +201,10 @@ def prepare_chunks(envelope, phonemize, vocab):
                 raw = phonemize(fragment, run['language'])
                 if type(raw) is not str or not raw.strip():
                     raise ValueError('missing-phonemes')
-                mappings = [{'index': i, 'from': c, 'to': '"'} for i, c in enumerate(raw) if c in '«»']
-                final = raw.replace('«', '"').replace('»', '"')
-                if any(c not in vocab for c in final):
-                    raise ValueError('unsupported-raw-phoneme')
+                protected_text = ''.join(text[max(a, start):min(b, end)] for a, b, _ in run['protected'] if a < end and b > start)
+                final, mappings = adapt_phonemes(raw, vocab, protected=protected_text)
+                if not final.strip():
+                    raise ValueError('missing-phonemes')
                 if len(final) > PHONEME_LIMIT:
                     available = [p for p in cuts if start < p < end]
                     if not available:
@@ -200,14 +246,16 @@ def pack_block(fragments, vocab):
             chunks.append(chunk)
             separator = ''  # A budget boundary already separates the model calls.
         offset = len(chunk['phonemes']) + len(separator)
+        raw_offset = len(chunk['rawPhonemes']) + len(separator)
         run = {**fragment, 'separatorBefore': separator,
                'phonemeRange': {'start': offset, 'end': offset + len(fragment['phonemes'])},
-               'rawPhonemeRange': {'start': offset, 'end': offset + len(fragment['rawPhonemes'])}}
+               'rawPhonemeRange': {'start': raw_offset, 'end': raw_offset + len(fragment['rawPhonemes'])}}
         chunk['runs'].append(run)
         chunk['text'] += fragment['text']
         chunk['rawPhonemes'] += separator + fragment['rawPhonemes']
         chunk['phonemes'] += separator + fragment['phonemes']
-        chunk['mappings'].extend({**mapping, 'index': offset + mapping['index']} for mapping in fragment['mappings'])
+        chunk['mappings'].extend({**mapping, 'index': offset + mapping['index'], 'rawIndex': raw_offset + mapping['rawIndex']}
+                                 for mapping in fragment['mappings'])
     return chunks
 
 

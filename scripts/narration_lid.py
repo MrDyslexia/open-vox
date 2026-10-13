@@ -1,12 +1,12 @@
 """Local-only contextual token classification; dependencies are lazy.
 
-The approved checkpoint identity is a declaration, not integrity attestation:
-managed revision/hash verification belongs to I04. No prose is logged here.
+Pinned local bytes are verified once before loading. No prose is logged here.
 Evidence offsets are Python codepoints in the detector's block text, NOT source.
 All nine softmax scores are raw, uncalibrated evidence, not confidence gates.
 """
 
 import copy
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -18,6 +18,46 @@ LABELS = ('O', 'ambiguous', 'en', 'fw', 'mixed', 'ne', 'other', 'spa', 'unk')
 CHECKPOINT = 'sagorsarker/codeswitch-spaeng-lid-lince'
 REVISION = '66d0e899b3fcf70d8727e4521c7a9c3f7a1fa73c'
 TOKEN_LIMIT = 512
+MANIFEST_PATH = Path(__file__).resolve().parents[1] / 'resources' / 'lid-model.json'
+FILES = ('config.json', 'model.safetensors', 'special_tokens_map.json', 'tokenizer_config.json', 'vocab.txt')
+
+
+def validate_manifest(value):
+    if (type(value) is not dict or set(value) != {'schemaVersion', 'modelId', 'revision', 'files'}
+            or type(value['schemaVersion']) is not int or value['schemaVersion'] != 1
+            or value['modelId'] != CHECKPOINT or value['revision'] != REVISION
+            or type(value['files']) is not list or len(value['files']) != len(FILES)):
+        raise ValueError('invalid pinned manifest')
+    for name, entry in zip(FILES, value['files']):
+        if (type(entry) is not dict or set(entry) != {'filename', 'bytes', 'sha256'}
+                or entry['filename'] != name or type(entry['bytes']) is not int or entry['bytes'] <= 0
+                or type(entry['sha256']) is not str or not re.fullmatch('[a-f0-9]{64}', entry['sha256'])):
+            raise ValueError('invalid pinned file')
+    return value
+
+
+def verify_local_assets(directory, manifest_path=None):
+    """An optional transport path cannot override the bundled pin. No SDK/network."""
+    bundled = validate_manifest(json.loads(MANIFEST_PATH.read_text(encoding='utf-8')))
+    supplied = validate_manifest(json.loads(Path(manifest_path or MANIFEST_PATH).read_text(encoding='utf-8')))
+    if supplied != bundled:
+        raise ValueError('wrong pinned manifest')
+    if directory.is_symlink() or any(parent.is_symlink() for parent in directory.parents):
+        raise ValueError('redirected model directory')
+    # Extra tokenizer/checkpoint/code files can alter from_pretrained's selection.
+    if {entry.name for entry in directory.iterdir()} != set(FILES):
+        raise ValueError('unexpected local model files')
+    for entry in supplied['files']:
+        path = directory / entry['filename']
+        if path.is_symlink() or not path.is_file():
+            raise ValueError('unsafe local model file')
+        digest, size = hashlib.sha256(), 0
+        with path.open('rb') as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b''):
+                digest.update(block)
+                size += len(block)
+        if size != entry['bytes'] or digest.hexdigest() != entry['sha256']:
+            raise ValueError('local model integrity')
 
 
 def sanitize_evidence(value, text):
@@ -83,8 +123,9 @@ def token_windows(text, tokenizer, maximum=TOKEN_LIMIT):
 
 
 class LocalDetector:
-    def __init__(self, model_directory):
+    def __init__(self, model_directory, manifest_path=None):
         self.model_directory = model_directory
+        self.manifest_path = manifest_path
         self._runtime = None
         self._failure = None
 
@@ -97,8 +138,13 @@ class LocalDetector:
             self._failure = 'invalid-local-model-directory'
             return
         if not directory.is_dir() or not all((directory / name).is_file() for name in
-                ('config.json', 'model.safetensors', 'tokenizer_config.json', 'vocab.txt')):
+                FILES):
             self._failure = 'missing-local-assets'
+            return
+        try:
+            verify_local_assets(directory, self.manifest_path)
+        except (OSError, ValueError, TypeError):
+            self._failure = 'local-model-integrity-failed'
             return
         try:
             config = json.loads((directory / 'config.json').read_text(encoding='utf-8'))

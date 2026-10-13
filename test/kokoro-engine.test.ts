@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { kokoroEngine, narrationRunner, resolveKokoro } from "../src/kokoro-engine";
 import type { Runner } from "../src/piper-engine";
 import { createNarrationPlan } from "../src/markdown-narration";
+import { LID_MANIFEST_PATH, narrationPaths, PN_READY_RECORD, resolveNarrationPython } from "../src/narration-assets";
 
 function harness() {
   const calls: { cmd: string; args: string[]; stdin?: string }[] = [];
@@ -22,6 +23,22 @@ function harness() {
 }
 
 describe("kokoro engine", () => {
+  test("plan dispatch uses only the managed app-home interpreter after readiness, otherwise existing Kokoro", async () => {
+    const paths = narrationPaths("R");
+    let ready = false;
+    const calls: { cmd: string; args: string[] }[] = [];
+    const engine = kokoroEngine({ python: "legacy-python", script: "s", modelPath: "existing-model", voicesPath: "existing-voices",
+      appHome: "R", voices: { es: "em_alex", en: "af_heart" }, speed: 1, tmpDir: "R", unlink() {},
+      narrationPython: () => resolveNarrationPython("R", p => ready && [paths.python, paths.marker].includes(p), () => PN_READY_RECORD),
+      run: (cmd, args) => { calls.push({ cmd, args }); return { exited: Promise.resolve(0), kill() {} }; } });
+    const plan = createNarrationPlan("synthetic text", "es");
+    await engine.synthesizePlan!(plan, "out.wav").exited;
+    ready = true;
+    await engine.synthesizePlan!(plan, "out.wav").exited;
+    await engine.synthesize!("legacy", "es", "out.wav").exited;
+    expect(calls.map(c => c.cmd)).toEqual(["legacy-python", paths.python, "legacy-python"]);
+    expect(calls[1]!.args).toEqual(expect.arrayContaining(["--lid-manifest", LID_MANIFEST_PATH, "--app-home", "R", "existing-model", "existing-voices"]));
+  });
   test("plan settings are sampled once and speed remains bounded", async () => {
     let reads = 0;
     const calls: string[][] = [];
@@ -139,5 +156,54 @@ describe("resolveKokoro", () => {
     expect(r?.speed).toBe(1.25);
     expect(resolveKokoro("R", { OPEN_VOX_SPEED: "abc" }, () => true)?.speed).toBe(1);
     expect(resolveKokoro("R", { AGENTVOZ_SPEED: "9" }, () => true)?.speed).toBe(1);
+  });
+});
+
+describe("explicit narration runtime tuple", () => {
+  const build = (runtime: () => import("../src/narration-runtime").NarrationRuntime | undefined, extra: Record<string, unknown> = {}) => {
+    const calls: { cmd: string; args: string[] }[] = [];
+    const engine = kokoroEngine({ python: "kokoro-py", script: "s", modelPath: "m", voicesPath: "v", appHome: "R",
+      voices: { es: "em_alex", en: "af_heart" }, speed: 1, tmpDir: "R", unlink() {}, narrationRuntime: runtime, ...extra,
+      run: (cmd, args) => { calls.push({ cmd, args }); return { exited: Promise.resolve(0), kill() {} }; } });
+    return { engine, calls };
+  };
+  const plan = createNarrationPlan("synthetic text", "es");
+  const torchArgs = ["s", "--model", "m", "--voices", "v", "--voice", "em_alex", "--lang", "es", "--speed", "1", "--out", "o.wav",
+    "--plan-json", "--app-home", "R", "--lid-manifest", LID_MANIFEST_PATH];
+  test("torch tuple yields the byte-identical legacy argument list", async () => {
+    const { engine, calls } = build(() => ({ backend: "torch", python: "torch-py", lidManifest: LID_MANIFEST_PATH }));
+    await engine.synthesizePlan!(plan, "o.wav").exited;
+    const legacy = build(() => undefined, { narrationRuntime: undefined, narrationPython: () => "torch-py" });
+    await legacy.engine.synthesizePlan!(plan, "o.wav").exited;
+    expect(calls[0]!.cmd).toBe("torch-py");
+    expect(calls[0]!.args).toEqual(torchArgs);
+    expect(calls[0]!.args).toEqual(legacy.calls[0]!.args);
+    expect(calls[0]!.args.join(" ")).not.toContain("--lid-backend");
+    expect(calls[0]!.args.join(" ")).not.toContain("--lid-dir");
+  });
+  test("onnx tuple adds backend and absolute model dir with the onnx manifest and onnx interpreter only", async () => {
+    const { engine, calls } = build(() => ({ backend: "onnx", python: "C:\\H\\pn-onnx-venv\\Scripts\\python.exe",
+      lidManifest: "C:\\repo\\resources\\lid-model-onnx-fp32.json", lidDirectory: "C:\\H\\lid-onnx\\m\\rev" }));
+    await engine.synthesizePlan!(plan, "o.wav").exited;
+    expect(calls[0]!.cmd).toBe("C:\\H\\pn-onnx-venv\\Scripts\\python.exe");
+    expect(calls[0]!.args).toEqual([...torchArgs.slice(0, -1), "C:\\repo\\resources\\lid-model-onnx-fp32.json",
+      "--lid-backend", "onnx", "--lid-dir", "C:\\H\\lid-onnx\\m\\rev"]);
+  });
+  test("the runtime is resolved per plan call and never for non-plan synthesis", async () => {
+    let n = 0;
+    const { engine, calls } = build(() => { n++; return { backend: "torch", python: "torch-py", lidManifest: LID_MANIFEST_PATH }; });
+    await engine.synthesize!("plain", "es", "o.wav").exited;
+    expect(n).toBe(0);
+    expect(calls[0]!.cmd).toBe("kokoro-py");
+    expect(calls[0]!.args).not.toContain("--plan-json");
+    await engine.synthesizePlan!(plan, "o.wav").exited;
+    expect(n).toBe(1);
+  });
+  test("an onnx plan run passes the same bounded diagnostic validation as torch", async () => {
+    const diagnostics: string[] = [];
+    const runner = narrationRunner(c => diagnostics.push(c));
+    const code = `console.log(JSON.stringify({diagnostics:['local-model-integrity-failed']}));`;
+    expect(await runner(process.execPath, ["-e", code, "--", "--plan-json", "--lid-backend", "onnx", "--lid-dir", "C:\\x"], "{}").exited).toBe(0);
+    expect(diagnostics).toEqual(["local-model-integrity-failed"]);
   });
 });

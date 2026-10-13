@@ -8,6 +8,8 @@ import { DEFAULT_CONFIG, MAX_SPEED, MIN_SPEED, createConfigReader, kokoroLanguag
 import { wavEngine, type Runner } from "./piper-engine";
 import type { Engine } from "./speech-sink";
 import type { Language } from "./speech-text";
+import { LID_MANIFEST_PATH } from "./narration-assets";
+import { createNarrationRuntimeSource, type NarrationRuntime } from "./narration-runtime";
 
 export type KokoroPaths = {
   python: string;
@@ -19,6 +21,13 @@ export type KokoroPaths = {
 export type KokoroConfig = KokoroPaths & {
   script: string;
   appHome?: string;
+  narrationPython?: () => string | undefined;
+  lidManifest?: string;
+  /**
+   * Coherent interpreter/manifest/model-dir tuple for planned runs, resolved per plan call.
+   * When absent the legacy `narrationPython`/`lidManifest` pair is used unchanged.
+   */
+  narrationRuntime?: () => NarrationRuntime | undefined;
   /** Read on every utterance so voice and speed changes apply immediately. */
   settings?: () => KokoroSettings;
   run: Runner;
@@ -59,8 +68,9 @@ export function kokoroEngine(config: KokoroConfig): Engine {
       const live = config.settings?.() ?? config;
       const voice = live.voices[language];
       const speed = Number.isFinite(live.speed) && live.speed >= MIN_SPEED && live.speed <= MAX_SPEED ? live.speed : 1;
+      const runtime = plan ? config.narrationRuntime?.() : undefined;
       return {
-        cmd: config.python,
+        cmd: plan ? runtime?.python ?? config.narrationPython?.() ?? config.python : config.python,
         args: [
           config.script,
           "--model", config.modelPath,
@@ -69,7 +79,10 @@ export function kokoroEngine(config: KokoroConfig): Engine {
           "--lang", kokoroLanguageCode(voice),
           "--speed", String(speed),
           "--out", wav,
-          ...(plan ? ["--plan-json", ...(config.appHome ? ["--app-home", config.appHome] : [])] : []),
+          ...(plan ? ["--plan-json", ...(config.appHome ? ["--app-home", config.appHome] : []),
+            "--lid-manifest", runtime?.lidManifest ?? config.lidManifest ?? LID_MANIFEST_PATH,
+            ...(runtime?.backend === "onnx" && runtime.lidDirectory
+              ? ["--lid-backend", "onnx", "--lid-dir", runtime.lidDirectory] : [])] : []),
         ],
       };
     },
@@ -88,6 +101,7 @@ export function narrationRunner(onDiagnostic: (code: string) => void = () => {})
       ...process.env, PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8", PYTHONDONTWRITEBYTECODE: "1",
       HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1", HF_HUB_DISABLE_TELEMETRY: "1",
       HF_HUB_DISABLE_PROGRESS_BARS: "1", DO_NOT_TRACK: "1",
+      HF_HUB_DISABLE_IMPLICIT_TOKEN: "1", HF_TOKEN: "", HUGGING_FACE_HUB_TOKEN: "", PYTHONNOUSERSITE: "1",
     } });
     let output = "", oversized = false;
     child.stdout.on("data", (data: Buffer) => {
@@ -127,6 +141,10 @@ export function defaultKokoroEngine(
   if (!existsSync(script)) return undefined;
   return kokoroEngine({
     ...paths, script, appHome: root,
+    // One tuple per plan call: interpreter, manifest and model directory always match the backend.
+    narrationRuntime: createNarrationRuntimeSource({
+      root, backend: () => getConfig().narrationBackend, fallbackPython: paths.python, onDiagnostic,
+    }),
     // Environment variables stay as explicit overrides on top of the shared config file.
     settings: () => {
       const config = getConfig();
