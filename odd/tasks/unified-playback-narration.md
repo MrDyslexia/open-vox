@@ -2,7 +2,7 @@
 
 Preserve the delivered pronunciation-normalization (PN) pipeline while adding
 instance-scoped service On/Off and playback rates in small, coherent work units.
-Bootstrap and U01–U04 are complete; service runtime binding is pending. Next: **U05**.
+Bootstrap and U01–U05 are complete; PN service lifecycle is bound. Next: **U06**.
 
 ## Objective and authorization
 
@@ -16,8 +16,9 @@ Port only the missing behavior onto the exact PN delivery baseline instead.
   `odd/tasks/playback-controls.md` was allowed but unchanged in U01.
 - U02 completed protocol and explicit pause/resume dispatch without runtime binding.
 - U03 completed PN sink gates and promise preparation without runtime binding.
-- Current authorization: U04 state/lifecycle/withPause helpers in `src/plugin.ts`,
-  focused `test/wiring.test.ts` and task documents only; stop before U05 binding.
+- U04 completed state/lifecycle/wrapper helpers without actual-instance binding.
+- Current authorization: U05 PN binding in `src/plugin.ts`, `test/wiring.test.ts`
+  and task evidence only; no speed/UI work. Stop before U06.
 - No network, publication, PR edits, push, main merge, rebase, destructive reset,
   original checkout changes, host/config/environment changes, downloads, installs,
   package/lock writes, or writes through the dependency junction are authorized.
@@ -93,7 +94,7 @@ documentation, compress code, or claim an exception to meet the ceiling.
 | [x] U02 | Service wire and safe dispatch | 145–175 forecast; observed below | U01 |
 | [x] U03 | PN sink enabled checks at admission, post-plan, pump, status, Repeat | 195–240 forecast; observed below | U01–U02 |
 | [x] U04 | Enabled state / Off lifecycle wrapper; forward `stopSession` | 165–205 forecast; observed below | U03 |
-| [ ] U05 | Wire On/Off to actual PN instance; clear cache, cancel, combine counters | 300–375 | U01–U04 |
+| [x] U05 | Wire On/Off to actual PN instance; clear cache, cancel, combine counters | 300–375 forecast; observed below | U01–U04 |
 | [ ] U06 | Service UI confirmed state and TSX | 255–290 | U05 |
 | [ ] U07 | Closed rate wire: 1 / 1.5 / 2 and safe dispatch | 165–190 | U06 |
 | [ ] U08 | Existing-player rate regression tests only | 240–255 | U07 |
@@ -101,7 +102,7 @@ documentation, compress code, or claim an exception to meet the ceiling.
 | [ ] U10 | Confirmed rate UI | 280–310 | U09 |
 
 U09 is the hardest ceiling: preserve all necessary regression tests. Bootstrap
-contained no source materialization; U01–U04 are complete. U05–U10 remain open.
+contained no source materialization; U01–U05 are complete. U06–U10 remain open.
 
 ## Future routes and verification
 
@@ -165,7 +166,7 @@ record actual harness scenario/outcome or an explicit boundary-specific N/A.
 
 ## Next step
 
-Stop after U04. Next is U05 actual-instance On/Off binding and cache cancellation.
+Stop after U05. Next is U06 confirmed service UI state and TSX.
 Reconcile this tracker with full Engram mirror `odd/unified-playback-narration/tasks`
 in project `agentvoz`; preserve the 400-line closing guard for every later unit.
 
@@ -252,3 +253,29 @@ in project `agentvoz`; preserve the 400-line closing guard for every later unit.
 - Rollback boundary: U04 state/lifecycle/wrapper helpers, focused tests and evidence;
   preserve U01–U03, PN scoped cancellation and all bootstrap safeguards.
 - Observed A+D: production 41, tests 92, docs 35; total 168 <= 400. Commit SHA is in the U04 receipt.
+
+## U05 evidence
+
+- Prior boundary / U04 commit: `f97d195213559001528cdfabed7ed87a246ac421`.
+- Actual factory resolves cache capability before creating state, then shares one
+  enabled reader with PN sink, Repeat control and wrapper. Explicit On/Off actions
+  update state before owned stop/cache clear; transport remains available while Off.
+- PN plan generation, derived synthesis, language/voice/backend selection, async
+  post-plan validation and both scoped-stop wrapper paths remain intact. Only a
+  four-line preservation note was added to the current PN tracker, not a donor copy.
+- RED: `bun test test/wiring.test.ts test/speech-sink.test.ts test/audio-cache.test.ts`
+  produced 154 pass / 6 fail, 447 assertions, exit 1 (binding absent). Initial GREEN
+  was 160 pass / 0 fail, 479 assertions; final expanded checks yielded 162 pass /
+  0 fail, 489 assertions, exit 0. Typecheck and diff checks passed.
+- Silent actual-factory tests prove static capability, transport, state isolation
+  and no persistence. Temporary fixture environment is restored; factory caches
+  use the owned fixture root, never existing host caches. No player host starts.
+- Composed actual PN sink/cache/wire tests prove Off preparation/synthesis races,
+  late success rejection, frozen hold release, physical cache deletion, no stale
+  Repeat after On, short/long bounded plans and scoped cancellation/isolation.
+- Exact Repeat keeps file/revision/bytes with zero extra parser, fake plan-engine
+  dispatch or synthesis calls. Real resolver/model inference was not exercised;
+  no audibility, production model, host activation or full-suite claim is made.
+- Rollback boundary: U05 plugin binding, focused tests and task evidence only;
+  preserve U01–U04, authoritative PN source plan, defaults and bootstrap backups.
+- Observed A+D: production 20, tests 210, docs 43; total 273 <= 400. Commit SHA is in the U05 receipt.

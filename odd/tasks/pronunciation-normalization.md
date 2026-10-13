@@ -6,6 +6,10 @@ Locator: `odd/tasks/pronunciation-normalization.md`. Engram: project `agentvoz`,
 
 ## Where we are (2026-10-12)
 
+Local unification checkpoint (U05): per-instance service controls now bind to the
+delivered PN plan/cache lifecycle; deterministic fake-process checks do not renew
+live-host/model/quality acceptance. See `unified-playback-narration.md` for evidence.
+
 | Item | State |
 | --- | --- |
 | Commits (base `975b447`) | `db77b0b` I01 Markdown/policies/plan; `a7c9db9` I02 offline contextual resolver; `966a182` I03 fixed-voice bilingual Kokoro integration; `f43c3db` I04 isolated provisioning/doctor; `f3d9025`, `95d6faf` docs/validation; `3338f0a` fix: accept object-valued user summary metadata (SDK contract); `19e992c` fix: cancel narration only for events of its own session (`stopSession`); `3b7dd02` fix: adapt Spanish inverted punctuation. |

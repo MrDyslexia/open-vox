@@ -153,14 +153,16 @@ export function disableService(sink: SpeechSink, cache?: Pick<AudioStore, "clear
 const pauseSink = (sink: SpeechSink) => (sink.pause ? sink.pause() : sink.stop());
 
 export function createOpenVox(client: Client, directory: string, sink: SpeechSink,
-  pause: PauseState = createPauseState(() => pauseSink(sink), () => sink.resume?.()),
+  pause: PauseState = createPauseState(() => pauseSink(sink), () => sink.resume?.(), { onDisable: () => disableService(sink) }),
   controlOptions?: { publish: (command: string) => Promise<void>; instance?: string }): Hooks {
   const coordinator = createCoordinator(client, directory, sink);
   const control = controlOptions && createRepeatControl({ ...controlOptions,
-    status: () => sink.status?.(), isPaused: pause.isPaused,
+    status: () => sink.status?.(), isPaused: pause.isPaused, isEnabled: pause.isEnabled,
     control: (action) => {
       if (action === "pause") pause.setPaused(true);
       else if (action === "resume") pause.setPaused(false);
+      else if (action === "disable") pause.setEnabled(false);
+      else if (action === "enable") pause.setEnabled(true);
     },
     repeat: async (sessionID, revision, expires) => { await sink.repeat?.(sessionID, revision, expires); } });
   const seenUsers = new Set<string>();
@@ -290,7 +292,7 @@ export function createLiveSink(
   config: ConfigReader,
   log: (message: string) => void,
   enabled = envValue(env, "DISABLED") !== "1" && process.platform === "win32",
-  audio?: { cache: AudioStore; isPaused: () => boolean } & Pick<SpeechSinkOptions, "player" | "playbackTimeoutMs">,
+  audio?: { cache: AudioStore; isPaused: () => boolean } & Pick<SpeechSinkOptions, "player" | "playbackTimeoutMs" | "isEnabled">,
 ): SpeechSink {
   const diagnostic = (code: string) => log(`narration diagnostic: ${code}`);
   const factories: Factories = {
@@ -326,19 +328,19 @@ export const OpenVoxPlugin: Plugin = async ({ client, directory }) => {
   const log = debugLog(envValue(process.env, "LOG"));
   let enabled = envValue(process.env, "DISABLED") !== "1" && process.platform === "win32";
   const config = createConfigReader();
-  // Pause is per plugin instance and in memory (D1); the sink exists below, so its methods are resolved lazily.
-  // The pause edge freezes the active playback (real pause); the resume edge continues it.
-  const pause = createPauseState(() => pauseSink(sink), () => sink.resume?.());
-  const isPaused = pause.isPaused;
   let cache: AudioCache | undefined;
   if (enabled) {
     try { cache = new AudioCache(); }
     catch { enabled = false; log("audio cache unavailable; narration disabled"); }
   }
+  // Capability is settled before state creation. Off flags precede owned cancellation/cache invalidation.
+  const pause = createPauseState(() => pauseSink(sink), () => sink.resume?.(),
+    { capable: enabled, onDisable: () => disableService(sink, cache) });
+  const isPaused = pause.isPaused;
   // One persistent player host per plugin instance; it starts lazily on the first cached playback.
   const player = cache ? createPlayer({ log: (message) => log(message) }) : undefined;
   const sink = createLiveSink(process.env, config, log, enabled, cache && player
-    ? { cache, isPaused, player: (wav) => player.play(wav), playbackTimeoutMs: PLAYBACK_BACKSTOP_MS }
+    ? { cache, isPaused, isEnabled: pause.isEnabled, player: (wav) => player.play(wav), playbackTimeoutMs: PLAYBACK_BACKSTOP_MS }
     : undefined);
   log(`plugin ready enabled=${enabled}`);
   const logged = (async (selection: Selection) => {
@@ -365,7 +367,7 @@ export const OpenVoxPlugin: Plugin = async ({ client, directory }) => {
       },
     },
   } : (client as unknown as Client);
-  const hooks = createOpenVox(traced, directory, withPause(logged, isPaused), pause, {
+  const hooks = createOpenVox(traced, directory, withPause(logged, isPaused, pause.isEnabled), pause, {
     instance: cache?.instance,
     publish: async (command) => {
       const result = await client.tui.publish({ query: { directory },

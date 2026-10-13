@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { OpenVoxPlugin, chooseEngine, createLiveSink, createOpenVox, createPauseState, liveEngine, withPause } from "../src/plugin";
@@ -9,6 +9,9 @@ import { createConfigReader, DEFAULT_CONFIG } from "../src/config";
 import { createSpeechSink, type Engine, type SpeechProcess, type SpeechSink } from "../src/speech-sink";
 import { encodeCommand, decodeCommand } from "../src/repeat-control";
 import { fixture } from "./final-response.test";
+import { AudioCache } from "../src/audio-cache";
+import { wavBytes } from "./audio-cache.test";
+import { flattenNarrationPlan } from "../src/narration-plan";
 
 function fakeSink() {
   const spoken: string[] = [];
@@ -259,6 +262,20 @@ describe("open-vox wiring", () => {
 });
 
 describe("live sink player wiring", () => {
+  test("live PN sink uses the same dynamic enabled reader for status and cached Repeat", async () => {
+    let enabled = false;
+    const played: string[] = [];
+    const sink = createLiveSink({}, createConfigReader(() => DEFAULT_CONFIG, 0), () => {}, true,
+      { cache, isPaused: () => false, isEnabled: () => enabled, player: file => {
+        played.push(file); return { exited: Promise.resolve(0), kill() {} };
+      } });
+    expect(sink.status!()).toBeUndefined(); await sink.repeat!("ses_a", 1);
+    expect(played).toEqual([]);
+    enabled = true; await sink.repeat!("ses_a", 1);
+    expect(played).toEqual(["kept.wav"]);
+    await sink.dispose!();
+  });
+
   const cache = {
     candidate: () => "unused.wav", current: () => ({ file: "kept.wav", sessionID: "ses_a", revision: 1 }),
     promote: () => true, discard: () => {}, hold: () => () => {}, forget: () => {}, clear: () => {}, dispose: () => {},
@@ -505,18 +522,18 @@ describe("pause state", () => {
 });
 
 describe("pause", () => {
-  test("unbound service actions never resume a paused plugin or change its confirmed state", async () => {
+  test("bound service actions clear pause without resuming and On allows future work only", async () => {
     const a = instance("instance-a");
     await a.control("pause", "pause");
     for (const action of ["disable", "enable"]) {
       await a.control(action, action);
-      expect(a.pause.isPaused()).toBe(true);
+      expect(a.pause.isPaused()).toBe(false);
       expect([a.f.pauses(), a.f.resumes(), a.f.stops()]).toEqual([1, 0, 0]);
-      expect((await a.status())?.enabled).toBe(true);
+      expect((await a.status())?.enabled).toBe(action === "enable");
     }
     await a.control("resume", "resume");
     expect(a.pause.isPaused()).toBe(false);
-    expect(a.f.resumes()).toBe(1);
+    expect(a.f.resumes()).toBe(0);
     await a.hooks.dispose!();
   });
 
@@ -656,14 +673,17 @@ describe("pause", () => {
 });
 
 describe("plugin entry point", () => {
-  async function withPluginEnv<T>(configJson: string | undefined, run: (home: string) => Promise<T>): Promise<T> {
+  async function withPluginEnv<T>(configJson: string | undefined, run: (home: string) => Promise<T>, disabled = "1"): Promise<T> {
     const home = mkdtempSync(join(tmpdir(), "open-vox-p2-"));
-    const saved = { disabled: process.env.OPEN_VOX_DISABLED, home: process.env.OPEN_VOX_HOME };
+    const saved = { disabled: process.env.OPEN_VOX_DISABLED, home: process.env.OPEN_VOX_HOME,
+      temp: process.env.TEMP, tmp: process.env.TMP };
     if (configJson !== undefined) writeFileSync(join(home, "config.json"), configJson);
-    process.env.OPEN_VOX_DISABLED = "1"; process.env.OPEN_VOX_HOME = home;
+    process.env.OPEN_VOX_DISABLED = disabled; process.env.OPEN_VOX_HOME = home;
+    process.env.TEMP = home; process.env.TMP = home; // all cache housekeeping stays in this owned fixture
     try { return await run(home); }
     finally {
-      for (const [key, value] of [["OPEN_VOX_DISABLED", saved.disabled], ["OPEN_VOX_HOME", saved.home]] as const) {
+      for (const [key, value] of [["OPEN_VOX_DISABLED", saved.disabled], ["OPEN_VOX_HOME", saved.home],
+        ["TEMP", saved.temp], ["TMP", saved.tmp]] as const) {
         if (value === undefined) delete process.env[key]; else process.env[key] = value;
       }
       rmSync(home, { recursive: true, force: true });
@@ -713,5 +733,177 @@ describe("plugin entry point", () => {
       expect([(await a.status()).paused, (await b.status()).paused]).toEqual([true, false]);
       await a.hooks.dispose(); await b.hooks.dispose();
     });
+  });
+
+  test("static-disabled plugin stays Off but its attached transport still accepts On requests", async () => {
+    await withPluginEnv(undefined, async () => {
+      const p = await boot(), before = await p.status();
+      try {
+        expect(before.enabled).toBe(false);
+        await p.send({ kind: "control", instance: before.instance, sessionID: "ses_a",
+          requestID: "enable", action: "enable", expires: Date.now() + 1500 });
+        expect((await p.status()).enabled).toBe(false);
+      } finally { await p.hooks.dispose(); }
+    });
+  });
+
+  test.skipIf(process.platform !== "win32")("capable factory binds one memory state without persistence or another-instance cancellation", async () => {
+    await withPluginEnv(undefined, async home => {
+      expect(tmpdir()).toBe(home);
+      const a = await boot(), b = await boot(), sa = await a.status(), sb = await b.status();
+      try {
+        expect([sa.enabled, sb.enabled]).toEqual([true, true]);
+        const command = (action: string) => ({ kind: "control", instance: sa.instance, sessionID: "ses_a",
+          requestID: action, action, expires: Date.now() + 1500 });
+        await a.send(command("pause")); await a.send(command("disable")); await b.send(command("disable"));
+        expect(await a.status()).toMatchObject({ enabled: false, paused: false, revision: 0 });
+        expect((await b.status()).enabled).toBe(true);
+        await a.send(command("enable"));
+        expect(await a.status()).toMatchObject({ enabled: true, paused: false, revision: 0 });
+        expect(existsSync(join(home, "config.json"))).toBe(false);
+      } finally { await a.hooks.dispose(); await b.hooks.dispose(); }
+    }, "0");
+  });
+});
+
+/** Actual PN sink/cache and wire; only synthesis and player processes are fake. */
+function pnService(root: string) {
+  const cache = new AudioCache(root), plans: ReturnType<typeof createNarrationPlan>[] = [];
+  const played: Array<{ file: string; bytes: Buffer }> = [], replies: string[] = [];
+  const counts = { parses: 0, dispatches: 0, syntheses: 0 };
+  const mode = { prepare: false, synthesis: false, playback: false };
+  let prepared!: () => void;
+  const processes: Array<SpeechProcess & { finish(): void; killed: boolean; resumes: number }> = [];
+  const process = () => {
+    let finish!: (code: number) => void;
+    const p = { exited: new Promise<number>(r => { finish = r; }), killed: false, resumes: 0,
+      kill() { p.killed = true; finish(1); }, finish() { finish(0); },
+      pause: async () => true, resume: async () => { p.resumes++; return true; } };
+    processes.push(p); return p;
+  };
+  const state = createPauseState(() => sink.pause!(), () => sink.resume!(),
+    { onDisable: () => plugin.disableService(sink, cache) });
+  const engine: Engine = Object.assign(() => { throw new Error("legacy speech forbidden"); }, {
+    synthesizePlan(plan: ReturnType<typeof createNarrationPlan>, file: string) {
+      counts.dispatches++; counts.syntheses++; plans.push(plan); writeFileSync(file, wavBytes());
+      const p = process(); if (!mode.synthesis) p.finish(); return p;
+    },
+  });
+  const sink = createSpeechSink({ cache, engine, isPaused: state.isPaused, isEnabled: state.isEnabled,
+    preparePlan: (text, language, policy) => {
+      counts.parses++; const plan = createNarrationPlan(text, language, policy);
+      return mode.prepare ? new Promise<typeof plan>(r => { prepared = () => r(plan); }) : plan;
+    }, player: file => {
+      played.push({ file, bytes: readFileSync(file) });
+      const p = process(); if (!mode.playback) p.finish(); return p;
+    } });
+  const wrapped = withPause(sink, state.isPaused, state.isEnabled);
+  const hooks = createOpenVox(client, "/d", wrapped, state,
+    { instance: cache.instance, publish: async s => { replies.push(s); } });
+  let request = 0;
+  const send = (message: object) => hooks.event!({ event: { type: "tui.command.execute",
+    properties: { command: encodeCommand({ sessionID: "s", expires: Date.now() + 1500, ...message } as any) } } } as any);
+  const control = (action: string, target = cache.instance) => send({ kind: "control", instance: target, action, requestID: `r-${++request}` });
+  const status = async () => { await send({ kind: "hello", challenge: `c-${++request}` }); return decodeCommand(replies.at(-1))!; };
+  const repeat = (revision: number) => send({ kind: "repeat", instance: cache.instance, revision, requestID: `r-${++request}` });
+  const say = (text = "**API** Open editor.") => wrapped({ sessionID: "s", messageID: `m-${++request}`, text });
+  return { cache, state, sink, wrapped, hooks, counts, mode, processes, plans, played, say, control, status, repeat,
+    prepared: () => prepared(), close: () => hooks.dispose!() };
+}
+
+describe("PN service lifecycle", () => {
+  test("default createOpenVox state binds Off to owned stop and leaves transport live for On", async () => {
+    const f = fakeSink(), replies: string[] = [];
+    const hooks = createOpenVox(client, "/d", f.sink, undefined,
+      { instance: "default", publish: async s => { replies.push(s); } });
+    const send = (action: string) => hooks.event!({ event: { type: "tui.command.execute", properties: {
+      command: encodeCommand({ kind: "control", instance: "default", sessionID: "s", requestID: action,
+        action, expires: Date.now() + 1500 } as any) } } } as any);
+    try {
+      await send("disable"); expect(f.stops()).toBe(1);
+      await hooks.event!({ event: { type: "tui.command.execute", properties: { command: encodeCommand({
+        kind: "hello", challenge: "off", sessionID: "s", expires: Date.now() + 1500 }) } } } as any);
+      expect(decodeCommand(replies.at(-1))?.enabled).toBe(false);
+      await send("enable"); expect(f.resumes()).toBe(0); expect(f.stops()).toBe(1);
+    } finally { await hooks.dispose!(); }
+  });
+
+  test("Off cancels pending PN preparation and late synthesis, clears eligibility, and On cannot resurrect them", async () => {
+    const root = mkdtempSync(join(tmpdir(), "open-vox-u05-")), h = pnService(root);
+    try {
+      h.mode.prepare = true; const pending = h.say();
+      await h.control("disable"); await h.say("Off admission must not parse.");
+      expect(h.counts.parses).toBe(1);
+      await h.control("enable"); h.prepared(); await pending;
+      expect(h.counts.syntheses).toBe(0);
+      h.mode.prepare = false; h.mode.synthesis = true;
+      const active = h.say(), queued = h.say("Queued PN work.");
+      const p = h.processes[0]!; p.kill = () => { p.killed = true; };
+      await h.control("disable"); const off = await h.status();
+      await h.control("enable"); p.finish();
+      await Bun.sleep(0); h.sink.stop(); await Promise.all([active, queued]);
+      expect(off).toMatchObject({ enabled: false, paused: false, revision: 0 });
+      expect(p.killed).toBe(true); expect(h.cache.current()).toBeUndefined();
+      expect(h.counts.syntheses).toBe(1); expect(h.played).toEqual([]);
+      h.mode.synthesis = false; await h.say();
+      expect(h.counts.syntheses).toBe(2);
+    } finally { await h.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("frozen playback Off releases its file, preserves another instance and permits new bounded PN plans only", async () => {
+    const root = mkdtempSync(join(tmpdir(), "open-vox-u05-")), a = pnService(root), b = pnService(root);
+    try {
+      await b.say(); const other = b.cache.current()!;
+      a.mode.playback = true; const active = a.say(); await Bun.sleep(0);
+      const old = a.cache.current()!, playback = a.processes.at(-1)!;
+      await a.control("pause"); await Bun.sleep(0);
+      await a.control("disable"); await b.control("disable", a.cache.instance);
+      const cancelled = playback.killed; a.sink.stop(); await active;
+      expect(existsSync(old.file)).toBe(false); expect(cancelled).toBe(true);
+      expect(await a.status()).toMatchObject({ enabled: false, paused: false, revision: 0 });
+      expect(b.cache.current()).toEqual(other); expect((await b.status()).enabled).toBe(true);
+      await a.control("enable"); await a.repeat(old.revision);
+      expect(a.played).toHaveLength(1); expect(playback.resumes).toBe(0);
+      a.mode.playback = false;
+      for (const text of ["**API** Open editor.", "Open editor API. ".repeat(400)]) {
+        await a.say(text); const plan = a.plans.at(-1)!;
+        expect(plan.original).toBe(text); expect(plan.defaultLanguage).toBe("es");
+        expect(flattenNarrationPlan(plan).length).toBeLessThanOrEqual(4000);
+      }
+      expect(a.cache.current()!.revision).toBeGreaterThan(old.revision);
+    } finally { await a.close(); await b.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("Repeat reuses exact owned file/revision/bytes with zero additional parser or fake plan-engine calls", async () => {
+    const root = mkdtempSync(join(tmpdir(), "open-vox-u05-")), h = pnService(root);
+    try {
+      await h.say(); const audio = h.cache.current()!, before = { ...h.counts };
+      await h.repeat(audio.revision);
+      expect(h.counts).toEqual(before); expect(h.cache.current()).toEqual(audio);
+      expect(h.played).toEqual([{ file: audio.file, bytes: wavBytes() }, { file: audio.file, bytes: wavBytes() }]);
+      await h.control("disable"); await h.control("enable"); await h.repeat(audio.revision);
+      expect(h.played).toHaveLength(2); expect(h.cache.current()).toBeUndefined();
+      expect(h.counts).toEqual(before);
+    } finally { await h.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("bound PN instance retains scoped session cancellation and ignores another session's error/update", async () => {
+    const root = mkdtempSync(join(tmpdir(), "open-vox-u05-")), h = pnService(root);
+    try {
+      h.mode.synthesis = true; const active = h.say();
+      const p = h.processes[0]!;
+      const event = (value: any) => h.hooks.event!({ event: value });
+      await event({ type: "session.error", properties: { sessionID: "other" } });
+      await event({ ...user("other-user", 1), properties: { info: { ...user("other-user", 1).properties.info, sessionID: "other" } } });
+      expect(p.killed).toBe(false);
+      await event({ type: "session.error", properties: { sessionID: "s" } }); await active;
+      expect(p.killed).toBe(true); expect(h.cache.current()).toBeUndefined();
+      const next = h.say(), nextProc = h.processes.at(-1)!;
+      const ownUser = { ...user("own-user", 2), properties: { info: { ...user("own-user", 2).properties.info, sessionID: "s" } } };
+      await event(ownUser); await next; expect(nextProc.killed).toBe(true);
+      const after = h.say(), afterProc = h.processes.at(-1)!;
+      await event(ownUser); expect(afterProc.killed).toBe(false);
+      afterProc.finish(); await after;
+    } finally { await h.close(); rmSync(root, { recursive: true, force: true }); }
   });
 });
