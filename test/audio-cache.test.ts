@@ -36,6 +36,119 @@ test("one valid audio is retained; handles defer replacement/deletion and bad ca
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+const retain = (cache: AudioCache, sessionID = "s") => {
+  const file = cache.candidate(); writeFileSync(file, wavBytes());
+  expect(cache.promote(file, sessionID)).toBe(true);
+  return cache.current()!;
+};
+
+test("clear retires held audio until every holder releases and keeps revisions monotonic", () => {
+  const root = mkdtempSync(join(tmpdir(), "open-vox-test-"));
+  try {
+    const cache = new AudioCache(root);
+    const first = retain(cache);
+    const releaseA = cache.hold(first.file), releaseB = cache.hold(first.file);
+    cache.clear();
+    expect(cache.current()).toBeUndefined();
+    expect(() => cache.hold(first.file)).toThrow();
+    expect(cache.promote(first.file, "s")).toBe(false);
+    releaseA(); releaseA();
+    expect(existsSync(first.file)).toBe(true);
+    releaseB();
+    expect(existsSync(first.file)).toBe(false);
+    cache.clear(); cache.clear();
+    const next = retain(cache);
+    expect(next.revision).toBeGreaterThan(first.revision);
+    cache.clear();
+    expect(existsSync(next.file)).toBe(false);
+    expect(existsSync(join(cache.directory, "owner.json"))).toBe(true);
+    cache.dispose();
+    expect(existsSync(cache.directory)).toBe(false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("clear invalidates held and idle candidates without exhausting future candidate slots", () => {
+  const root = mkdtempSync(join(tmpdir(), "open-vox-test-"));
+  try {
+    const cache = new AudioCache(root);
+    const running = cache.candidate(), idle = cache.candidate();
+    writeFileSync(running, wavBytes()); writeFileSync(idle, wavBytes());
+    const release = cache.hold(running);
+    cache.clear();
+    expect(existsSync(idle)).toBe(false);
+    expect(existsSync(running)).toBe(true);
+    expect(cache.promote(running, "s")).toBe(false);
+    expect(cache.promote(idle, "s")).toBe(false);
+    expect(cache.current()).toBeUndefined();
+    release();
+    expect(existsSync(running)).toBe(false);
+    for (let i = 0; i < 4; i++) { const file = cache.candidate(); cache.discard(file); }
+    expect(retain(cache).file).toBe(cache.current()!.file);
+    cache.dispose();
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("clear preserves another instance and foreign files even inside its own directory", () => {
+  const root = mkdtempSync(join(tmpdir(), "open-vox-test-"));
+  try {
+    const mine = new AudioCache(root), other = new AudioCache(root);
+    const first = retain(mine), second = retain(other);
+    const foreign = join(mine.directory, "00000000-0000-0000-0000-000000000000.wav");
+    writeFileSync(foreign, wavBytes());
+    mine.clear();
+    expect(existsSync(first.file)).toBe(false);
+    expect(other.current()).toEqual(second);
+    expect(readFileSync(second.file)).toEqual(wavBytes());
+    expect(readFileSync(foreign)).toEqual(wavBytes());
+    expect(existsSync(join(other.directory, "owner.json"))).toBe(true);
+    mine.dispose(); other.dispose();
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("clear handles vanished or non-file artifacts and retains forget/dispose semantics", () => {
+  const root = mkdtempSync(join(tmpdir(), "open-vox-test-"));
+  try {
+    const cache = new AudioCache(root);
+    cache.clear();
+    const gone = retain(cache); rmSync(gone.file);
+    expect(() => cache.clear()).not.toThrow();
+    for (let i = 0; i < 4; i++) { const file = cache.candidate(); cache.discard(file); }
+    const odd = retain(cache); rmSync(odd.file); mkdirSync(odd.file);
+    expect(() => cache.clear()).not.toThrow();
+    expect(cache.current()).toBeUndefined();
+    expect(existsSync(odd.file)).toBe(true);
+    expect(cache.promote(odd.file, "s")).toBe(false);
+    const kept = retain(cache);
+    cache.forget("other"); expect(cache.current()).toEqual(kept);
+    cache.forget("s"); expect(cache.current()).toBeUndefined();
+    const last = retain(cache), release = cache.hold(last.file);
+    cache.dispose(); cache.clear();
+    expect(existsSync(last.file)).toBe(true);
+    release(); expect(existsSync(last.file)).toBe(false);
+    expect(existsSync(odd.file)).toBe(true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("clearing retained audio makes Repeat unavailable without synthesis or playback", async () => {
+  const root = mkdtempSync(join(tmpdir(), "open-vox-test-"));
+  try {
+    const cache = new AudioCache(root);
+    const retained = retain(cache);
+    let syntheses = 0, plays = 0;
+    const engine: Engine = Object.assign(() => { throw new Error("legacy path forbidden"); }, {
+      synthesize() { syntheses++; throw new Error("Repeat must not synthesize"); },
+    });
+    const sink = createSpeechSink({ cache, engine, player: () => {
+      plays++; return { exited: Promise.resolve(0), kill() {} };
+    } });
+    cache.clear();
+    await sink.repeat!("s", retained.revision);
+    expect(cache.current()).toBeUndefined();
+    expect(syntheses).toBe(0); expect(plays).toBe(0);
+    await sink.dispose!();
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("cleanup removes only confirmed-dead owned caches, preserving live, unknown and foreign content", () => {
   const root = mkdtempSync(join(tmpdir(), "open-vox-test-"));
   try {

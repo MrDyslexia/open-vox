@@ -164,7 +164,15 @@ An old `paused` entry in `config.json` is ignored and dropped on the next write.
 ## Sidebar block
 
 `open-vox install` adds a small **open-vox** block to the OpenCode sidebar with
-three buttons:
+an instance-local service icon and four buttons across two rows:
+
+- **Service On/Off**: the title icon shows confirmed On (green), Off (red), or
+  unconfirmed (neutral and not clickable). Off cancels this instance's work,
+  clears Pause without resuming and deletes retained WAV audio after holds release.
+  On permits new narration only; it restores neither discarded audio nor position.
+  Pause/Repeat are unavailable while Off; Voice remains available. State is held
+  in memory, not shared config. A statically unavailable instance cannot be enabled.
+  Playback-rate preference is separate from this service control and synthesis speed.
 
 - **Pause / Resume**: freezes the narration that is playing (same audio, same
   position) and **Resume** continues it from there, without synthesizing again.
@@ -178,10 +186,18 @@ three buttons:
 - **Voice**: opens a list of voices; picking one changes the voice for that
   language immediately.
 - **Repeat**: restarts the last successfully generated audio from the beginning,
-  using the same WAV bytes without synthesizing again. Later voice, speed or engine
-  changes affect new narration, not Repeat. It is disabled while paused, without
+  using the same WAV bytes without synthesizing again. Later voice, synthesis speed
+  or engine changes affect new narration, not Repeat. It is disabled while paused, without
   audio for the displayed session, or when instance discovery is missing/ambiguous.
   Pause stays usable in those last two cases, as long as the plugin answered.
+- **Playback rate**: the second-row button cycles **1.0x → 1.5x → 2.0x → 1.0x**
+  from the confirmed instance preference. Unconfirmed state shows **Speed**;
+  clicks never advance the label optimistically. It is disabled while Off or
+  unconfirmed, but remains available while paused. The rate affects current and
+  later playback, including Repeat, without rebuilding PN plans or WAV audio.
+  It starts at 1x per instance, survives Off/On and is never written to shared config.
+  The label confirms stored preference, not audible application: missing host
+  acknowledgment or SoundPlayer fallback can leave playback at its original rate.
 
 Each server plugin instance retains only one last audio, owned by its session.
 Switching sessions or inactivity keeps it; another session cannot replay it, and
