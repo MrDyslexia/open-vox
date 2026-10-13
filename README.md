@@ -28,6 +28,7 @@ no restart, even while OpenCode is running.
 | `open-vox uninstall` | Remove both (settings and downloaded voices are kept) |
 | `open-vox setup kokoro\|piper` | Download a local neural voice engine |
 | `open-vox setup narration` | Explicitly prepare pinned contextual ES/EN detection in a separate CPU environment |
+| `open-vox setup narration-onnx --lid-source <dir>` | Explicitly provision the inactive standalone ONNX FP32 detector from a local model directory (does not activate it) |
 | `open-vox doctor` / `status` | Check the installation / show current settings |
 | `open-vox voices` | List the voices (`*` marks the current ones) |
 | `open-vox voice <id>` | Change the voice, e.g. `voice em_alex`, `voice bm_george` |
@@ -76,6 +77,31 @@ invalid existing files are preserved and reported, never silently overwritten.
 Only owned staging files are cleaned. A failed setup has no new readiness record.
 For an integrity error, inspect the reported managed directory manually before
 retrying; do not uninstall or alter your existing Kokoro environment.
+
+### Standalone ONNX detector (explicit, local source, inactive)
+
+```powershell
+open-vox setup narration-onnx --lid-source <reference-assets>
+open-vox doctor
+```
+
+This separate path provisions the ONNX FP32 export of the same detector without
+torch or transformers. `--lid-source` is required: a local directory holding
+`model.onnx` (about **709 MB**) and `tokenizer/*`. Nothing is downloaded for the
+model; every file is verified by size and sha256 against
+[`resources/lid-model-onnx-fp32.json`](resources/lid-model-onnx-fp32.json), staged,
+re-verified and published exclusively under `<app-home>\lid-onnx\...`. Only five
+pinned packages (`kokoro-onnx`, `onnxruntime`, `soundfile`, `numpy`, `tokenizers`)
+are installed from anonymous PyPI, binary wheels only, into
+`<app-home>\pn-onnx-venv`. The Torch environment (`pn-venv`), its model directory,
+`kokoro-venv` and their markers are never touched. A missing or invalid source
+fails with nothing written; the readiness record is written last.
+
+This command does **not** activate the ONNX backend: narration still uses the
+Torch detector. Selecting the backend is a separate, later step. `open-vox doctor`
+shows a separate informational "Contextual narration (ONNX)" line; an environment
+that was never provisioned is reported as `INFO ... not provisioned` and never
+makes doctor fail.
 
 Doctor hashes local files and probes pinned imports/versions without loading model
 weights. An `OK` contextual line means those checks passed, not listening or LID

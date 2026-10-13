@@ -240,3 +240,37 @@ export function copyOnnxModelFromSource(
     deps.publish(partial, dest);
   } finally { deps.remove(partial); }
 }
+
+export type OnnxReadiness = { ready: boolean; code: string };
+/**
+ * Read-only readiness for the ONNX environment. Ordered like the Torch `inspectNarration`:
+ * environment, marker, files, structure+hashes, then the dependency probe. It never
+ * loads model weights and never creates, repairs or deletes anything.
+ */
+export async function inspectNarrationOnnx(home: string, deps: {
+  exists: (path: string) => boolean;
+  read: (path: string) => string;
+  fingerprint: (path: string) => Fingerprint;
+  validateDirectory: (directory: string) => void;
+  probe: (python: string, expectedVenv: string) => Promise<number>;
+  assertPath?: (path: string) => void;
+}): Promise<OnnxReadiness> {
+  const paths = narrationOnnxPaths(home);
+  if (!deps.exists(paths.python) || !deps.exists(paths.marker)) return { ready: false, code: "missing-managed-environment" };
+  if (!resolveNarrationOnnxPython(home, deps.exists, deps.read, deps.assertPath)) return { ready: false, code: "invalid-managed-environment" };
+  if (!ONNX_MANIFEST.files.every(file => deps.exists(win32.join(paths.model, ...file.filename.split("/"))))) {
+    return { ready: false, code: "missing-local-assets" };
+  }
+  try {
+    deps.validateDirectory(paths.model);
+    for (const file of ONNX_MANIFEST.files) {
+      if (!matches(deps.fingerprint(win32.join(paths.model, ...file.filename.split("/"))), file)) {
+        return { ready: false, code: "local-model-integrity-failed" };
+      }
+    }
+  } catch { return { ready: false, code: "local-model-integrity-failed" }; }
+  try {
+    if (await deps.probe(paths.python, paths.venv) !== 0) return { ready: false, code: "missing-or-incompatible-dependencies" };
+  } catch { return { ready: false, code: "missing-or-incompatible-dependencies" }; }
+  return { ready: true, code: "verified-local-assets-and-dependencies" };
+}

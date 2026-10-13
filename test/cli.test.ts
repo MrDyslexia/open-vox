@@ -281,3 +281,56 @@ describe("data folder migration", () => {
     expect(h.out.join("\n")).toMatch(/Removed the old agentvoz/);
   });
 });
+
+describe("ONNX narration provisioning and doctor", () => {
+  test("help documents the explicit local-source command and that it does not activate the backend", async () => {
+    const help = (await run(["help"])).h.out.join("\n");
+    expect(help).toContain("setup narration-onnx --lid-source <dir>");
+    expect(help).toMatch(/does not activate|not activate/i);
+  });
+  test("setup narration-onnx forwards the source and keeps the existing targets unchanged", async () => {
+    const seen: unknown[][] = [];
+    const h = harness({ setup: async (...a: unknown[]) => { seen.push(a); } });
+    expect(await runCli(["setup", "narration-onnx", "--lid-source", "D:\\models\\lid"], h.deps)).toBe(0);
+    expect(seen).toEqual([["narration-onnx", { lidSource: "D:\\models\\lid" }]]);
+    seen.length = 0;
+    expect(await runCli(["setup", "narration"], h.deps)).toBe(0);
+    expect(seen).toEqual([["narration"]]);
+  });
+  test.each([
+    [["setup", "narration-onnx"]],
+    [["setup", "narration-onnx", "--lid-source"]],
+    [["setup", "narration-onnx", "--lid-source", "--other"]],
+    [["setup", "narration-onnx", "D:\\x"]],
+    [["setup", "narration-onnx", "--lid-source", "D:\\x", "extra"]],
+    [["setup", "narration", "--lid-source", "D:\\x"]],
+  ])("%j is a usage error that provisions nothing", async argv => {
+    let called = 0;
+    const h = harness({ setup: async () => { called++; } });
+    expect(await runCli(argv, h.deps)).toBe(2);
+    expect(called).toBe(0);
+    expect(h.err.join("\n")).toContain("Usage: open-vox setup");
+  });
+  test("doctor reports an absent ONNX environment as informational and keeps exit 0", async () => {
+    const h = harness({ exists: () => true, narrationStatus: async () => ({ ready: true, code: "verified-local-assets-and-dependencies" }),
+      narrationOnnxStatus: async () => ({ ready: false, code: "missing-managed-environment" }) });
+    h.deps.installFs.write("C:\\cfg\\plugins\\open-vox.js", "x");
+    const code = await runCli(["doctor"], h.deps);
+    expect(h.out.join("\n")).toMatch(/INFO Contextual narration \(ONNX\): not provisioned/);
+    expect(h.out.join("\n")).not.toMatch(/WARN.*ONNX|FAIL.*ONNX/);
+    expect(code).toBe(h.out.some(l => l.startsWith("FAIL")) ? 1 : 0);
+    const without = harness({ exists: () => true });
+    await runCli(["doctor"], without.deps);
+    expect(without.out.join("\n")).not.toContain("ONNX");
+  });
+  test("doctor ONNX failures are WARN and never FAIL; ready is OK and says inactive", async () => {
+    const make = (status: { ready: boolean; code: string }) => harness({ exists: () => true, narrationOnnxStatus: async () => status });
+    const bad = make({ ready: false, code: "local-model-integrity-failed" });
+    const withBad = await runCli(["doctor"], bad.deps);
+    expect(bad.out.join("\n")).toMatch(/WARN Contextual narration \(ONNX\): degraded: local-model-integrity-failed/);
+    const ok = make({ ready: true, code: "verified-local-assets-and-dependencies" });
+    const withOk = await runCli(["doctor"], ok.deps);
+    expect(ok.out.join("\n")).toMatch(/OK\s+Contextual narration \(ONNX\): verified local assets\/dependencies.*not selected/);
+    expect(withBad).toBe(withOk);
+  });
+});
