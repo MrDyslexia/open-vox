@@ -28,9 +28,27 @@ type State = {
   blocked: boolean;
 };
 
-export function createCoordinator(client: Client, directory: string, sink: Sink = async () => {}) {
+type CoordinatorOptions = {
+  isPaused?: () => boolean;
+  isEnabled?: () => boolean;
+  /** Runs when affected sessions lose their current work; `sessionID` is undefined for unscoped errors. */
+  onInvalidate?: (sessionID?: string, deleted?: boolean) => void;
+};
+
+export function createCoordinator(client: Client, directory: string, sink: Sink = async () => {}, options: CoordinatorOptions = {}) {
   const sessions = new Map<string, State>();
   let disposed = false;
+  // One validated latest completed response is retained while paused (never a backlog).
+  let epoch = 0, sequence = 0;
+  let resumedThrough = 0;
+  let latest: { completed: number; sequence: number } | undefined;
+  let pending: { selection: Selection; current: () => boolean } | undefined;
+  const enabled = () => options.isEnabled?.() ?? true;
+  const clearPending = () => { epoch++; pending = undefined; latest = undefined; resumedThrough = 0; };
+  const cancel = (sessionID?: string, deleted = false) => {
+    if (sessionID === undefined || pending?.selection.sessionID === sessionID) pending = undefined;
+    try { options.onInvalidate?.(sessionID, deleted); } catch {}
+  };
   const invalidate = (state: State) => {
     state.generation++;
     state.turn = undefined;
@@ -45,6 +63,7 @@ export function createCoordinator(client: Client, directory: string, sink: Sink 
           const state = sessions.get(event.properties.sessionID);
           if (state) invalidate(state);
         }
+        cancel(event.properties.sessionID);
         return;
       }
       if (event.type === "session.deleted" || event.type === "message.removed") {
@@ -54,6 +73,7 @@ export function createCoordinator(client: Client, directory: string, sink: Sink 
           invalidate(state);
           if (event.type === "session.deleted") state.blocked = true;
         }
+        cancel(id, event.type === "session.deleted");
         return;
       }
       if (event.type !== "message.updated") return;
@@ -72,6 +92,7 @@ export function createCoordinator(client: Client, directory: string, sink: Sink 
         }
         if (state.blocked || state.users.has(info.id) || info.time.created <= state.created) return;
         invalidate(state);
+        cancel(info.sessionID);
         if (state.users.size >= 64) { state.blocked = true; return; }
         state.users.add(info.id);
         state.turn = info.id;
@@ -79,13 +100,17 @@ export function createCoordinator(client: Client, directory: string, sink: Sink 
         return;
       }
       if (info.role !== "assistant" || !state || state.blocked) return;
-      if (info.error !== undefined) { invalidate(state); return; }
+      if (info.error !== undefined) { invalidate(state); cancel(info.sessionID); return; }
       if (!state.turn || info.parentID !== state.turn || info.finish !== "stop" ||
           !Number.isFinite(info.time?.completed) || state.claimed.has(info.id)) return;
       if (state.claimed.size >= 256) { invalidate(state); state.blocked = true; return; }
       state.claimed.add(info.id); // Claim synchronously, before the first await.
+      if (!enabled()) return;
+      const order = { completed: info.time.completed!, sequence: ++sequence };
+      const pausedAtClaim = options.isPaused?.() ?? false;
+      const serviceEpoch = epoch;
       const generation = state.generation;
-      const current = () => !disposed && !state!.blocked && state!.generation === generation;
+      const current = () => !disposed && enabled() && epoch === serviceEpoch && !state!.blocked && state!.generation === generation;
       const session = await client.session.get({ path: { id: info.sessionID }, query: { directory } });
       if (!current() || session.error !== undefined || !session.data) return;
       const response = await client.session.message({ path: { id: info.sessionID, messageID: info.id }, query: { directory } });
@@ -96,14 +121,32 @@ export function createCoordinator(client: Client, directory: string, sink: Sink 
       if (!current() || parent.error !== undefined || !parent.data ||
           parent.data.info.id !== state.turn || parent.data.info.time.created !== state.created) return;
       const selection = selectFinalResponse(session.data, response.data, parent.data);
-      if (selection && current()) await sink(selection);
+      if (!selection || !current()) return;
+      // Completion time, then synchronous claim order: fetch latency never defines freshness.
+      // Keep the watermark after consumption so an older paused fetch cannot resurrect on Resume.
+      const paused = options.isPaused?.() ?? false;
+      if ((pausedAtClaim || paused || order.sequence <= resumedThrough) && latest && (order.completed < latest.completed ||
+          (order.completed === latest.completed && order.sequence < latest.sequence))) return;
+      if (!latest || order.completed > latest.completed ||
+          (order.completed === latest.completed && order.sequence > latest.sequence)) latest = order;
+      if (paused) pending = { selection, current };
+      else await sink(selection);
     } catch {
       // Claimed messages remain claimed after failures; there is no automatic retry.
     }
   };
   return {
     event,
-    dispose: () => { disposed = true; sessions.clear(); },
+    /** Consumes the retained paused response once; undefined when none is valid. */
+    takePending: () => {
+      const retained = pending;
+      pending = undefined;
+      if (!retained?.current()) return;
+      resumedThrough = sequence;
+      return retained.selection;
+    },
+    clearPending,
+    dispose: () => { disposed = true; clearPending(); sessions.clear(); },
   };
 }
 
@@ -167,52 +210,54 @@ const pauseSink = (sink: SpeechSink) => (sink.pause ? sink.pause() : sink.stop()
 export function createOpenVox(client: Client, directory: string, sink: SpeechSink,
   pause: PauseState = createPauseState(() => pauseSink(sink), () => sink.resume?.(), { onDisable: () => disableService(sink) }),
   controlOptions?: { publish: (command: string) => Promise<void>; instance?: string }): Hooks {
-  const coordinator = createCoordinator(client, directory, sink);
+  const coordinator = createCoordinator(client, directory, sink, {
+    isPaused: pause.isPaused, isEnabled: pause.isEnabled,
+    onInvalidate: (sessionID, deleted) => {
+      if (deleted && sessionID !== undefined) sink.removeSession?.(sessionID);
+      else if (sessionID !== undefined && sink.stopSession) sink.stopSession(sessionID);
+      else sink.stop();
+    },
+  });
   const control = controlOptions && createRepeatControl({ ...controlOptions,
     status: () => sink.status?.(), isPaused: pause.isPaused, isEnabled: pause.isEnabled,
     getPlaybackSpeed: pause.getPlaybackSpeed,
     control: (action) => {
       const speed = speedOfAction(action);
       if (speed !== undefined) pause.setPlaybackSpeed(speed);
+      else if (action === "resume" && pause.isPaused()) {
+        const retained = coordinator.takePending();
+        // Discard frozen ownership before the resume edge: even a pending pause ack cannot thaw it.
+        if (retained) {
+          try { sink.stop(); } catch { return; }
+        }
+        pause.setPaused(false);
+        if (retained && pause.isEnabled()) {
+          try { void sink(retained).catch(() => {}); } catch {}
+        }
+      }
       else if (action === "pause") pause.setPaused(true);
       else if (action === "resume") pause.setPaused(false);
-      else if (action === "disable") pause.setEnabled(false);
+      else if (action === "disable") {
+        if (pause.isEnabled()) coordinator.clearPending();
+        pause.setEnabled(false);
+      }
       else if (action === "enable") pause.setEnabled(true);
     },
     repeat: async (sessionID, revision, expires) => { await sink.repeat?.(sessionID, revision, expires); } });
-  const seenUsers = new Set<string>();
   let disposed = false;
   const event: NonNullable<Hooks["event"]> = async (input) => {
     if (disposed) return;
     if (input.event.type === "tui.command.execute" && await control?.handle(input.event.properties.command)) return;
-    try {
-      // A NEW user turn or a session error makes any current narration stale.
-      // The host repeats updates for the same user message; those must not cancel speech.
-      const { event } = input;
-      // Only events of the narrated session cancel it; an error without a session id stays global.
-      const stopFor = (sessionID: string | undefined) =>
-        sessionID !== undefined && sink.stopSession ? sink.stopSession(sessionID) : sink.stop();
-      if (event.type === "session.error") stopFor(event.properties.sessionID);
-      else if (event.type === "session.deleted") sink.removeSession?.(event.properties.info.id);
-      else if (event.type === "message.updated" && event.properties.info?.role === "user") {
-        const id = event.properties.info.id;
-        if (!seenUsers.has(id)) {
-          if (seenUsers.size >= 1024) seenUsers.clear();
-          seenUsers.add(id);
-          stopFor(event.properties.info.sessionID);
-        }
-      }
-    } catch {}
     await coordinator.event(input);
   };
   return { event, dispose: async () => {
     if (disposed) return;
-    disposed = true; control?.dispose(); coordinator.dispose(); seenUsers.clear();
+    disposed = true; control?.dispose(); coordinator.dispose();
     try { sink.stop(); } finally { await sink.dispose?.(); }
   } };
 }
 
-/** Gate narration/status/Repeat; lifecycle methods retain their original forwarding. */
+/** Admission guard below coordinator retention; lifecycle methods retain their original forwarding. */
 export function withPause(sink: SpeechSink, isPaused: () => boolean, isEnabled: () => boolean = () => true): SpeechSink {
   const wrapped = (async (selection: Selection) => {
     if (isPaused() || !isEnabled()) return;

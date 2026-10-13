@@ -2,7 +2,7 @@ import { describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { OpenVoxPlugin, chooseEngine, createLiveSink, createOpenVox, createPauseState, liveEngine, withPause } from "../src/plugin";
+import { OpenVoxPlugin, chooseEngine, createLiveSink, createOpenVox, createPauseState, disableService, liveEngine, withPause } from "../src/plugin";
 import * as plugin from "../src/plugin";
 import { createNarrationPlan } from "../src/markdown-narration";
 import { createConfigReader, DEFAULT_CONFIG } from "../src/config";
@@ -15,6 +15,7 @@ import { flattenNarrationPlan } from "../src/narration-plan";
 import { createPlayer, type Player, type HostProcess } from "../src/player";
 import * as playerModule from "../src/player";
 import { kokoroEngine } from "../src/kokoro-engine";
+import type { Client } from "../src/plugin";
 
 function fakeSink() {
   const spoken: string[] = [];
@@ -27,6 +28,193 @@ function fakeSink() {
 }
 const client = { session: { get: async () => ({ error: "x" }), message: async () => ({ error: "x" }) } } as any;
 const user = (id: string, created: number) => ({ type: "message.updated", properties: { info: { id, sessionID: "ses_a", role: "user", time: { created } } } }) as any;
+
+/** Valid SDK responses and fake audio only; no process, synthesis or host transport. */
+function latestResponseHarness(injected = false, nonce = "latest", capable = true) {
+  const f = fakeSink();
+  const fixtures = [fixture("ses_a", "u", "a"), fixture("ses_a", "u", "b"), fixture("ses_b", "v", "c")];
+  fixtures.forEach((value, index) => {
+    if (value.response.info.role === "assistant") value.response.info.time.completed = 3 + index;
+    Object.assign(value.response.parts[0]!, { text: value.response.info.id });
+  });
+  const sdk: Client = { session: {
+    get: async ({ path }) => ({ data: fixtures.find(value => value.session.id === path.id)?.session }),
+    message: async ({ path }) => ({ data: fixtures.find(value => value.response.info.id === path.messageID)?.response ??
+      fixtures.find(value => value.parent.info.id === path.messageID)?.parent }),
+  } };
+  const order: string[] = [], cancelled: string[] = [];
+  const stop = f.sink.stop;
+  f.sink.stop = () => { order.push("stop"); stop(); };
+  f.sink.stopSession = (id) => { cancelled.push(id); };
+  f.sink.removeSession = (id) => { cancelled.push(`delete:${id}`); };
+  let failNarration = false;
+  const record = (async (selection) => {
+    order.push(`speak:${selection.messageID}`);
+    if (failNarration) throw new Error("fake synthesis failed");
+    await f.sink(selection);
+  }) as SpeechSink;
+  Object.assign(record, { stop: f.sink.stop, pause: f.sink.pause, resume: f.sink.resume,
+    stopSession: f.sink.stopSession, removeSession: f.sink.removeSession });
+  const state = createPauseState(() => sink.pause?.(), () => sink.resume?.(),
+    { onDisable: () => disableService(sink), capable });
+  const sink = withPause(record, state.isPaused, state.isEnabled);
+  const hooks = createOpenVox(sdk, "local", injected ? sink : record, injected ? state : undefined,
+    { instance: nonce, publish: async () => {} });
+  let request = 0;
+  const control = (action: string, target = nonce) => hooks.event!({ event: { type: "tui.command.execute", properties: {
+    command: encodeCommand({ kind: "control", instance: target, sessionID: "ses_a", requestID: `r-${++request}`,
+      action, expires: Date.now() + 1500 } as any),
+  } } } as any);
+  const updated = (info: typeof fixtures[number]["response"]["info"]) => hooks.event!({ event: { type: "message.updated", properties: { info } } });
+  const observe = () => Promise.all([updated(fixtures[0]!.parent.info), updated(fixtures[2]!.parent.info)]);
+  return { ...f, fixtures, sdk, hooks, control, updated, observe, order, cancelled,
+    failNarration: () => { failNarration = true; } };
+}
+
+describe("latest completed response during Pause", () => {
+  test.each([false, true])("Resume consumes only B once without thawing A (injected state=%s)", async injected => {
+    const h = latestResponseHarness(injected);
+    await h.observe(); await h.control("pause");
+    await h.updated(h.fixtures[0]!.response.info); await h.updated(h.fixtures[1]!.response.info);
+    expect(h.spoken).toEqual([]);
+    h.order.length = 0;
+    await h.control("resume"); await h.control("resume");
+    await h.updated(h.fixtures[1]!.response.info);
+    expect(h.spoken).toEqual(["b"]);
+    expect(h.order).toEqual(["stop", "speak:b"]);
+    await h.hooks.dispose!();
+  });
+
+  test.each([ ["session", true], ["response", true], ["parent", true],
+    ["session", false], ["response", false], ["parent", false] ] as const)(
+    "reversed %s fetch cannot resurrect older A after Resume (paused at claim=%s)", async (phase, pausedAtClaim) => {
+    const h = latestResponseHarness();
+    let release!: () => void, reached!: () => void;
+    const wait = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { reached = resolve; });
+    if (phase === "session") {
+      const get = h.sdk.session.get; let first = true;
+      h.sdk.session.get = async input => { if (first) { first = false; reached(); await wait; } return get(input); };
+    } else {
+      const message = h.sdk.session.message; let first = true;
+      h.sdk.session.message = async input => {
+        if (first && input.path.messageID === (phase === "response" ? "a" : "u")) { first = false; reached(); await wait; }
+        return message(input);
+      };
+    }
+    await h.observe(); if (pausedAtClaim) await h.control("pause");
+    const older = h.updated(h.fixtures[0]!.response.info); await started;
+    if (!pausedAtClaim) await h.control("pause");
+    await h.updated(h.fixtures[1]!.response.info); await h.control("resume");
+    release(); await older;
+    await h.control("pause"); await h.control("resume");
+    expect(h.spoken).toEqual(["b"]);
+    await h.hooks.dispose!();
+  });
+
+  test("completion time orders reversed events; equal times use synchronous claim order", async () => {
+    const h = latestResponseHarness();
+    await h.observe(); await h.control("pause");
+    await h.updated(h.fixtures[1]!.response.info); await h.updated(h.fixtures[0]!.response.info);
+    await h.control("resume");
+    expect(h.spoken).toEqual(["b"]);
+    const tie = latestResponseHarness();
+    const tied = tie.fixtures[1]!.response.info;
+    if (tied.role === "assistant") tied.time.completed = 3;
+    await tie.observe(); await tie.control("pause");
+    await tie.updated(tie.fixtures[0]!.response.info); await tie.updated(tie.fixtures[1]!.response.info);
+    await tie.control("resume");
+    expect(tie.spoken).toEqual(["b"]);
+    await h.hooks.dispose!(); await tie.hooks.dispose!();
+  });
+
+  const invalidation = (kind: string, h: ReturnType<typeof latestResponseHarness>) => {
+    if (kind === "turn") return h.updated({ ...h.fixtures[0]!.parent.info, id: "new", time: { created: 8 } });
+    if (kind === "off") return h.control("disable");
+    if (kind === "dispose") return h.hooks.dispose!();
+    const event = kind === "deleted" ? { type: "session.deleted", properties: { info: h.fixtures[0]!.session } } :
+      kind === "removed" ? { type: "message.removed", properties: { sessionID: "ses_a", messageID: "a" } } :
+      kind === "assistant-error" ? { type: "message.updated", properties: { info: { ...h.fixtures[0]!.response.info,
+        error: { name: "MessageAbortedError", data: { message: "Aborted" } } } } } :
+      { type: "session.error", properties: kind === "unscoped-error" ? {} : { sessionID: "ses_a" } };
+    return h.hooks.event!({ event } as any);
+  };
+  test.each(["turn", "error", "unscoped-error", "deleted", "removed", "assistant-error", "off", "dispose"])(
+    "%s clears retained text and invalidates an older delayed fetch", async kind => {
+      const h = latestResponseHarness(true);
+      let release!: () => void;
+      const wait = new Promise<void>(resolve => { release = resolve; });
+      const get = h.sdk.session.get; let first = true;
+      h.sdk.session.get = async input => { if (first) { first = false; await wait; } return get(input); };
+      await h.observe(); await h.control("pause");
+      const late = h.updated(h.fixtures[0]!.response.info);
+      await h.updated(h.fixtures[1]!.response.info);
+      await invalidation(kind, h); await h.control("enable");
+      release(); await late; await h.control("resume");
+      await h.control("pause"); await h.control("resume");
+      expect(h.spoken).toEqual([]);
+      await h.hooks.dispose!();
+    });
+
+  test("stale or duplicate user updates do not clear a valid retained response or stop audio", async () => {
+    const h = latestResponseHarness();
+    await h.observe(); await h.control("pause"); await h.updated(h.fixtures[1]!.response.info);
+    h.order.length = 0; h.cancelled.length = 0;
+    await h.updated(h.fixtures[0]!.parent.info);
+    await h.updated({ ...h.fixtures[0]!.parent.info, id: "stale", time: { created: 0 } });
+    expect(h.order).toEqual([]); expect(h.cancelled).toEqual([]);
+    await h.control("resume"); expect(h.spoken).toEqual(["b"]);
+    await h.hooks.dispose!();
+  });
+
+  test.each(["turn", "error", "deleted", "removed", "assistant-error"])("%s in session A preserves retained session B", async kind => {
+    const h = latestResponseHarness();
+    await h.observe(); await h.control("pause"); await h.updated(h.fixtures[2]!.response.info);
+    await invalidation(kind, h); await h.control("resume");
+    expect(h.spoken).toEqual(["c"]);
+    expect(h.cancelled).toContain(kind === "deleted" ? "delete:ses_a" : "ses_a");
+    await h.hooks.dispose!();
+  });
+
+  test("two instances do not consume each other's latest slot", async () => {
+    const a = latestResponseHarness(false, "instance-a"), b = latestResponseHarness(false, "instance-b");
+    await a.observe(); await b.observe(); await a.control("pause"); await b.control("pause");
+    await a.updated(a.fixtures[0]!.response.info); await b.updated(b.fixtures[1]!.response.info);
+    await a.control("resume", "instance-a"); await b.control("resume", "instance-a");
+    expect([a.spoken, b.spoken]).toEqual([["a"], []]);
+    await b.control("resume"); expect(b.spoken).toEqual(["b"]);
+    await a.hooks.dispose!(); await b.hooks.dispose!();
+  });
+
+  test.each(["partial", "tool", "rejected", "fetch-error"])("%s does not replace a validated retained response", async kind => {
+    const h = latestResponseHarness();
+    await h.observe(); await h.control("pause"); await h.updated(h.fixtures[0]!.response.info);
+    const next = h.fixtures[1]!;
+    if (kind === "partial" && next.response.info.role === "assistant") next.response.info.time.completed = undefined;
+    if (kind === "tool") next.response.parts = [{ ...next.response.parts[0]!, type: "tool" } as any];
+    if (kind === "rejected") Object.assign(next.response.info, { summary: true });
+    if (kind === "fetch-error") h.sdk.session.get = async () => ({ error: "unavailable" });
+    await h.updated(next.response.info); await h.control("resume");
+    expect(h.spoken).toEqual(["a"]);
+    await h.hooks.dispose!();
+  });
+
+  test("disabled and incapable instances retain nothing, and sink failures are contained without retry", async () => {
+    for (const capable of [true, false]) {
+      const h = latestResponseHarness(true, "latest", capable);
+      await h.observe(); await h.control("disable"); await h.updated(h.fixtures[0]!.response.info);
+      await h.control("enable"); await h.control("pause"); await h.control("resume");
+      expect(h.spoken).toEqual([]); await h.hooks.dispose!();
+    }
+    const h = latestResponseHarness();
+    await h.observe(); await h.control("pause"); await h.updated(h.fixtures[0]!.response.info);
+    h.failNarration();
+    await expect(h.control("resume")).resolves.toBeUndefined();
+    await h.control("resume"); expect(h.spoken).toEqual([]);
+    expect(h.order.filter(value => value === "speak:a")).toHaveLength(1);
+    await h.hooks.dispose!();
+  });
+});
 
 describe("SDK user summary metadata through the plugin factory", () => {
   function narration() {

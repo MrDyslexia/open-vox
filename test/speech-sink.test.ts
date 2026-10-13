@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { createSpeechSink, sapiEngine, playWav, type SpeechProcess, type Spawn } from "../src/speech-sink";
 import { createNarrationPlan } from "../src/markdown-narration";
+import { createOpenVox, createPauseState, withPause, type Client } from "../src/plugin";
+import { encodeCommand } from "../src/repeat-control";
+import { fixture } from "./final-response.test";
 
 type Fake = SpeechProcess & { stdin: string; killed: boolean; finish(code?: number): void; fail(error: Error): void };
 
@@ -636,6 +639,77 @@ describe("real pause and resume", () => {
     expect(parses).toBe(2);
     playback.finish(); await narration;
     expect(h.holds.get("wav-1")).toBe(0);
+    await h.sink.dispose();
+  });
+
+  test.each([false, true])("replacement stops frozen audio before synthesis, including pending pause ack=%s", async pendingAck => {
+    const h = pauseHarness();
+    const { narration, playback } = await h.startPlayback();
+    let acknowledge!: (value: boolean) => void;
+    if (pendingAck) playback.pauseOutcome = new Promise<boolean>(resolve => { acknowledge = resolve; });
+    const response = fixture("other", "user", "latest");
+    Object.assign(response.response.parts[0]!, { text: "Latest completed response." });
+    const client: Client = { session: {
+      get: async () => ({ data: response.session }),
+      message: async ({ path }) => ({ data: path.messageID === "user" ? response.parent : response.response }),
+    } };
+    const state = createPauseState(() => h.setPaused(true), () => h.setPaused(false));
+    const hooks = createOpenVox(client, "local", withPause(h.sink, state.isPaused), state,
+      { instance: "replacement", publish: async () => {} });
+    const control = (action: "pause" | "resume") => hooks.event!({ event: { type: "tui.command.execute", properties: {
+      command: encodeCommand({ kind: "control", instance: "replacement", sessionID: "other", requestID: action,
+        action, expires: Date.now() + 1500 }),
+    } } });
+    await hooks.event!({ event: { type: "message.updated", properties: { info: response.parent.info } } });
+    await control("pause"); await tick();
+    await hooks.event!({ event: { type: "message.updated", properties: { info: response.response.info } } });
+    expect(h.base.procs).toHaveLength(1); // Retention must not synthesize while paused.
+    await control("resume");
+    await tick();
+    if (pendingAck) acknowledge(true);
+    await tick();
+    expect(playback.killed).toBe(true);
+    expect(playback.resumes).toBe(0);
+    expect(h.holds.get("wav-1")).toBe(0);
+    expect(h.base.procs[1]!.stdin).toBe("Latest completed response.");
+    h.base.procs[1]!.finish(); await tick();
+    expect(h.sink.status()).toEqual({ sessionID: "other", revision: 2 });
+    await h.sink.repeat("s", 1);            // Old session cannot take ownership of the new cache.
+    expect(h.players).toHaveLength(2);
+    h.players[1]!.finish(); await narration; await tick();
+    expect([...h.holds.values()].every(value => value === 0)).toBe(true);
+    expect(h.errors).toEqual([]);
+    await hooks.dispose!();
+  });
+
+  test("session cancellation preserves cached Repeat and unrelated frozen audio", async () => {
+    const h = pauseHarness();
+    const { narration, playback } = await h.startPlayback();
+    h.setPaused(true); await tick();
+    h.sink.stopSession("other");
+    expect(playback.killed).toBe(false);
+    h.sink.stopSession("s"); await narration;
+    expect(playback.killed).toBe(true);
+    expect(h.holds.get("wav-1")).toBe(0);
+    expect(h.sink.status()).toEqual({ sessionID: "s", revision: 1 });
+    h.setPaused(false);
+    const repeat = h.sink.repeat("s", 1); await tick();
+    expect(h.base.procs).toHaveLength(1);
+    h.players[1]!.finish(); await repeat;
+    await h.sink.dispose();
+  });
+
+  test("scoped cancellation preserves another session's queued narration", async () => {
+    const h = pauseHarness();
+    const first = h.sink(item("old", "Old session synthesis."));
+    const other = h.sink({ sessionID: "other", messageID: "new", text: "Other session narration." });
+    h.sink.stopSession("s"); await first; await tick();
+    expect(h.base.procs[0]!.killed).toBe(true);
+    expect(h.base.procs[1]!.stdin).toBe("Other session narration.");
+    h.base.procs[1]!.finish(); await tick();
+    expect(h.sink.status()?.sessionID).toBe("other");
+    h.players[0]!.finish(); await other;
+    expect([...h.holds.values()].every(value => value === 0)).toBe(true);
     await h.sink.dispose();
   });
 

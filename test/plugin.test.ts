@@ -171,3 +171,34 @@ test("state limits fail closed rather than replaying evicted turns", async () =>
   await turns.coordinator.event({ event: updated(fixture("s", "user-64").response.info) });
   expect(turns.calls).toEqual([]);
 });
+
+test("paused coordinator keeps one validated selection, claims duplicates and consumes once", async () => {
+  const h = harness();
+  const coordinator = createCoordinator(h.client, "local", async value => { h.output.push(value); },
+    { isPaused: () => true });
+  for (const f of h.fixtures) await coordinator.event({ event: updated(f.parent.info) });
+  for (const f of h.fixtures) await coordinator.event({ event: updated(f.response.info) });
+  await coordinator.event({ event: updated(h.fixtures[1]!.response.info) });
+  expect(h.output).toEqual([]);
+  expect(coordinator.takePending()).toEqual({ sessionID: "t", messageID: "b", text: "Answer" });
+  expect(coordinator.takePending()).toBeUndefined();
+  expect(h.calls).toHaveLength(6);
+  coordinator.dispose();
+});
+
+test("service epoch invalidates paused fetches without requiring a new user turn", async () => {
+  const h = harness();
+  let release!: () => void;
+  const wait = new Promise<void>(resolve => { release = resolve; });
+  const get = h.client.session.get;
+  h.client.session.get = async input => { await wait; return get(input); };
+  const coordinator = createCoordinator(h.client, "local", async value => { h.output.push(value); },
+    { isPaused: () => true });
+  await coordinator.event({ event: updated(h.fixtures[0]!.parent.info) });
+  const late = coordinator.event({ event: updated(h.fixtures[0]!.response.info) });
+  coordinator.clearPending();
+  release(); await late;
+  expect(coordinator.takePending()).toBeUndefined();
+  expect(h.output).toEqual([]);
+  coordinator.dispose();
+});

@@ -175,7 +175,10 @@ an instance-local service icon and four buttons across two rows:
   Playback-rate preference is separate from this service control and synthesis speed.
 
 - **Pause / Resume**: freezes the narration that is playing (same audio, same
-  position) and **Resume** continues it from there, without synthesizing again.
+  position). While paused, only the latest valid completed response is retained,
+  without synthesis or playback. **Resume** narrates it once, discarding obsolete
+  frozen audio before starting. If no new response exists, Resume continues valid
+  frozen audio from the same position, without synthesizing again.
   Pause also clears the queue and mutes new narrations for **this OpenCode instance
   only**. A narration that is still being synthesized has no audio to hold yet, so
   it is cancelled. If the player cannot pause (the one-shot fallback player, or a
@@ -204,11 +207,14 @@ Switching sessions or inactivity keeps it; another session cannot replay it, and
 returning to the owner session enables Repeat until a successful new generation
 replaces it. Failed/cancelled/invalid generation keeps the prior audio. Pause keeps
 the paused playback (and its audio file) until Resume or until it is discarded: a new
-user turn, a session error, deleting the owner session or disposing the plugin
-stops it, and the instance then stays paused until Resume. Resume with nothing
-paused only unmutes future narration. Cached audio does not survive a plugin
+user turn, a session error, message removal, an assistant error, deleting the owner
+session or disposing the plugin invalidates affected work, including retained text,
+and the instance stays paused until Resume. Off clears all pending text as well.
+Resume with neither retained text nor valid frozen audio only unmutes future
+narration. Cached audio does not survive a plugin
 restart. Deleting the owner session or disposing the plugin removes owned audio
-after player handles close. Resume does not replay a request received while paused.
+after player handles close. Repeat requests received while paused remain rejected;
+they are not retained completed responses.
 
 Repeat and Pause use correlated, metadata-only `tui.command.execute` events sent
 through the attached SDK client's `tui.publish`. Instance nonce, session, request
