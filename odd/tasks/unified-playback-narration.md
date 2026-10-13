@@ -2,7 +2,7 @@
 
 Preserve the delivered pronunciation-normalization (PN) pipeline while adding
 instance-scoped service On/Off and playback rates in small, coherent work units.
-Bootstrap and U01–U02 are complete; service runtime binding is pending. Next: **U03**.
+Bootstrap and U01–U03 are complete; service runtime binding is pending. Next: **U04**.
 
 ## Objective and authorization
 
@@ -14,9 +14,9 @@ Port only the missing behavior onto the exact PN delivery baseline instead.
 - U01 edits: `src/audio-cache.ts`, `test/audio-cache.test.ts`, compatible cache
   mocks in `test/speech-sink.test.ts` and `test/wiring.test.ts`, and this tracker.
   `odd/tasks/playback-controls.md` was allowed but unchanged in U01.
-- Current authorization: U02 protocol in `src/repeat-control.ts`, explicit pause/
-  resume dispatch only in `src/plugin.ts`, focused repeat-control/wiring tests and
-  task documents. No speed or service runtime binding; stop before U03.
+- U02 completed protocol and explicit pause/resume dispatch without runtime binding.
+- Current authorization: U03 in `src/speech-sink.ts`, `test/speech-sink.test.ts`
+  and task documents only. Preserve PN preparation/generation; stop before U04.
 - No network, publication, PR edits, push, main merge, rebase, destructive reset,
   original checkout changes, host/config/environment changes, downloads, installs,
   package/lock writes, or writes through the dependency junction are authorized.
@@ -90,7 +90,7 @@ documentation, compress code, or claim an exception to meet the ceiling.
 |---|---|---|---|
 | [x] U01 | Cache clear/invalidation and compatible mocks | 170–195 forecast; observed below | baseline |
 | [x] U02 | Service wire and safe dispatch | 145–175 forecast; observed below | U01 |
-| [ ] U03 | PN sink enabled checks at admission, post-plan, pump, status, Repeat | 195–240 | U01–U02 |
+| [x] U03 | PN sink enabled checks at admission, post-plan, pump, status, Repeat | 195–240 forecast; observed below | U01–U02 |
 | [ ] U04 | Enabled state / Off lifecycle wrapper; forward `stopSession` | 165–205 | U03 |
 | [ ] U05 | Wire On/Off to actual PN instance; clear cache, cancel, combine counters | 300–375 | U01–U04 |
 | [ ] U06 | Service UI confirmed state and TSX | 255–290 | U05 |
@@ -100,7 +100,7 @@ documentation, compress code, or claim an exception to meet the ceiling.
 | [ ] U10 | Confirmed rate UI | 280–310 | U09 |
 
 U09 is the hardest ceiling: preserve all necessary regression tests. Bootstrap
-contained no source materialization; U01–U02 are complete. U03–U10 remain open.
+contained no source materialization; U01–U03 are complete. U04–U10 remain open.
 
 ## Future routes and verification
 
@@ -164,7 +164,7 @@ record actual harness scenario/outcome or an explicit boundary-specific N/A.
 
 ## Next step
 
-Stop after U02. Next is U03 PN sink enabled checks under the parent-directed plan.
+Stop after U03. Next is U04 instance enabled state / Off lifecycle wrapper.
 Reconcile this tracker with full Engram mirror `odd/unified-playback-narration/tasks`
 in project `agentvoz`; preserve the 400-line closing guard for every later unit.
 
@@ -205,3 +205,27 @@ in project `agentvoz`; preserve the 400-line closing guard for every later unit.
 - Rollback boundary: U02 protocol, plugin dispatch callback, its focused tests and
   task evidence only. PN source-plan/stopSession/generation paths remain unchanged.
 - Observed A+D: production 19, tests 95, docs 31; total 145 <= 400. Commit SHA is in the U02 receipt.
+
+## U03 evidence
+
+- Prior boundary / U02 commit: `f4a2d6c278c62b2c606a6d9dce847dfc6e47507c`.
+- Optional `isEnabled` defaults true and combines with static `enabled`. Off gates
+  admission before parsing, PN post-preparation, pump validity, pause/resume,
+  status and Repeat. Observed Off stops work and invalidates its generation.
+- PN preparation now accepts a plan or promise without delaying the synchronous
+  path. Existing plan, language, policy, session stop and promotion checks remain.
+- Active processes observe the predicate every 20 ms, including frozen playback;
+  the observation timer ends with the process. Re-enabling never revives cancelled
+  work. A false pulse entirely between observations is not observable; later Off
+  lifecycle wiring supplies explicit cancellation. Cache clearing remains U05.
+- RED: `bun test test/speech-sink.test.ts` yielded 48 pass / 6 fail, 143 assertions,
+  exit 1 (missing gate/promise support; queued-work regression timed out at 5 s).
+- Initial GREEN: 54 pass / 0 fail, 161 assertions. Final expanded race/error
+  coverage: 56 pass / 0 fail, 169 assertions, exit 0 with the same command.
+- `bun run typecheck` and `git diff --check` passed. Deterministic harness proves
+  async preparation races, late successful cancellation, queue invalidation,
+  frozen hold release, protected cache retention and new-work-only execution.
+  Real audio/host proof is N/A; no full suite, service binding or plugin edits.
+- Rollback boundary: U03 sink gate/promise preparation, focused tests and evidence;
+  retain U01/U02, PN source plan/scoped cancellation and bootstrap backup refs.
+- Observed A+D: production 37, tests 126, docs 38; total 201 <= 400. Commit SHA is in the U03 receipt.
