@@ -413,6 +413,21 @@ describe("pause state", () => {
 });
 
 describe("pause", () => {
+  test("unbound service actions never resume a paused plugin or change its confirmed state", async () => {
+    const a = instance("instance-a");
+    await a.control("pause", "pause");
+    for (const action of ["disable", "enable"]) {
+      await a.control(action, action);
+      expect(a.pause.isPaused()).toBe(true);
+      expect([a.f.pauses(), a.f.resumes(), a.f.stops()]).toEqual([1, 0, 0]);
+      expect((await a.status())?.enabled).toBe(true);
+    }
+    await a.control("resume", "resume");
+    expect(a.pause.isPaused()).toBe(false);
+    expect(a.f.resumes()).toBe(1);
+    await a.hooks.dispose!();
+  });
+
   test("a pause control pauses the sink once without stopping it; resume resumes it once; host events do not repeat either", async () => {
     const a = instance("instance-a");
     expect((await a.status())?.paused).toBe(false);

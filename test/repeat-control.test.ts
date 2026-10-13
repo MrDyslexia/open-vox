@@ -79,7 +79,7 @@ test("a control action is applied once and the next status reply reflects it", a
   expect(h.applied).toEqual(["pause", "resume"]);
   expect((await h.hello())?.paused).toBe(false);
   expect(Object.keys(await h.hello() as object).sort())
-    .toEqual(["challenge", "expires", "instance", "kind", "paused", "revision", "sessionID"]);
+    .toEqual(["challenge", "enabled", "expires", "instance", "kind", "paused", "revision", "sessionID"]);
   h.c.dispose();
 });
 
@@ -152,4 +152,82 @@ test("two instances with the same session remain targeted, and request history i
   }
   expect(a).toBe(64); expect(b).toBe(0);
   first.dispose(); second.dispose();
+});
+
+test("service actions validate request identity and reject aliases or unsupported rate actions", () => {
+  for (const action of ["enable", "disable"] as const) {
+    expect(decodeCommand(controlCommand(action))?.action).toBe(action);
+    for (const extra of [{ requestID: "bad id" }, { instance: undefined }, { expires: 1.5 }])
+      expect(decodeCommand(controlCommand(action, extra))).toBeUndefined();
+  }
+  for (const action of ["on", "off", "ENABLE", "disable ", "rate", "setRate"])
+    expect(decodeCommand(controlCommand(action))).toBeUndefined();
+});
+
+test("status decodes confirmed enabled state and defaults old messages to enabled", () => {
+  const status = (extra = {}) => encodeCommand({ kind: "status", challenge: "nonce-a",
+    instance: "instance-a", sessionID: "s", revision: 2, paused: false, expires: 2000, ...extra });
+  expect(decodeCommand(status())?.enabled).toBe(true);
+  for (const enabled of [true, false])
+    expect(decodeCommand(status({ enabled }))).toMatchObject({ enabled, challenge: "nonce-a" });
+  for (const enabled of [null, 0, 1, "false", {}, []])
+    expect(decodeCommand(status({ enabled }))).toBeUndefined();
+});
+
+test("hello reports actual enabled state with correlated nonce and compatible default", async () => {
+  let enabled = false;
+  const replies: string[] = [];
+  const base = { instance: "instance-a", now: () => 1000, status: () => undefined,
+    isPaused: () => false, repeat: async () => {}, publish: async (s: string) => { replies.push(s); } };
+  const c = createRepeatControl({ ...base, isEnabled: () => enabled });
+  const hello = encodeCommand({ kind: "hello", challenge: "nonce-a", sessionID: "s", expires: 2000 });
+  await c.handle(hello);
+  expect(decodeCommand(replies.at(-1))).toMatchObject({ enabled: false, challenge: "nonce-a", instance: "instance-a", revision: 0 });
+  enabled = true; await c.handle(hello);
+  expect(decodeCommand(replies.at(-1))?.enabled).toBe(true);
+  const plain = createRepeatControl(base);
+  await plain.handle(hello);
+  expect(decodeCommand(replies.at(-1))?.enabled).toBe(true);
+  c.dispose(); plain.dispose();
+});
+
+test("service controls retain instance/TTL/replay bounds and consume handler failures", async () => {
+  const applied: string[] = [];
+  let fail: "sync" | "async" | undefined;
+  const c = createRepeatControl({ instance: "instance-a", now: () => 1000, status: () => undefined,
+    isPaused: () => false, repeat: async () => {}, publish: async () => {}, control: (action) => {
+      applied.push(action);
+      if (fail === "sync") throw new Error("sync failure");
+      if (fail === "async") return Promise.reject(new Error("async failure"));
+    } });
+  for (const extra of [{ instance: "instance-b" }, { expires: 1000 }, { expires: 3001 }])
+    await c.handle(controlCommand("disable", extra));
+  expect(applied).toEqual([]);
+  fail = "sync"; await c.handle(controlCommand("disable", { requestID: "d1" }));
+  fail = "async"; await c.handle(controlCommand("enable", { requestID: "e1" }));
+  fail = undefined;
+  await c.handle(controlCommand("disable", { requestID: "d1" }));
+  await c.handle(controlCommand("enable", { requestID: "e1" }));
+  expect(applied).toEqual(["disable", "enable"]);
+  for (let i = 0; i < 70; i++) await c.handle(controlCommand("enable", { requestID: `bulk-${i}` }));
+  expect(applied).toHaveLength(64);
+  c.dispose(); await c.handle(controlCommand("disable", { requestID: "disposed" }));
+  expect(applied).toHaveLength(64);
+});
+
+test("disabled Repeat is consumed, not deferred, and shares history with service controls", async () => {
+  let enabled = false, repeats = 0;
+  const c = createRepeatControl({ instance: "instance-a", now: () => 1000,
+    status: () => ({ sessionID: "s", revision: 3 }), isPaused: () => false, isEnabled: () => enabled,
+    repeat: async () => { repeats++; }, control: (action) => { enabled = action === "enable"; }, publish: async () => {} });
+  const repeat = (requestID: string) => encodeCommand({ kind: "repeat", instance: "instance-a",
+    sessionID: "s", revision: 3, requestID, expires: 2000 });
+  await c.handle(repeat("off"));
+  await c.handle(controlCommand("enable", { requestID: "enable" }));
+  await c.handle(repeat("off"));
+  await c.handle(repeat("enable"));
+  expect(repeats).toBe(0);
+  await c.handle(repeat("fresh"));
+  expect(repeats).toBe(1);
+  c.dispose();
 });

@@ -4,7 +4,7 @@ export const REPEAT_PREFIX = "open-vox.repeat.v1:";
 export const CONTROL_TTL = 2000;
 export type AudioStatus = { sessionID: string; revision: number };
 /** Runtime actions a TUI may request. New actions are added here and nowhere else in the wire format. */
-export const CONTROL_ACTIONS = ["pause", "resume"] as const;
+export const CONTROL_ACTIONS = ["pause", "resume", "disable", "enable"] as const;
 export type ControlAction = (typeof CONTROL_ACTIONS)[number];
 export type ControlMessage = {
   kind: "hello" | "status" | "repeat" | "control";
@@ -14,6 +14,8 @@ export type ControlMessage = {
   instance?: string;
   revision?: number;
   paused?: boolean;
+  /** Confirmed instance state; absent in older status messages means enabled. */
+  enabled?: boolean;
   requestID?: string;
   action?: ControlAction;
 };
@@ -31,7 +33,10 @@ export function decodeCommand(command: unknown): ControlMessage | undefined {
     // Control requests carry no audio revision: they act on the instance, not on retained audio.
     if (m.kind === "control" && id(m.requestID) && action(m.action)) return m;
     if (!Number.isSafeInteger(m.revision) || m.revision < 0) return;
-    if (m.kind === "status" && id(m.challenge) && typeof m.paused === "boolean") return m;
+    if (m.kind === "status" && id(m.challenge) && typeof m.paused === "boolean") {
+      if (m.enabled !== undefined && typeof m.enabled !== "boolean") return;
+      return { ...m, enabled: m.enabled ?? true };
+    }
     if (m.kind === "repeat" && id(m.requestID)) return m;
   } catch {}
 }
@@ -42,6 +47,7 @@ export function createRepeatControl(options: {
   now?: () => number;
   status: () => AudioStatus | undefined;
   isPaused: () => boolean;
+  isEnabled?: () => boolean;
   /** Applies a validated control action to the instance state; failures stay inside the host hook. */
   control?: (action: ControlAction) => void | Promise<void>;
   repeat: (sessionID: string, revision: number, expires: number) => Promise<void>;
@@ -71,12 +77,12 @@ export function createRepeatControl(options: {
           try {
             await options.publish(encodeCommand({ kind: "status", challenge: m.challenge, instance,
               sessionID: m.sessionID, revision: status?.sessionID === m.sessionID ? status.revision : 0,
-              paused: options.isPaused(), expires: m.expires }));
+              paused: options.isPaused(), enabled: options.isEnabled?.() ?? true, expires: m.expires }));
           } finally { publishing = false; }
         } else if (m.kind === "repeat" && m.instance === instance) {
           if (!consume(m.requestID!, m.expires, time)) return true; // Paused/stale requests are consumed, never deferred.
           const status = options.status();
-          if (!options.isPaused() && status?.sessionID === m.sessionID && status.revision === m.revision)
+          if (!options.isPaused() && (options.isEnabled?.() ?? true) && status?.sessionID === m.sessionID && status.revision === m.revision)
             await options.repeat(m.sessionID, m.revision!, m.expires);
         } else if (m.kind === "control" && m.instance === instance) {
           // The request is consumed before it runs, so a failing handler is never retried by a replay.

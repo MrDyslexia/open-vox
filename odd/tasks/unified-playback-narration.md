@@ -2,7 +2,7 @@
 
 Preserve the delivered pronunciation-normalization (PN) pipeline while adding
 instance-scoped service On/Off and playback rates in small, coherent work units.
-Bootstrap safeguards are complete; U01 adds cache invalidation only. Next: **U02**.
+Bootstrap and U01–U02 are complete; service runtime binding is pending. Next: **U03**.
 
 ## Objective and authorization
 
@@ -13,7 +13,10 @@ Port only the missing behavior onto the exact PN delivery baseline instead.
 - Bootstrap was document-only; subsequent authorization permits U01 source work.
 - U01 edits: `src/audio-cache.ts`, `test/audio-cache.test.ts`, compatible cache
   mocks in `test/speech-sink.test.ts` and `test/wiring.test.ts`, and this tracker.
-  `odd/tasks/playback-controls.md` is also allowed but unchanged. U02 is not authorized.
+  `odd/tasks/playback-controls.md` was allowed but unchanged in U01.
+- Current authorization: U02 protocol in `src/repeat-control.ts`, explicit pause/
+  resume dispatch only in `src/plugin.ts`, focused repeat-control/wiring tests and
+  task documents. No speed or service runtime binding; stop before U03.
 - No network, publication, PR edits, push, main merge, rebase, destructive reset,
   original checkout changes, host/config/environment changes, downloads, installs,
   package/lock writes, or writes through the dependency junction are authorized.
@@ -86,7 +89,7 @@ documentation, compress code, or claim an exception to meet the ceiling.
 | Task | Coherent outcome | Estimated authored A+D | Dependencies |
 |---|---|---|---|
 | [x] U01 | Cache clear/invalidation and compatible mocks | 170–195 forecast; observed below | baseline |
-| [ ] U02 | Service wire and safe dispatch | 145–175 | U01 |
+| [x] U02 | Service wire and safe dispatch | 145–175 forecast; observed below | U01 |
 | [ ] U03 | PN sink enabled checks at admission, post-plan, pump, status, Repeat | 195–240 | U01–U02 |
 | [ ] U04 | Enabled state / Off lifecycle wrapper; forward `stopSession` | 165–205 | U03 |
 | [ ] U05 | Wire On/Off to actual PN instance; clear cache, cancel, combine counters | 300–375 | U01–U04 |
@@ -97,7 +100,7 @@ documentation, compress code, or claim an exception to meet the ceiling.
 | [ ] U10 | Confirmed rate UI | 280–310 | U09 |
 
 U09 is the hardest ceiling: preserve all necessary regression tests. Bootstrap
-contained no source materialization; only U01 is complete. U02–U10 remain open.
+contained no source materialization; U01–U02 are complete. U03–U10 remain open.
 
 ## Future routes and verification
 
@@ -161,7 +164,7 @@ record actual harness scenario/outcome or an explicit boundary-specific N/A.
 
 ## Next step
 
-Stop after U01. U02 service wire/safe dispatch requires the next authorization.
+Stop after U02. Next is U03 PN sink enabled checks under the parent-directed plan.
 Reconcile this tracker with full Engram mirror `odd/unified-playback-narration/tasks`
 in project `agentvoz`; preserve the 400-line closing guard for every later unit.
 
@@ -184,3 +187,21 @@ in project `agentvoz`; preserve the 400-line closing guard for every later unit.
   task evidence only; preserve baseline PN, bootstrap and durable backup refs.
 - Observed authored A+D: production 14, tests/mocks 119, documentation 43; total
   176 <= 400. The U01 memory receipt records the actual behavior commit identity.
+
+## U02 evidence
+
+- Prior boundary / U01 commit: `12a9841a839105ac907640629806c205593d3001`.
+- Added closed `enable`/`disable` actions and boolean confirmed `enabled` status;
+  absent flags/readers default to true. Disabled Repeat is consumed, not deferred.
+- Kept nonce correlation, instance/TTL checks, shared bounded request history and
+  failure containment. The plugin dispatches only explicit pause/resume; unbound
+  service actions neither resume paused audio nor falsely report runtime Off.
+- RED: `bun test test/repeat-control.test.ts test/wiring.test.ts` produced
+  88 pass / 7 fail, 218 assertions, exit 1 (missing protocol/state/gate behavior).
+- GREEN: same command produced 95 pass / 0 fail, 249 assertions, exit 0.
+- `bun run typecheck` passed after a test-only literal-union correction;
+  `git diff --check` passed. No full suite or real audio; runtime proof is the
+  deterministic wire/plugin harness, not host or service lifecycle qualification.
+- Rollback boundary: U02 protocol, plugin dispatch callback, its focused tests and
+  task evidence only. PN source-plan/stopSession/generation paths remain unchanged.
+- Observed A+D: production 19, tests 95, docs 31; total 145 <= 400. Commit SHA is in the U02 receipt.

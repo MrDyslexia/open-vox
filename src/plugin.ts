@@ -137,7 +137,10 @@ export function createOpenVox(client: Client, directory: string, sink: SpeechSin
   const coordinator = createCoordinator(client, directory, sink);
   const control = controlOptions && createRepeatControl({ ...controlOptions,
     status: () => sink.status?.(), isPaused: pause.isPaused,
-    control: (action) => pause.setPaused(action === "pause"),
+    control: (action) => {
+      if (action === "pause") pause.setPaused(true);
+      else if (action === "resume") pause.setPaused(false);
+    },
     repeat: async (sessionID, revision, expires) => { await sink.repeat?.(sessionID, revision, expires); } });
   const seenUsers = new Set<string>();
   let disposed = false;
