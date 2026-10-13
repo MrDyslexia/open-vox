@@ -163,6 +163,7 @@ export function createOpenVox(client: Client, directory: string, sink: SpeechSin
       else if (action === "resume") pause.setPaused(false);
       else if (action === "disable") pause.setEnabled(false);
       else if (action === "enable") pause.setEnabled(true);
+      // Rate commands remain unbound until runtime integration; never treat them as disable/resume.
     },
     repeat: async (sessionID, revision, expires) => { await sink.repeat?.(sessionID, revision, expires); } });
   const seenUsers = new Set<string>();

@@ -522,6 +522,28 @@ describe("pause state", () => {
 });
 
 describe("pause", () => {
+  test("unbound rate requests never disable or resume an instance, and default status stays 1x", async () => {
+    const a = instance("instance-a");
+    try {
+      await a.control("pause", "pause");
+      for (const action of ["speed:1", "speed:1.5", "speed:2"]) {
+        await a.control(action, action);
+        expect(await a.status()).toMatchObject({ enabled: true, paused: true, playbackSpeed: 1 });
+        expect([a.f.pauses(), a.f.resumes(), a.f.stops()]).toEqual([1, 0, 0]);
+      }
+      await a.control("disable", "disable");
+      await a.control("speed:2", "off-rate");
+      expect(await a.status()).toMatchObject({ enabled: false, paused: false, playbackSpeed: 1 });
+      await a.control("enable", "off-rate"); // An unbound rate request was still consumed.
+      expect((await a.status())?.enabled).toBe(false);
+      await a.control("enable", "enable");
+      await a.control("pause", "pause-again");
+      await a.control("resume", "resume");
+      expect(await a.status()).toMatchObject({ enabled: true, paused: false, playbackSpeed: 1 });
+      expect([a.f.pauses(), a.f.resumes(), a.f.stops()]).toEqual([2, 1, 0]);
+    } finally { await a.hooks.dispose!(); }
+  });
+
   test("bound service actions clear pause without resuming and On allows future work only", async () => {
     const a = instance("instance-a");
     await a.control("pause", "pause");

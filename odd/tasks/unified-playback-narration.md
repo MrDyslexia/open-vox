@@ -2,7 +2,7 @@
 
 Preserve the delivered pronunciation-normalization (PN) pipeline while adding
 instance-scoped service On/Off and playback rates in small, coherent work units.
-Bootstrap and U01–U06 are complete; confirmed service UI is bound. Next: **U07**.
+Bootstrap and U01–U07 are complete; closed rate wire is ready. Next: **U08**.
 
 ## Objective and authorization
 
@@ -18,8 +18,9 @@ Port only the missing behavior onto the exact PN delivery baseline instead.
 - U03 completed PN sink gates and promise preparation without runtime binding.
 - U04 completed state/lifecycle/wrapper helpers without actual-instance binding.
 - U05 completed actual PN instance service binding and cache lifecycle checks.
-- Current authorization: U06 repeat UI/TSX, focused tests, README and task evidence
-  only. Voice/theme semantics stay intact; no playback-rate work. Stop before U07.
+- U06 completed confirmed service UI and its bounded recovery checkpoint.
+- Current authorization: U07 closed rate wire/safe dispatch, focused tests and task
+  evidence only; no live rate binding or UI changes. Stop before U08.
 - No network, publication, PR edits, push, main merge, rebase, destructive reset,
   original checkout changes, host/config/environment changes, downloads, installs,
   package/lock writes, or writes through the dependency junction are authorized.
@@ -97,13 +98,13 @@ documentation, compress code, or claim an exception to meet the ceiling.
 | [x] U04 | Enabled state / Off lifecycle wrapper; forward `stopSession` | 165–205 forecast; observed below | U03 |
 | [x] U05 | Wire On/Off to actual PN instance; clear cache, cancel, combine counters | 300–375 forecast; observed below | U01–U04 |
 | [x] U06 | Service UI confirmed state and TSX | 255–290 forecast; observed below | U05 |
-| [ ] U07 | Closed rate wire: 1 / 1.5 / 2 and safe dispatch | 165–190 | U06 |
+| [x] U07 | Closed rate wire: 1 / 1.5 / 2 and safe dispatch | 165–190 forecast; observed below | U06 |
 | [ ] U08 | Existing-player rate regression tests only | 240–255 | U07 |
 | [ ] U09 | Runtime rates preserve cached PN audio | 365–395 | U07–U08 |
 | [ ] U10 | Confirmed rate UI | 280–310 | U09 |
 
 U09 is the hardest ceiling: preserve all necessary regression tests. Bootstrap
-contained no source materialization; U01–U06 are complete. U07–U10 remain open.
+contained no source materialization; U01–U07 are complete. U08–U10 remain open.
 
 ## Future routes and verification
 
@@ -167,7 +168,7 @@ record actual harness scenario/outcome or an explicit boundary-specific N/A.
 
 ## Next step
 
-Stop after U06. Next is U07 closed playback-rate wire and safe dispatch.
+Stop after U07. Next is U08 existing-player rate regression tests only.
 Reconcile this tracker with full Engram mirror `odd/unified-playback-narration/tasks`
 in project `agentvoz`; preserve the 400-line closing guard for every later unit.
 
@@ -308,3 +309,26 @@ in project `agentvoz`; preserve the 400-line closing guard for every later unit.
   No RED was recreated. TSX/slot proof remains syntax/extracted-callback only.
   U06 closes locally with its commit receipt; U07 requires the next bounded writer.
 - Observed A+D: production 58, tests 114, docs 51; total 223 <= 400. Commit SHA is in the U06 receipt.
+
+## U07 evidence
+
+- Prior boundary / U06 commit: `d845cf1c8a9355135064d113d6b47c70c3f66bd8`.
+- Ported only rate wire from snapshotted P4 `6b0263e` relative to `d40f0da`:
+  explicit `speed:1`, `speed:1.5`, `speed:2`, closed helpers and validated status.
+  Legacy status retains enabled=true and rate=1; absent/invalid host rate readers
+  publish 1x. This phase default is not acknowledgment of audible rate changes.
+- Plugin service/pause dispatch was already explicit and stays unchanged; rate
+  requests are consumed but unbound until U09, never interpreted as disable/resume.
+  No UI, live player binding, synthesis speed, persistent config or PN path changes.
+- RED: `bun test test/repeat-control.test.ts test/wiring.test.ts` produced 120 pass /
+  8 fail, 416 assertions, exit 1. Initial implementation exposed one test nonce
+  containing a forbidden decimal point; corrected the fixture, not validation.
+- GREEN: same command produced 128 pass / 0 fail, 504 assertions, exit 0.
+  Typecheck passed after a test-only literal-union correction; diff check passed.
+- Deterministic wire/dispatch harness verifies closed values, malformed envelopes,
+  correlated status, instance/TTL/replay bounds, shared history and consumed sync/
+  async failures. Unbound rate commands preserve On/Off/Pause and cannot be replayed
+  as service actions. No full suite, host, audibility or model proof is claimed.
+- Rollback boundary: U07 wire/helpers, dispatch note, focused tests and task evidence;
+  preserve U01–U06, PN source-plan lifecycle, original bytes/indexes/refs and backups.
+- Observed A+D: production 30, tests 121, docs 36; total 187 <= 400. Commit SHA is in the U07 receipt.
