@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,6 +12,9 @@ import { fixture } from "./final-response.test";
 import { AudioCache } from "../src/audio-cache";
 import { wavBytes } from "./audio-cache.test";
 import { flattenNarrationPlan } from "../src/narration-plan";
+import { createPlayer, type Player, type HostProcess } from "../src/player";
+import * as playerModule from "../src/player";
+import { kokoroEngine } from "../src/kokoro-engine";
 
 function fakeSink() {
   const spoken: string[] = [];
@@ -522,24 +525,24 @@ describe("pause state", () => {
 });
 
 describe("pause", () => {
-  test("unbound rate requests never disable or resume an instance, and default status stays 1x", async () => {
+  test("rate requests never disable or resume an instance, and stored status follows explicit targets", async () => {
     const a = instance("instance-a");
     try {
       await a.control("pause", "pause");
       for (const action of ["speed:1", "speed:1.5", "speed:2"]) {
-        await a.control(action, action);
-        expect(await a.status()).toMatchObject({ enabled: true, paused: true, playbackSpeed: 1 });
+        await a.control(action, `rate-${action.slice(6).replace(".", "-")}`);
+        expect(await a.status()).toMatchObject({ enabled: true, paused: true, playbackSpeed: Number(action.slice(6)) });
         expect([a.f.pauses(), a.f.resumes(), a.f.stops()]).toEqual([1, 0, 0]);
       }
       await a.control("disable", "disable");
       await a.control("speed:2", "off-rate");
-      expect(await a.status()).toMatchObject({ enabled: false, paused: false, playbackSpeed: 1 });
-      await a.control("enable", "off-rate"); // An unbound rate request was still consumed.
+      expect(await a.status()).toMatchObject({ enabled: false, paused: false, playbackSpeed: 2 });
+      await a.control("enable", "off-rate"); // A refused rate request was still consumed.
       expect((await a.status())?.enabled).toBe(false);
       await a.control("enable", "enable");
       await a.control("pause", "pause-again");
       await a.control("resume", "resume");
-      expect(await a.status()).toMatchObject({ enabled: true, paused: false, playbackSpeed: 1 });
+      expect(await a.status()).toMatchObject({ enabled: true, paused: false, playbackSpeed: 2 });
       expect([a.f.pauses(), a.f.resumes(), a.f.stops()]).toEqual([2, 1, 0]);
     } finally { await a.hooks.dispose!(); }
   });
@@ -765,8 +768,34 @@ describe("plugin entry point", () => {
         await p.send({ kind: "control", instance: before.instance, sessionID: "ses_a",
           requestID: "enable", action: "enable", expires: Date.now() + 1500 });
         expect((await p.status()).enabled).toBe(false);
+        await p.send({ kind: "control", instance: before.instance, sessionID: "ses_a",
+          requestID: "rate", action: "speed:2", expires: Date.now() + 1500 });
+        expect((await p.status()).playbackSpeed).toBe(1);
       } finally { await p.hooks.dispose(); }
     });
+  });
+
+  test.skipIf(process.platform !== "win32")("factory rate callback targets its player without rewriting synthesis settings or starting a host", async () => {
+    const json = JSON.stringify({ speed: 1.2, voices: { es: "em_alex", en: "af_heart" }, engine: "sapi" });
+    await withPluginEnv(json, async home => {
+      const p = ratePlayer(), q = ratePlayer(), players = [p.player, q.player];
+      const factory = spyOn(playerModule, "createPlayer").mockImplementation(() => players.shift()!);
+      const rate = spyOn(p.player, "setRate");
+      const a = await boot(), b = await boot();
+      try {
+        const first = await a.status(); expect(first.playbackSpeed).toBe(1);
+        await a.send({ kind: "control", instance: first.instance, sessionID: "ses_a",
+          requestID: "rate", action: "speed:2", expires: Date.now() + 1500 });
+        expect(rate).toHaveBeenCalledWith(2); expect(rate).toHaveBeenCalledTimes(1);
+        expect((await a.status()).playbackSpeed).toBe(2); expect((await b.status()).playbackSpeed).toBe(1);
+        rate.mockImplementationOnce(() => Promise.reject(new Error("fake rate rejection")));
+        await a.send({ kind: "control", instance: first.instance, sessionID: "ses_a",
+          requestID: "rejected", action: "speed:1.5", expires: Date.now() + 1500 });
+        expect((await a.status()).playbackSpeed).toBe(1.5); expect(rate).toHaveBeenCalledTimes(2);
+        expect(p.hosts).toHaveLength(0); expect(q.hosts).toHaveLength(0);
+        expect(readFileSync(join(home, "config.json"), "utf8")).toBe(json);
+      } finally { await a.hooks.dispose(); await b.hooks.dispose(); rate.mockRestore(); factory.mockRestore(); }
+    }, "0");
   });
 
   test.skipIf(process.platform !== "win32")("capable factory binds one memory state without persistence or another-instance cancellation", async () => {
@@ -789,7 +818,7 @@ describe("plugin entry point", () => {
 });
 
 /** Actual PN sink/cache and wire; only synthesis and player processes are fake. */
-function pnService(root: string) {
+function pnService(root: string, playback?: Player, planEngine?: Engine) {
   const cache = new AudioCache(root), plans: ReturnType<typeof createNarrationPlan>[] = [];
   const played: Array<{ file: string; bytes: Buffer }> = [], replies: string[] = [];
   const counts = { parses: 0, dispatches: 0, syntheses: 0 };
@@ -804,10 +833,11 @@ function pnService(root: string) {
     processes.push(p); return p;
   };
   const state = createPauseState(() => sink.pause!(), () => sink.resume!(),
-    { onDisable: () => plugin.disableService(sink, cache) });
+    { onDisable: () => plugin.disableService(sink, cache), onPlaybackSpeed: speed => { void playback?.setRate(speed).catch(() => {}); } });
   const engine: Engine = Object.assign(() => { throw new Error("legacy speech forbidden"); }, {
     synthesizePlan(plan: ReturnType<typeof createNarrationPlan>, file: string) {
       counts.dispatches++; counts.syntheses++; plans.push(plan); writeFileSync(file, wavBytes());
+      if (planEngine) return planEngine.synthesizePlan!(plan, file);
       const p = process(); if (!mode.synthesis) p.finish(); return p;
     },
   });
@@ -817,6 +847,7 @@ function pnService(root: string) {
       return mode.prepare ? new Promise<typeof plan>(r => { prepared = () => r(plan); }) : plan;
     }, player: file => {
       played.push({ file, bytes: readFileSync(file) });
+      if (playback) return playback.play(file);
       const p = process(); if (!mode.playback) p.finish(); return p;
     } });
   const wrapped = withPause(sink, state.isPaused, state.isEnabled);
@@ -829,7 +860,7 @@ function pnService(root: string) {
   const status = async () => { await send({ kind: "hello", challenge: `c-${++request}` }); return decodeCommand(replies.at(-1))!; };
   const repeat = (revision: number) => send({ kind: "repeat", instance: cache.instance, revision, requestID: `r-${++request}` });
   const say = (text = "**API** Open editor.") => wrapped({ sessionID: "s", messageID: `m-${++request}`, text });
-  return { cache, state, sink, wrapped, hooks, counts, mode, processes, plans, played, say, control, status, repeat,
+  return { cache, state, sink, wrapped, hooks, counts, mode, processes, plans, played, say, control, status, repeat, send,
     prepared: () => prepared(), close: () => hooks.dispose!() };
 }
 
@@ -839,13 +870,14 @@ describe("PN service lifecycle", () => {
     const hooks = createOpenVox(client, "/d", f.sink, undefined,
       { instance: "default", publish: async s => { replies.push(s); } });
     const send = (action: string) => hooks.event!({ event: { type: "tui.command.execute", properties: {
-      command: encodeCommand({ kind: "control", instance: "default", sessionID: "s", requestID: action,
+      command: encodeCommand({ kind: "control", instance: "default", sessionID: "s", requestID: action.replace(/[^\w-]/g, "-"),
         action, expires: Date.now() + 1500 } as any) } } } as any);
     try {
+      await send("speed:2");
       await send("disable"); expect(f.stops()).toBe(1);
       await hooks.event!({ event: { type: "tui.command.execute", properties: { command: encodeCommand({
         kind: "hello", challenge: "off", sessionID: "s", expires: Date.now() + 1500 }) } } } as any);
-      expect(decodeCommand(replies.at(-1))?.enabled).toBe(false);
+      expect(decodeCommand(replies.at(-1))).toMatchObject({ enabled: false, playbackSpeed: 2 });
       await send("enable"); expect(f.resumes()).toBe(0); expect(f.stops()).toBe(1);
     } finally { await hooks.dispose!(); }
   });
@@ -927,5 +959,145 @@ describe("PN service lifecycle", () => {
       await event(ownUser); expect(afterProc.killed).toBe(false);
       afterProc.finish(); await after;
     } finally { await h.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+describe("closed instance playback rate state", () => {
+  test("starts at 1x and stores before one callback per actual change", () => {
+    const seen: number[] = [];
+    const state: ReturnType<typeof createPauseState> = createPauseState(() => {}, undefined,
+      { onPlaybackSpeed: speed => { seen.push(speed, state.getPlaybackSpeed()); } });
+    expect(state.getPlaybackSpeed()).toBe(1);
+    state.setPlaybackSpeed(1); expect(seen).toEqual([]);
+    state.setPlaybackSpeed(1.5); state.setPlaybackSpeed(1.5);
+    expect(state.getPlaybackSpeed()).toBe(1.5); expect(seen).toEqual([1.5, 1.5]);
+    state.setPlaybackSpeed(2); state.setPlaybackSpeed(1);
+    expect(seen).toEqual([1.5, 1.5, 2, 2, 1, 1]);
+  });
+
+  test("callback failures are contained without rolling back the stored preference", () => {
+    const state = createPauseState(() => {}, undefined, { onPlaybackSpeed: () => { throw new Error("rate failure"); } });
+    expect(() => state.setPlaybackSpeed(2)).not.toThrow(); expect(state.getPlaybackSpeed()).toBe(2);
+  });
+
+  test("invalid values never reach the callback", () => {
+    const seen: number[] = [];
+    const state = createPauseState(() => {}, undefined, { onPlaybackSpeed: speed => { seen.push(speed); } });
+    for (const bad of [0, -1, 0.5, 2.5, 3, 8, NaN, Infinity, "2", null, undefined]) state.setPlaybackSpeed(bad as never);
+    expect(state.getPlaybackSpeed()).toBe(1); expect(seen).toEqual([]);
+  });
+
+  test("Off and static incapability refuse changes; paused changes work and Off/On keeps the rate", () => {
+    const seen: number[] = [];
+    const state = createPauseState(() => {}, () => {}, { onPlaybackSpeed: speed => { seen.push(speed); } });
+    state.setEnabled(false); state.setPlaybackSpeed(2);
+    expect([state.getPlaybackSpeed(), seen]).toEqual([1, []]);
+    state.setEnabled(true); state.setPlaybackSpeed(2);
+    state.setPaused(true); state.setPlaybackSpeed(1.5);
+    expect([state.isPaused(), state.getPlaybackSpeed()]).toEqual([true, 1.5]);
+    state.setPaused(false); state.setEnabled(false); state.setEnabled(true);
+    expect([state.getPlaybackSpeed(), seen]).toEqual([1.5, [2, 1.5]]);
+    const incapable = createPauseState(() => {}, undefined, { capable: false, onPlaybackSpeed: speed => { seen.push(speed); } });
+    incapable.setEnabled(true); incapable.setPlaybackSpeed(2);
+    expect([incapable.getPlaybackSpeed(), seen]).toEqual([1, [2, 1.5]]);
+  });
+});
+
+/** The persistent player is real; only its child process and acknowledgments are fake. */
+function ratePlayer() {
+  const hosts: Array<HostProcess & { sent: string[]; emit(event: object): void; die(): void }> = [];
+  const player = createPlayer({ idleMs: 0, readyTimeoutMs: 1000, openTimeoutMs: 1000, requestTimeoutMs: 40,
+    fallback: () => { throw new Error("unexpected fallback"); }, spawnHost: () => {
+      let listener!: (line: string) => void, finish!: (code: number) => void;
+      const host = { sent: [] as string[], exited: new Promise<number>(r => { finish = r; }),
+        send(line: string) { host.sent.push(line); }, kill() { finish(1); }, die() { finish(1); },
+        onLine(fn: (line: string) => void) { listener = fn; }, emit(event: object) { listener(JSON.stringify(event)); } };
+      hosts.push(host); return host;
+    } });
+  return { player, hosts };
+}
+
+describe("PN playback rate binding", () => {
+  test("closed wire targets preserve PN audio and instance isolation without extra preparation or synthesis", async () => {
+    const root = mkdtempSync(join(tmpdir(), "open-vox-u09-")), a = pnService(root), b = pnService(root);
+    try {
+      await a.say(); const audio = a.cache.current()!, before = { ...a.counts }, plan = a.plans[0]!;
+      expect((await a.status()).playbackSpeed).toBe(1); expect((await b.status()).playbackSpeed).toBe(1);
+      for (const [action, speed] of [["speed:1.5", 1.5], ["speed:2", 2], ["speed:1", 1]] as const) {
+        await a.control(action); await b.control(action, a.cache.instance);
+        expect((await a.status()).playbackSpeed).toBe(speed);
+        expect((await b.status()).playbackSpeed).toBe(1);
+        await a.repeat(audio.revision);
+        expect(a.cache.current()).toEqual(audio); expect(readFileSync(audio.file)).toEqual(wavBytes());
+        expect(a.counts).toEqual(before); expect(a.plans).toEqual([plan]);
+      }
+      expect(a.played).toHaveLength(4);
+      const targeted = { kind: "control", instance: a.cache.instance, requestID: "rate-replay", action: "speed:2" };
+      await a.send(targeted); await a.send({ ...targeted, action: "speed:1.5" });
+      expect((await a.status()).playbackSpeed).toBe(2); // A replay cannot change its explicit target.
+      await a.control("speed:2"); expect((await a.status()).playbackSpeed).toBe(2);
+      await a.control("speed:1");
+      for (const action of ["speed:2.5", "speed:0"]) await a.control(action);
+      await a.hooks.event!({ event: { type: "tui.command.execute", properties: { command: encodeCommand({
+        kind: "control", instance: a.cache.instance, sessionID: "s", requestID: "expired", action: "speed:2", expires: Date.now() - 1 }) } } } as any);
+      expect((await a.status()).playbackSpeed).toBe(1);
+      await a.control("speed:2"); await a.control("disable"); await a.control("speed:1.5"); await a.control("enable");
+      expect((await a.status()).playbackSpeed).toBe(2); expect(a.cache.current()).toBeUndefined();
+      expect(a.counts).toEqual(before);
+      await a.close(); await a.control("speed:1"); expect(a.state.getPlaybackSpeed()).toBe(2);
+    } finally { await a.close(); await b.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("rate changes during async PN preparation neither invalidate the generation nor duplicate the plan", async () => {
+    const root = mkdtempSync(join(tmpdir(), "open-vox-u09-")), h = pnService(root);
+    try {
+      h.mode.prepare = true; const pending = h.say();
+      await h.control("speed:2"); expect(h.counts).toEqual({ parses: 1, dispatches: 0, syntheses: 0 });
+      h.prepared(); await pending;
+      expect(h.counts).toEqual({ parses: 1, dispatches: 1, syntheses: 1 });
+      expect(h.plans).toHaveLength(1); expect((await h.status()).playbackSpeed).toBe(2);
+      expect(h.cache.current()).toBeDefined();
+      h.mode.prepare = false; h.mode.synthesis = true;
+      const synthesizing = h.say("Second bounded source plan."), process = h.processes.at(-1)!;
+      const before = { ...h.counts };
+      await h.control("speed:1.5"); expect(process.killed).toBe(false); expect(h.counts).toEqual(before);
+      process.finish(); await synthesizing;
+      expect(h.counts).toEqual(before); expect(h.cache.current()).toBeDefined(); expect(h.plans).toHaveLength(2);
+    } finally { await h.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("live, paused and replacement-player rates retain exact PN plan, voice, synthesis speed and WAV", async () => {
+    const root = mkdtempSync(join(tmpdir(), "open-vox-u09-")), p = ratePlayer(), calls: string[][] = [];
+    const engine = kokoroEngine({ python: "fake-python", script: "fake-script", modelPath: "fake-model", voicesPath: "fake-voices",
+      voices: { es: "em_alex", en: "af_heart" }, speed: 1.2, tmpDir: root, unlink() {},
+      run: (_command, args) => { calls.push(args); return { exited: Promise.resolve(0), kill() {} }; } });
+    const h = pnService(root, p.player, engine);
+    try {
+      await h.control("speed:2"); expect(p.hosts).toHaveLength(0);
+      const active = h.say(); await Bun.sleep(0);
+      const host = p.hosts[0]!; host.emit({ event: "ready" }); await Bun.sleep(0);
+      const audio = h.cache.current()!, before = { ...h.counts }, plan = h.plans[0]!;
+      expect(host.sent).toEqual(["rate 2", `play ${audio.file}`]);
+      host.emit({ event: "opened", durationMs: 5000 }); host.emit({ event: "playing" });
+      await h.control("speed:1.5"); expect(host.sent.at(-1)).toBe("rate 1.5"); host.emit({ event: "rate", value: 1.5 });
+      const paused = h.control("pause"); host.emit({ event: "paused", positionMs: 17 }); await paused;
+      await h.control("speed:2"); host.emit({ event: "rate", value: 2 });
+      expect(await h.status()).toMatchObject({ paused: true, enabled: true, playbackSpeed: 2 });
+      expect(host.sent).not.toContain("resume");
+      await h.hooks.event!({ event: { type: "session.error", properties: { sessionID: "other" } } as any });
+      await h.hooks.event!({ event: { ...user("other-user", 1), properties: { info: { ...user("other-user", 1).properties.info, sessionID: "other" } } } });
+      expect(host.sent).not.toContain("stop");
+      const resumed = h.control("resume"); host.emit({ event: "playing" }); await resumed;
+      host.emit({ event: "ended" }); await active;
+      host.die(); await Bun.sleep(0);
+      const replay = h.repeat(audio.revision); await Bun.sleep(0);
+      const replacement = p.hosts[1]!; replacement.emit({ event: "ready" }); await Bun.sleep(0);
+      expect(replacement.sent).toEqual(["rate 2", `play ${audio.file}`]);
+      replacement.emit({ event: "opened", durationMs: 100 }); replacement.emit({ event: "ended" }); await replay;
+      expect(h.cache.current()).toEqual(audio); expect(readFileSync(audio.file)).toEqual(wavBytes());
+      expect(h.counts).toEqual(before); expect(h.plans).toEqual([plan]); expect(calls).toHaveLength(1);
+      expect(calls[0]).toEqual(expect.arrayContaining(["--plan-json", "em_alex", "1.2"]));
+      expect(h.played).toEqual([{ file: audio.file, bytes: wavBytes() }, { file: audio.file, bytes: wavBytes() }]);
+    } finally { await h.close(); await p.player.dispose(); rmSync(root, { recursive: true, force: true }); }
   });
 });

@@ -8,7 +8,7 @@ import { createConfigReader, readConfig, type ConfigReader } from "./config";
 import { createSpeechSink, sapiEngine, type Engine, type SpeechSink, type SpeechSinkOptions } from "./speech-sink";
 import { createPlayer } from "./player";
 import { AudioCache, type AudioStore } from "./audio-cache";
-import { createRepeatControl } from "./repeat-control";
+import { createRepeatControl, isPlaybackSpeed, speedOfAction, type PlaybackSpeed } from "./repeat-control";
 import { flattenNarrationPlan } from "./narration-plan";
 
 type Result<T> = { data?: T; error?: unknown };
@@ -114,16 +114,22 @@ export type PauseState = {
   setPaused: (paused: boolean) => void;
   isEnabled: () => boolean;
   setEnabled: (enabled: boolean) => void;
+  /** Instance playback preference; never synthesis speed or persisted config. */
+  getPlaybackSpeed: () => PlaybackSpeed;
+  setPlaybackSpeed: (speed: PlaybackSpeed) => void;
 };
 
 /**
  * `onPause` runs exactly once per false->true edge and `onResume` exactly once per true->false edge. The
  * flag is already updated when either runs, so queued and in-flight work sees the new state. Both are
  * contained: a failing callback never changes the flag or escapes.
+ * Playback rate starts at 1x and survives Pause/Resume and Off/On. Changes while
+ * paused are accepted; Off/incapable instances, invalid values and repeats are ignored.
+ * The preference is stored before its callback and is not proof of audible application.
  */
 export function createPauseState(onPause: () => void, onResume?: () => void,
-  service: { onDisable?: () => void; capable?: boolean } = {}): PauseState {
-  let paused = false, enabled = service.capable !== false;
+  service: { onDisable?: () => void; capable?: boolean; onPlaybackSpeed?: (speed: PlaybackSpeed) => void } = {}): PauseState {
+  let paused = false, enabled = service.capable !== false, speed: PlaybackSpeed = 1;
   return {
     isPaused: () => paused,
     setPaused(next) {
@@ -139,6 +145,12 @@ export function createPauseState(onPause: () => void, onResume?: () => void,
       if (next) return; // On permits future work; it never resumes discarded audio.
       paused = false;
       try { service.onDisable?.(); } catch {}
+    },
+    getPlaybackSpeed: () => speed,
+    setPlaybackSpeed(next) {
+      if (!enabled || next === speed || !isPlaybackSpeed(next)) return;
+      speed = next;
+      try { service.onPlaybackSpeed?.(next); } catch {}
     },
   };
 }
@@ -158,12 +170,14 @@ export function createOpenVox(client: Client, directory: string, sink: SpeechSin
   const coordinator = createCoordinator(client, directory, sink);
   const control = controlOptions && createRepeatControl({ ...controlOptions,
     status: () => sink.status?.(), isPaused: pause.isPaused, isEnabled: pause.isEnabled,
+    getPlaybackSpeed: pause.getPlaybackSpeed,
     control: (action) => {
-      if (action === "pause") pause.setPaused(true);
+      const speed = speedOfAction(action);
+      if (speed !== undefined) pause.setPlaybackSpeed(speed);
+      else if (action === "pause") pause.setPaused(true);
       else if (action === "resume") pause.setPaused(false);
       else if (action === "disable") pause.setEnabled(false);
       else if (action === "enable") pause.setEnabled(true);
-      // Rate commands remain unbound until runtime integration; never treat them as disable/resume.
     },
     repeat: async (sessionID, revision, expires) => { await sink.repeat?.(sessionID, revision, expires); } });
   const seenUsers = new Set<string>();
@@ -335,8 +349,10 @@ export const OpenVoxPlugin: Plugin = async ({ client, directory }) => {
     catch { enabled = false; log("audio cache unavailable; narration disabled"); }
   }
   // Capability is settled before state creation. Off flags precede owned cancellation/cache invalidation.
+  // Rates affect only the persistent player's retained WAV, never PN preparation or synthesis settings.
   const pause = createPauseState(() => pauseSink(sink), () => sink.resume?.(),
-    { capable: enabled, onDisable: () => disableService(sink, cache) });
+    { capable: enabled, onDisable: () => disableService(sink, cache),
+      onPlaybackSpeed: speed => { void player?.setRate(speed).catch(() => {}); } });
   const isPaused = pause.isPaused;
   // One persistent player host per plugin instance; it starts lazily on the first cached playback.
   const player = cache ? createPlayer({ log: (message) => log(message) }) : undefined;

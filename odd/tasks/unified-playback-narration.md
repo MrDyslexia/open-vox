@@ -2,7 +2,7 @@
 
 Preserve the delivered pronunciation-normalization (PN) pipeline while adding
 instance-scoped service On/Off and playback rates in small, coherent work units.
-Bootstrap and U01–U08 are complete; player rate regressions pass. Next: **U09**.
+Bootstrap and U01–U09 are complete; PN-preserving rates are bound. Next: **U10**.
 
 ## Objective and authorization
 
@@ -20,8 +20,9 @@ Port only the missing behavior onto the exact PN delivery baseline instead.
 - U05 completed actual PN instance service binding and cache lifecycle checks.
 - U06 completed confirmed service UI and its bounded recovery checkpoint.
 - U07 completed closed rate wire and safe explicit dispatch without rate binding.
-- Current authorization: U08 existing-player regression tests and task evidence
-  only; no production changes or real host/audio execution. Stop before U09.
+- U08 qualified the existing player rate API with deterministic regression tests.
+- Current authorization: U09 instance rate binding, focused PN tests and task
+  evidence only; no UI changes or real host/audio execution. Stop before U10.
 - No network, publication, PR edits, push, main merge, rebase, destructive reset,
   original checkout changes, host/config/environment changes, downloads, installs,
   package/lock writes, or writes through the dependency junction are authorized.
@@ -101,11 +102,11 @@ documentation, compress code, or claim an exception to meet the ceiling.
 | [x] U06 | Service UI confirmed state and TSX | 255–290 forecast; observed below | U05 |
 | [x] U07 | Closed rate wire: 1 / 1.5 / 2 and safe dispatch | 165–190 forecast; observed below | U06 |
 | [x] U08 | Existing-player rate regression tests only | 240–255 forecast; observed below | U07 |
-| [ ] U09 | Runtime rates preserve cached PN audio | 365–395 | U07–U08 |
+| [x] U09 | Runtime rates preserve cached PN audio | 365–395 forecast; observed below | U07–U08 |
 | [ ] U10 | Confirmed rate UI | 280–310 | U09 |
 
 U09 is the hardest ceiling: preserve all necessary regression tests. Bootstrap
-contained no source materialization; U01–U08 are complete. U09–U10 remain open.
+contained no source materialization; U01–U09 are complete. U10 remains open.
 
 ## Future routes and verification
 
@@ -169,7 +170,7 @@ record actual harness scenario/outcome or an explicit boundary-specific N/A.
 
 ## Next step
 
-Stop after U08. Next is U09 runtime rates preserving cached PN audio.
+Stop after U09. Next is U10 confirmed playback-rate UI.
 Reconcile this tracker with full Engram mirror `odd/unified-playback-narration/tasks`
 in project `agentvoz`; preserve the 400-line closing guard for every later unit.
 
@@ -355,3 +356,31 @@ in project `agentvoz`; preserve the 400-line closing guard for every later unit.
 - Rollback boundary: U08 player regression tests and task evidence only; preserve
   production API, U01–U07, original tracked bytes/indexes/refs and durable backups.
 - Observed A+D: production 0, tests 259, docs 35; total 294 <= 400. Commit SHA is in the U08 receipt.
+
+## U09 evidence
+
+- Prior boundary / U08 commit: `01c6a80438583a79b428c7f02eff657d7b3c35cb`.
+- Ported P4 instance rate state/getter/callback onto the PN plugin, not the donor
+  plugin wholesale. Closed 1/1.5/2 rates start at 1, accept paused changes, reject
+  Off/incapable/invalid/repeated changes and survive Off/On without reapplication.
+- Explicit rate dispatch and stored-preference status reach the owned player's
+  existing `setRate`; rejected callbacks are contained. Stored status is not
+  audible acknowledgment. No synthesis/config/UI/player-script/backend changes.
+- RED: `bun test test/wiring.test.ts test/speech-sink.test.ts test/kokoro-engine.test.ts`
+  yielded 179 pass / 8 fail, 553 assertions, exit 1. Initial implementation exposed
+  an inherited fixture using action text as an invalid request ID; corrected IDs
+  and strengthened rate expectations, without changing nonce validation.
+- Final GREEN: same command yielded 188 pass / 0 fail, 627 assertions, exit 0.
+  Typecheck passed after a test-only literal-tuple correction; diff check passed.
+- Reused PN sink/cache harness and real persistent player with fake child events;
+  verified before/live/paused/replacement rates, exact retained file/revision/bytes,
+  instance isolation, replay bounds, default state and Off/On preservation.
+- Rates during async preparation/held synthesis retain generation and promotion.
+  Repeat adds zero source-parser, fake plan-engine dispatch or synthesis calls.
+  Kokoro fake-runner arguments keep the source plan, fixed voice and synthesis speed;
+  actual factory callbacks target only their player and leave fixture config intact.
+- Both scoped-stop wrappers and unrelated-session cancellation remain unchanged.
+  No real resolver/model inference, mounted UI, host/audio or full-suite proof ran.
+- Rollback boundary: U09 plugin rate binding, focused wiring tests and task evidence;
+  retain U01–U08 PN lifecycle, player API, defaults and original backup safeguards.
+- Observed A+D: production 28, tests 196, docs 41; total 265 <= 400. Commit SHA is in the U09 receipt.
