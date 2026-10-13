@@ -1,194 +1,183 @@
 # Pronunciation-oriented text normalization
 
-**Status: IN PROGRESS — PN-I01 implemented and locally verified; owner review and commit pending (2026-10-11).** PN-I02–PN-I04 remain unimplemented. This document is the feature tracker, not proof of overall completion. Locator: `odd/tasks/pronunciation-normalization.md`, relative to the authoritative write root `<pn-worktree>`. Engram project: `agentvoz`.
+**Status (2026-10-12): IMPLEMENTED / TESTED RUNTIME / BASIC AUDIBILITY CONFIRMED IN LIVE HOST / QUALITY ACCEPTANCE PENDING.** Branch `feat/pn-implementation`, historical checkpoint `3b7dd02` (clean at that checkpoint, not a current delivery claim). I01–I04 are locally committed; three host-found fixes followed. At that historical checkpoint: not published, not merged, not archived. Cached origin/PN-01 later points to dfc1307; this local preparation publishes nothing. Remaining gates are listed under "Acceptance gates".
 
-## Current authorization and next action
+Locator: `odd/tasks/pronunciation-normalization.md`. Engram: project `agentvoz`, topic `odd/pronunciation-normalization/tasks` (single full snapshot, prompt capture off). Per-attempt prose was compacted on 2026-10-12; approved scope, unit closures with commit ids, evidence and limits are kept. Git holds the detailed history.
 
-On **2026-10-11**, the user explicitly authorized production pronunciation normalization (PN), the decisions below, and feature-branch-chain planning. This supersedes the earlier documentation-only constraint and PN-04's separate-approval wait. It does not complete any task. The earlier tracker update was **planning/tracking only, before the first production source write**: its restriction that only the task file could change applied to that historical pass, not to the authorized implementation that follows.
+## Where we are (2026-10-12)
 
-The user subsequently explicitly authorized an isolated worktree from the original reviewed base to avoid the concurrent playback checkout. The parent observed and verified `<pn-worktree>`, branch `feat/pn-implementation`, HEAD `975b447`, clean before this tracking update. These are parent-observed facts supplied to this writer; no commands were rerun here. The first boundary remains `975b447`.
+Local unification checkpoint (U05): per-instance service controls now bind to the
+delivered PN plan/cache lifecycle; deterministic fake-process checks do not renew
+live-host/model/quality acceptance. See `unified-playback-narration.md` for evidence.
 
-**Worktree isolation:** all PN implementation writes belong in `<pn-worktree>`. The original checkout `<playback-worktree>` is **read-only** for this work and contains concurrent dirty playback changes plus the earlier dirty PN tracker. Read its task document only as the approved tracking source; leave its old tracking and playback changes untouched. Do not mutate, restore, or copy source files there, or import concurrent source changes into the isolated worktree.
-
-The earlier resumed tracking pass changed only `odd/tasks/pronunciation-normalization.md` in the isolated worktree and its authorized Engram mirror. Its pass-specific restriction did not rescind production authorization. The PN-I01 writer subsequently verified branch `feat/pn-implementation`, HEAD `975b447`, and only the approved tracker dirty before implementation. **Next action:** parent-owned ordinary review and commit for PN-I01 under the parent-reported RDD-off route, then PN-I02 against the exact approved candidate. No commit, remote push, PR, SDD artifact, Obsidian mutation, Kokoro-environment change, or model download was performed by the implementation writer.
-
-## Approved scope and invariants
-
-Build a non-mutating derived narration representation for Spanish and English technical text. Preserve meaning and the authoritative original; do not arbitrarily translate, paraphrase, summarize, or use an LLM. The earlier competitor/LLM premise remains user-reported and unverified, not a research finding or an implementation requirement.
-
-| Area | Approved decision / required outcome |
+| Item | State |
 | --- | --- |
-| Base language and voice | Add an explicit configurable narration base language, initially `es`, supporting `es` and `en`. Select the existing corresponding ES/EN voice slot once per narration; hold that one voice constant across all bilingual segments. Existing voice controls retain their meanings. |
-| Synthesis and LID | Use the installed Kokoro82M ONNX engine and contextual local LID from the approved sagorsarker checkpoint, pinned to revision `66d0e899b3fcf70d8727e4521c7a9c3f7a1fa73c`. No external inference or external text transfer. Managed provisioning is separate from inference; missing assets must yield explicit diagnostics, not an online inference fallback. |
-| Representations | Keep separate, versioned JSON pronunciation policies and a versioned narration plan. Neither changes UI, history, or original source text. Preserve source traceability even when spoken content is omitted or normalized. |
-| Input bounds | Retain the current 4000-character cap. Make over-limit behavior explicit and observable; never silently cut a technical token. No unlimited-input or pre-generation pipeline is approved. Verify the existing count/limit outcome before integration and record it in tests. |
-| Phoneme bounds | Handle the raw-phoneme 510 limit through safe bounded synthesis units. Test the actual engine boundary; never silently truncate phonemes or split protected technical meanings to force a fit. An unsplittable unit requires an explicit safe failure/outcome. |
-| Playback lifecycle | Preserve pause, instance/session ownership, generation guards, replay, and cache behavior. Cached Repeat reuses the exact stored audio and bypasses normalization and synthesis. |
-| Other engines | Declare non-Kokoro capabilities and fallback behavior explicitly. Do not send a phoneme plan to an engine that does not support it or imply equivalent bilingual pronunciation. |
+| Commits (base `975b447`) | `db77b0b` I01 Markdown/policies/plan; `a7c9db9` I02 offline contextual resolver; `966a182` I03 fixed-voice bilingual Kokoro integration; `f43c3db` I04 isolated provisioning/doctor; `f3d9025`, `95d6faf` docs/validation; `3338f0a` fix: accept object-valued user summary metadata (SDK contract); `19e992c` fix: cancel narration only for events of its own session (`stopSession`); `3b7dd02` fix: adapt Spanish inverted punctuation. |
+| Managed setup | Done under the app home: `pn-venv` plus pinned LID model, about 1.64 GB logical files (model 712,465,856 bytes). Existing `kokoro-venv`, Kokoro model and voices unchanged. |
+| Installed host | OpenCode loaders (`~/.config/opencode/plugins/open-vox.js`, `tui-plugins/open-vox.tsx`) point to this worktree. After the three fixes the user CONFIRMED audible narration in the live host. This is basic audibility only. |
+| Not yet accepted | ES/EN pronunciation quality of production audio, long texts, and Pause/Resume/Repeat quality by ear. |
+| Latest regressions | Full Bun 418 pass / 2 skip (before the punctuation fix; TS unchanged since), Python narration suite 68 pass, typecheck exit 0. |
+| RDD | Clone-local OFF for this checkout (global ON). Ordinary checks only; no native review or receipts exist. A publication gate would need the owner's decision. |
+| Original checkout | `<playback-worktree>` untouched by this work. |
 
-### Plan and source-offset wire contract
+Diagnosis lesson: the `OPEN_VOX_LOG=<file>` environment variable enables the file logger (speech error lines). The live silence was a plan-child exit code 2 from the unsupported-symbol class (stderr `unsupported-symbol: U+XXXX`).
 
-PN-I01 must define and test the wire contract before PN-I03 integrates it. Source references always address the **unchanged original**, never the normalized text, phoneme string, or omitted-content announcement. The wire must explicitly declare its offset unit, range convention, schema version, base language, structural units, source ranges, derived text/phonemes, and policy/decision trace. Do not infer offsets from transformed string lengths.
+**Next action:** ask the user for explicit ES/EN listening acceptance (short and long texts, Pause/Resume/Repeat); then decide the path to main below. No publication is authorized.
 
-Record the existing source-offset convention after inspection and preserve compatibility. Define conversion at the TypeScript/Python boundary explicitly, including non-ASCII text, surrogate pairs, combining characters, repeated substrings, and omitted Markdown. Reject unsupported versions or invalid/out-of-range spans rather than inventing traceability. Until this contract is inspected and specified, its exact offset unit is an **open integration gate**, not a claimed existing API.
+## Path to main (analysis only, no publication authorized)
 
-## Markdown narration policy
+**Graph.** `origin/main` = `5fe4faf`. The playback chain (P1 `03a13e8`, P2 `5804e00`/`9dcca5a`, P3a `975b447`) is NOT in main. P3b `7ab8374`/`d40f0da` (service On/Off) and P4 speed (uncommitted work in the original checkout) sit on top of `975b447` in a different checkout. `feat/pn-implementation` is 16 commits ahead of main (9 PN + 7 playback) and 0 behind. A leftover local branch `feat/pronunciation-normalization` points at `5847572` (a P3a delivery-record commit): a distinct historical branch, not a collision with the new delivery/* namespace; it is preserved.
 
-Support common Markdown plus GFM tables; preserve the original raw Markdown and trace every derived unit to it.
+**Coupling.** PN edits files that P3b/P4 also touch (`src/plugin.ts`, `src/speech-sink.ts`, `src/config.ts`, `src/cli.ts`, tests, TUI/README), so conflicts are expected when combining. PN depends on the P3a sink pause API and persistent player; it cannot target main before the playback chain.
 
-| Source construct | Narration behavior |
+**Size.** PN alone is about 4,300+ authored additions (I01 1,039; I02 ~1,194; I03 ~950; I04 986; plus fixes), far above the 400-line advisory budget. Strategy stays `delivery_strategy: auto-chain`, `chain_strategy: feature-branch-chain`: a draft/no-merge tracker PR, children targeting the tracker, then the immediate parent. Options: a cohesive-size exception per unit, or sub-slicing along the dependent sections already identified (manifest/runtime integrity, installer/CLI/docs, Python adapter/helper/tests, dependent TS integration/tests). Maintainers must approve any `size:exception`.
+
+**Open decision (owner):** rebase/merge order of PN versus P3b/P4, and who accepts the size exception.
+
+**Pre-publication checklist (do not execute):**
+- [ ] Decide rebase/merge order; resolve conflicts with P3b/P4; re-run full Bun, typecheck and Python suites on the combination.
+- [ ] Sanitize tracker and docs of local absolute paths and scratch references before publishing to the public repo (github.com/MrDyslexia/open-vox).
+- [ ] Check LF/CRLF warnings (`.gitattributes`).
+- [ ] Confirm `bun.lock` and dependency additions are acceptable: `mdast-util-from-markdown` 2.0.3, `mdast-util-gfm` 3.1.0, `micromark-extension-gfm` 3.0.0.
+- [ ] README states that `open-vox setup narration` is explicit (about 712 MB model, about 1.64 GB total); release notes for the new `language es|en` setting.
+- [ ] Decide the fate of "one unsupported symbol silences everything" (graceful degrade) before or after merge.
+- [ ] ES/EN listening acceptance on long texts.
+- [ ] Repoint installed-host loaders to the final checkout after merge.
+- [x] Delivery namespace uses new delivery/* refs; existing feat/pronunciation-normalization is preserved, not renamed or overwritten.
+
+## Authorization, isolation, scope
+
+- Production PN authorized 2026-10-11. No LLM, external text inference, translation, paraphrase or arbitrary summary is approved.
+- Managed setup (`open-vox setup narration`) was explicitly authorized by the user and run once; it is never implicit and never part of ordinary speech. Host activation was a separate user-approved step.
+- This tracking update writes only this file: no code, commands, commits, installs, audio or child agents.
+- CodeGraph mapper failure/no index was supplied; direct file reads were used.
+
+## Approved contracts and policies
+
+| Area | Required behavior |
 | --- | --- |
-| Paragraphs, headings, list items | Preserve structural boundaries; retain ordered-list numbering. Punctuation and boundaries support pauses but do not guarantee natural phrasing. |
-| Emphasis | Speak plain text, not formatting markers. |
-| Technical inline code | Protect identifier, command, flag, version, path, number, and symbol meanings; apply only approved pronunciation rules. |
-| Fenced/indented code blocks | Omit contents; announce `Bloque de código omitido` for `es`, `Code block omitted` for `en`. |
-| GFM tables | Omit contents; announce `Tabla omitida` for `es`, `Table omitted` for `en`. |
-| Links and raw URLs | Speak visible link text; omit destination URLs and raw URLs. Retain raw source and omission trace. |
-| Images | Speak alt text when present; do not invent a description when absent. |
-| Blockquotes | Speak their text with structural boundaries. |
-| Thematic separators | Silent separation. |
-| HTML and comments | Omit; do not expose markup or comment contents as narration. |
+| Original/source | Narration is derived; original UI/history/source unchanged. Policies, structural plan and resolved envelope are separate representations; source ranges address the unchanged original. |
+| Base language/voice | Explicit `es`/`en` base (initially `es`). One existing voice slot selected once per synthesis, constant across languages. Existing voice controls keep their meaning. |
+| Engines | Kokoro ONNX: language-specific G2P/raw phonemes. Piper/SAPI get bounded flattened text and configured language, never JSON/phonemes; reduced pronunciation is explicit. Selection stays Kokoro/Piper/SAPI. |
+| Input/expansion | At most 4000 UTF16 narration units including separators, numbering and announcements. Explicit cap outcome and omission trace; no technical-token cuts. Resolver expansion over the cap fails readiness without cutting. |
+| Inference | Pack adjacent G2P fragments within each block into at most 510 final raw phonemes, counting inserted boundary spaces. Language-run boundaries are not model boundaries. Never split protected technical units; indivisible oversize fails. |
+| Local LID | `sagorsarker/codeswitch-spaeng-lid-lince`, revision `66d0e899b3fcf70d8727e4521c7a9c3f7a1fa73c`. Pinned local assets only during inference; no downloads or external text transfer. Missing assets/dependencies give diagnostics and deterministic policy/base fallback. |
+| Lifecycle | Preserve queues, ownership, instance/session guards, generation supersession, stop/pause, candidate promotion and cache hold/discard/error handling. Exact cached Repeat does no text/preparation/resolution/synthesis. |
 
-### Resolver priority and phoneme safety
+### Markdown behavior
 
-Apply this order, with deterministic policy decisions taking precedence over detector evidence:
-
-1. Acronyms: spell letters in the configured base language according to policy.
-2. English identifiers: segment into English words without translation (for example, `getUserName` to `get user name`); preserve original meaning and source trace.
-3. Known names: explicit policy for names such as `GitHub`, `TypeScript`, and `Docker`.
-4. Whole known expressions: explicit whole-expression policy, such as `Open editor`; do not partially resolve a known expression.
-5. Contextual English/Spanish evidence from the pinned local detector.
-6. Configured-base-language fallback for unresolved or ambiguous text, including ambiguous names.
-
-Do not extend an English decision to adjacent text merely because it is nearby. Protect versions, locale-sensitive numbers, paths, commands, flags/options, and symbols against meaning-changing expansion. Raw URL omission is a Markdown decision, not permission to alter the original URL.
-
-Map angular quotes to ASCII quotes **only in final synthesis phonemes**, explicitly tracing the substitution while preserving raw source and intermediate evidence. Other unsupported phonemes fail explicitly; do not silently drop or generalize them.
-
-## Historical tasks — retained, not completion evidence
-
-The original PN-01–PN-05 IDs remain recognizable below. Their old documentation-only status described the earlier authorization, not today's authority. All remain unchecked; the active delivery checklist is PN-I01–PN-I04.
-
-- [ ] PN-01 — Define language/context rules, ambiguity fallback, and protected technical tokens. Approved decisions now guide PN-I01 and PN-I02; production contracts/tests remain pending.
-- [ ] PN-02 — Historical deterministic-versus-optional-LLM evaluation proposal. Superseded in scope by deterministic policies plus pinned contextual local LID; no LLM, provider selection, or external inference is approved. Remaining latency, resources, privacy, offline operation, reproducibility, and naturalness evaluation belongs to PN-I02 and PN-I04.
-- [ ] PN-03 — Derived speech integration separated from the authoritative original, with pause, ownership, replay, and cache guards. Active work: PN-I01 and PN-I03.
-- [ ] PN-04 — Historical instruction to await separate implementation approval. That wait was superseded by explicit production authorization on 2026-10-11; PN-I01 is now implemented but not owner-reviewed or committed. Active work: PN-I01–PN-I04.
-- [ ] PN-05 — Regression and listening evaluations for meaning fidelity, pauses, and fluency. Active work: PN-I03 and PN-I04; no production improvement is claimed.
-
-## Delivery strategy and review boundaries
-
-- `delivery_strategy: auto-chain` — resolved user consent for chain planning, not permission to publish.
-- `chain_strategy: feature-branch-chain` — do not switch to stacked-to-main delivery.
-- Forecast: **1500–2500 authored changed lines including tests**; an estimate, not a measured diff. Review budget is advisory **400 additions + deletions per unit/slice** for this plan. Each unit may need cohesive sub-slices; do not code-golf or remove tests/docs to fit.
-- Make one honest slicing pass when actual diffs exist. Record actual additions/deletions and explain cohesive overages; recommend an owner-approved exception if needed, without fabricating approval.
-- First boundary: **`975b447`**, the parent-verified initial HEAD of `feat/pn-implementation` in the isolated worktree. Later boundaries must be exact candidate commits from the immediately preceding unit/slice, not the accumulated branch or a checkbox. No PN implementation commit identities beyond the initial boundary exist in this tracker.
-- Local order: `975b447 -> PN-I01 -> PN-I02 -> PN-I03 -> PN-I04`. Each unit includes its behavior, tests, relevant docs, verification evidence, and rollback scope. Preparation and implementation use the isolated worktree, never the concurrent playback checkout.
-- Future publication, if separately authorized, uses a draft/no-merge feature tracker and children targeting the tracker branch, then the immediate parent branch. No tracker PR, child PR, remote branch, or additional local slice branch is created by this update.
-
-### Native RDD authority
-
-Record the user-decided **global native RDD** route for all units. This pass does not inspect or change the runtime kill switch. Before a candidate review, the owner must verify the effective mode and use the **owner CLI only**; if disabled, report `disabled/unmanaged` rather than fabricating receipts. Bind any future review and lineage to the exact candidate and previous reviewed boundary. No review, approval, receipt, correction transaction, or delivery-gate success is claimed now. Delegation assigns preparation/implementation work, not review authority.
-
-**Current corrective route (2026-10-12):** parent reports RDD off and requests one ordinary bounded correction. The global native route above is retained as historical authorization, not a claim that it ran. No native review/receipt is created or asserted; parent owns ordinary re-review and closure.
-
-## Active work units — completion gates pending
-
-Every unit uses a **delegated route** because it requires multi-file implementation and preparation. This tracker records the route only; no delegation is launched here. Tests and docs travel with their behavior. No unit is complete until candidate-bound verification and owner review evidence are recorded.
-
-### PN-I01 — Markdown structure, contracts, policies, bounded text
-
-- [ ] Define versioned JSON policy and narration-plan contracts, explicit source-offset wire semantics, and immutable-original traces.
-- [ ] Implement common Markdown/GFM structural extraction and the approved omissions, announcements, numbering, and protected meanings.
-- [ ] Cover the retained 4000 cap, explicit limit outcome, no technical cuts, and source-range conversion in bounded text tests.
-- **Route:** delegated implementation prepared and verified below; owner review/commit still pending. Dependency/start: `975b447`; end: pending exact candidate.
-- **Initial expected checks (historical):** focused `bun test` for new structure/contract/policy/text-boundary modules and `bun run typecheck`; concrete paths and observed results are now recorded below. Runtime boundary: preparation input to serialized narration plan; prove untouched originals and explicit over-limit behavior.
-- **Rollback:** remove this unit's new parser/contracts/policies and preparation entry points with their tests/docs; restore the prior preparation behavior. If later units depend on these contracts, unwind dependents first, never leave an incompatible wire consumer.
-
-#### PN-I01 implementation evidence — not owner review or completion
-
-- **Independent API:** `createNarrationPlan(original, defaultLanguage = "es", policy = defaultNarrationPolicies)` in `src/markdown-narration.ts`; `validateNarrationPolicies`, `validateNarrationPlan`, `validateSourceRange`, and `flattenNarrationPlan` in `src/narration-plan.ts`. No active sink/plugin/settings imports were added. Existing `prepareSpeech` and its 4000-code-unit default remain unchanged; inspection found no pre-existing source-range wire in preparation.
-- **Wire:** schema version 1; `offsetUnit: utf16`; `rangeConvention: end-exclusive`. Every segment/block/omission addresses the exact unchanged `original`. Blocks carry structural type, newline boundary, list depth and quote depth. Segments carry text/source/protection/kind and optional reason. Policy is a detached JSON snapshot. `languageStatus: unresolved` explicitly defers language decisions and phonemes to PN-I02; dictionaries are not yet a resolver.
-- **Python boundary for PN-I02:** do not apply UTF16 offsets directly to Python code-point indices. Build cumulative UTF16 prefix lengths over the unchanged original (BMP scalar: 1 code unit; non-BMP scalar: 2); map both endpoints only at exact prefix boundaries. Reject mid-surrogate/out-of-range offsets and unsupported versions. Combining marks retain their own offsets; do not normalize Unicode or search for repeated labels. Conversion code and cross-runtime execution remain PN-I02 work, not claimed here.
-- **Policies:** `resources/narration-policies.json` governs code/table announcement versus omission, image alt versus omission, visible links, URL/HTML/definition omissions, separators, and unknown-node omission versus failure. API/HTTP bilingual spellings, English names/whole expressions and explicit configured-language fallback are validated for PN-I02 reuse. Invalid schema/types/enums/counts/spans fail closed.
-- **HTML safety (corrected):** paired block/inline HTML shares source-ordered suppression across AST blocks, including nested elements. Valid closing tags restore following Markdown text; unclosed/mismatched elements conservatively omit the remainder. Tag scanning is limited to AST-recognized HTML, respects quoted attributes/comments/processing instructions/CDATA and raw-text elements, and never renders or executes HTML. Unsupported GFM footnotes remain explicitly traced/omitted, or fail under the configured unknown-node policy.
-- **Bounds:** flattened spoken input counts UTF16 code units including newlines, ordered numbering and announcements, at most 4000 (policy may lower, never raise it). Stop at lexical/segment boundaries, retain structural blocks, and trace the omitted source suffix. Inline code is literal and indivisible; an oversized technical unit yields `unsplittable`, while remaining-space exhaustion yields `truncated`. Neither technical tokens nor surrogate pairs are cut; there is no phoneme-510 or audio claim.
-- **Parser/install:** public-registry `bun add --registry https://registry.npmjs.org mdast-util-from-markdown@2.0.3 mdast-util-gfm@3.1.0 micromark-extension-gfm@3.0.0` installed 90 packages including the already declared dev dependencies in this worktree, with `package.json`/`bun.lock` updated. No existing `node_modules` was present. Installed entrypoints and runtime namespace exports confirmed `fromMarkdown`, `gfmFromMarkdown`, and `gfm`; Context7's `gfmExtension` example aliases were not used. No ambient credentials were inspected, no private text sent to documentation services, and no ML assets installed.
-- **Observed RED:** focused `bun test test/narration-plan.test.ts test/markdown-narration.test.ts` against callable scaffolds: 0 pass, 16 fail, 20 assertions. Failures included actual narration, bounds and rejection behavior, not only missing imports. Later targeted regressions exposed cross-paragraph HTML leakage and incomplete limit traces before their fixes.
-- **Initial GREEN (historical):** `bun test test/narration-plan.test.ts test/markdown-narration.test.ts`: 25 pass, 0 fail, 142 assertions (117 ms). `bun run typecheck`: exit 0. `bun test`: 349 pass, 2 skip, 0 fail; 351 tests across 17 files, 1051 assertions (6.57 s). Later independent findings prompted the single corrective transaction below. No repository formatter/normalizer script is configured; no formatter was introduced. `git diff --check` passed with Git's existing LF-to-CRLF warnings only.
-- **Runtime evidence:** deterministic tests exercise the actual maintained parser and serialized structural wire, Unicode/repeated-label source ranges, both announcement languages, protected literals, exact/over-cap cases, HTML and policy negatives. Existing legacy preparation regression tests pass. Actual Kokoro, local LID, playback lifecycle and listening checks are N/A for this disconnected unit and remain PN-I02–PN-I04 gates.
-- **Initial authored budget (historical):** production modules/policy/tests/package manifest: 694 additions, 0 deletions; generated `bun.lock` excluded. Before correction, base-relative total including the tracking transplant and this evidence section: 853 additions + 43 deletions = 896 authored changed lines. Tracker then: 159 additions + 43 deletions; generated lock: 123 additions, reported separately. Parent's earlier tracker transplant is not newly authored production work by this writer.
-- **One slicing pass:** contract/policy validation and parser/boundary behavior are conceptual review sections, but `test/narration-plan.test.ts` also exercises the actual parser/bounds and the wire snapshot travels with it. Keep PN-I01 cohesive with tests/docs; it exceeds 400 lines. Parent should authorize a cohesive-size exception or prepare candidate-bound review slices without deleting tests, minifying, or changing `feature-branch-chain`. No exception/review approval, branch, PR or commit is fabricated.
-- **Exact rollback surface:** remove `src/narration-plan.ts`, `src/markdown-narration.ts`, `resources/narration-policies.json`, `test/narration-plan.test.ts`, `test/markdown-narration.test.ts`; revert only these parser dependency entries/lock changes and PN-I01 evidence in this tracker. Preserve the pre-existing approved tracker transplant and all playback work. No active speech preparation behavior needs restoring because it was never changed. Unwind later consumers first if subsequently integrated.
-
-#### PN-I01 bounded correction — 2026-10-12, parent closure pending
-
-- **Confirmed findings / RED:** new regressions reproduced block HTML leakage, lost visible postfix after cross-paragraph inline HTML, lexical joins after omissions, non-HTTP URI autolink speech, and protected inline-code whitespace trimming. Focused `bun test test/narration-plan.test.ts test/markdown-narration.test.ts`: 24 pass, 8 fail, 151 assertions before source correction.
-- **HTML correction:** `htmlOmissions` computes merged original-source intervals from a shared tag stack over AST HTML nodes; extraction suppresses every covered block/inline unit. Nested outer elements remain hidden until their matching close. Valid closes restore following prose, while unclosed/mismatched markup remains conservative. Exact omission spans are validated and serialized; quoted `>` and `/>`, comments, processing instructions, CDATA and raw-text tags cannot introduce false opens/closes.
-- **Separation / URL correction:** one pending-omission path inserts a source-traced space only between adjacent Unicode word characters, avoiding concatenation after HTML/comments, empty/omitted images, unknown footnotes and raw autolinks. Existing whitespace and punctuation are not gratuitously rewritten. All parser-recognized non-explicit autolinks (URI/email/GFM WWW) are omitted; explicit Markdown link labels remain spoken, even when a deliberate label is itself a URL. Windows/POSIX paths and protected code remain intact.
-- **Protected whitespace / bounds:** flattening trims only unprotected layout whitespace, retaining the inline-code value after CommonMark's own whitespace normalization. This is not byte-for-byte preservation of raw code delimiters/spacing. Inserted separators and preserved protected spaces count toward the cap. An oversized announcement is safely omitted with `truncated` and `length-limit`; oversized inline technical code yields `unsplittable`. No announcement or technical token is partially cut.
-- **Final verification:** focused command above: 32 pass, 0 fail, 201 assertions (132 ms); `bun run typecheck`: exit 0; one final `bun test`: 356 pass, 2 skip, 0 fail, 358 tests across 17 files, 1110 assertions (6.44 s); `git diff --check`: passed with existing LF/CRLF warnings only. Source follows existing formatting; no configured normalizer or new formatter. Active speech/audio/model runtime remains unchanged and unexercised by this structural correction.
-- **Scope / rollback:** only the two narration modules, their two test files, and this tracker changed in the correction; no dependency/lock/resource changes or new modules. Revert these correction edits together to restore the pre-correction PN-I01 implementation; that rollback reintroduces the confirmed defects and is not a recommended shipping state. Original worktree, source/UI/history, Kokoro, models, commits and remotes remain untouched.
-- **Current authored budget:** narration modules/tests/policy/manifest total 825 additions, 0 deletions against `975b447` (131 net new lines over pre-correction production artifacts). Full authored total including tracker transplant/evidence: 996 additions + 43 deletions = 1039 lines, excluding generated lock (unchanged 123 additions). Tracker: 171 additions + 43 deletions. The existing one-pass slicing/size-exception recommendation remains; no new slicing loop, native review, review approval, receipt or overall PN completion is asserted.
-
-### PN-I02 — Python local detector and deterministic resolver
-
-- [ ] Add pinned local contextual detector loading and resolver precedence, known names/expressions, ambiguity fallback, and no adjacent English extension.
-- [ ] Add policy/trace tests for acronyms, identifiers, technical meanings, angular-quote final-phoneme substitution, and explicit unsupported-phoneme failure.
-- [ ] Define explicit local-asset failure behavior, deterministic reproducibility, and offline inference; no hidden network fallback.
-- **Route:** delegated; prepare Python adapter/model/policy boundaries. Dependency/start: PN-I01 exact candidate, pending; end: pending exact candidate.
-- **Expected checks, not run:** Python `unittest` with an explicit new discovery runner (`python -m unittest discover -s <new-test-directory> -p 'test_*.py'`); resolve and record the concrete directory/interpreter before execution. Focused `bun test` for wire/adapter contracts and `bun run typecheck`. Runtime boundary: plan input through local resolver output, including offline/missing-asset negative controls.
-- **Rollback:** remove this unit's detector/resolver/adapter additions with their tests/docs and restore the prior Python synthesis entry behavior; PN-I01 contracts may remain inactive. Unwind dependent integration first.
-
-### PN-I03 — Plan-aware engine/sink, fixed voice, base language
-
-- [ ] Integrate plan-aware engine and sink, one fixed voice from the configured base-language slot, and a new `es`/`en` base-language setting without redefining voice controls.
-- [ ] Bound raw phonemes safely at 510; preserve structural pauses and explicit unsplittable/unsupported outcomes, without unlimited-input or pre-generation behavior.
-- [ ] Declare non-Kokoro capability/fallback behavior and test it, rather than implying phoneme support.
-- [ ] Prove pause/resume, cancellation, session/instance ownership, generation supersession, and exact cached Repeat with zero preparation/synthesis on repeat.
-- **Route:** delegated; prepare lifecycle and engine/sink/settings impact map. Dependency/start: PN-I02 exact candidate, pending; end: pending exact candidate.
-- **Expected checks, not run:** focused `bun test` for engine/sink/settings/cache/lifecycle modules, `bun run typecheck`, and the concrete Python unittest runner. Runtime checks must exercise the actual installed Kokoro path, bilingual fixed-voice output, bounded units, fallback engine, pause/resume, stale ownership/generation, and cached Repeat; mocks alone do not prove playback.
-- **Rollback:** restore prior engine/sink/settings wiring and lifecycle behavior, removing this unit's base-language control and integration tests/docs; keep existing ES/EN voice meanings and cached audio compatibility. Earlier policies/resolver may remain disconnected, not partially wired.
-
-### PN-I04 — Managed provisioning, doctor, docs, full evidence
-
-- [ ] Add managed pinned model provisioning and doctor diagnostics for local readiness, exact checkpoint/revision, dependencies, and clear offline/missing-asset failures.
-- [ ] Document settings, narration policy, capabilities, source/wire contract, limits, provisioning versus inference, and operational failure behavior.
-- [ ] Run full regression and record exact candidate/commands/results, startup and warm narration latency/resource measurements, and production listening evidence for ES/EN fidelity, pauses, and fluency.
-- **Route:** delegated; prepare provisioning/diagnostics/docs/verification surfaces. Dependency/start: PN-I03 exact candidate, pending; end: pending exact candidate.
-- **Expected checks, not run:** full `bun test`, `bun run typecheck`, explicit Python unittest runner, managed provisioning/doctor scenarios, and actual-engine lifecycle/audio/latency evaluation. Provisioning network access must not be confused with external text inference; verify offline narration after provisioning.
-- **Rollback:** remove this unit's provisioning/doctor additions and related docs/tests, restore prior managed setup behavior, and disable PN if required assets are no longer available. Do not uninstall the user's existing Kokoro installation or delete unrelated model assets. Roll back dependent integration as necessary.
-
-## Evidence ledger and acceptance gate
-
-| Evidence | Status / permitted conclusion |
+| Source construct | Narration |
 | --- | --- |
-| Scratch listening: 15 phrases | Historical preparation evidence reported positively by the user; not production fidelity, latency, integration, or lifecycle proof. |
-| Scratch resolver tests: 13; adapter tests: 20 | Historical preparation results supplied for this plan; not rerun or independently audited here, and not proof of production integration. |
-| Parent tracking baseline | Parent verified the isolated worktree on `feat/pn-implementation`, HEAD `975b447`, clean before the tracking transplant. The tracking writer did not rerun commands or inspect concurrent playback source; implementation writer checks are recorded above. |
-| Earlier tracking-only update | Approved scope/history transplanted from the original checkout's task document into the isolated worktree. Planning only; no production writes, dependency/test edits, commands, functional tests, synthesis, or listening sessions performed in that earlier pass. Original checkout and its dirty tracker/playback changes left untouched. |
-| Production candidates/reviews | No commits or reviews recorded. Authored-line counts are recorded above; exact candidates, owner CLI reviews, and receipts remain pending. |
-| PN-I01 implementation | Independent structural API implemented and locally verified as above. Work-unit checkboxes remain unchecked pending parent-owned candidate review/commit. Active narration, resolver, models and playback wiring are unchanged. |
+| Paragraphs/headings/lists/quotes | Speak text; keep structural boundaries, list numbering and depth. Pauses support structure, no prosody guarantee. |
+| Emphasis | Plain text without markers. |
+| Inline technical code | Preserve protected identifiers, commands, flags, versions, paths, numbers and symbol meanings; only approved rules apply. |
+| Fenced/indented code | Omit contents; announce `Bloque de código omitido` / `Code block omitted`. |
+| GFM tables | Omit contents; announce `Tabla omitida` / `Table omitted`. |
+| Links/raw URLs | Speak visible labels; omit destinations and raw autolinks; keep traces. |
+| Images | Speak supplied alt text only. |
+| HTML/comments/definitions | Omit; paired/nested HTML suppression follows original source intervals across paragraphs; unclosed/mismatched markup is conservative. |
+| Thematic separators/unsupported nodes | Silent separation; unknown nodes traced/omitted or fail per policy. |
 
-Future acceptance must cover both configured languages and negative controls, not just favorable samples:
+Resolver precedence: configured acronym spelling; eligible English identifiers without translation; known names; whole known expressions; contextual ES/EN evidence; configured-base fallback. Deterministic policy precedes detector evidence. Do not extend English to adjacent text. Dictionary expressions cannot enter, leave or bridge protected units. `(API)`/`(HTTP)` keep parentheses and apply spelling; attached calls/commands stay protected; dollar/environment references unchanged. Missing/gapped/conflicting evidence uses explicit fallback.
 
-- [ ] Original UI/history/source stays unchanged; versioned policy/plan validation and source offsets are explicit and correct across TypeScript/Python and Unicode cases.
-- [ ] Approved Markdown behavior, acronym priority, English identifier segmentation, known-name/expression policy, contextual evidence, and configured fallback all match golden/contract cases without arbitrary translation.
-- [ ] Cases include `getUserName`, `API`, `HTTP`, `>=`, `v1.2.3`, Windows/POSIX paths, raw URLs/links, locale-ambiguous decimals, commands/flags, angular quotes, code/tables/images/HTML, and ambiguous adjacent-language text.
-- [ ] 4000-character and 510-phoneme boundaries produce explicit outcomes, preserve protected meanings, and do not introduce unlimited input or pre-generation.
-- [ ] One configured voice stays constant across bilingual segments; base-language changes do not change the meaning of existing voice controls. Non-Kokoro behavior is explicit and tested.
-- [ ] Exact cached Repeat causes no preparation or synthesis; real runtime evidence covers pause, ownership, sessions, generation supersession, cancellation, and failure recovery.
-- [ ] Managed pinned assets/doctor and offline inference are verified, with no external inference, text transfer, paraphrase, or LLM.
-- [ ] Full regressions, latency/resource measurements, and listening results are candidate-bound. Naturalness is judged by audio evidence, never guaranteed by structure or scratch success.
+Final-phoneme symbols (3b7dd02): `«` `»` map to ASCII quotes; `¡` `¿` are removed from final phonemes only (traced with `rawIndex`, `codepoint`, `to:""`, doubled space collapsed). `[ ] { }`, other unsupported symbols and symbols inside protected technical text still fail explicitly with `unsupported-symbol: U+XXXX`. No silent filtering or invented replacements. Ellipsis, em dash, curly double quotes and parentheses are supported; the phonemizer already drops apostrophes, hyphens and en dashes.
 
-## Remaining preparation gates and tracking
+### Wire and trace references
 
-Before the corresponding source changes, inspect the current offset/limit/lifecycle contracts and identify concrete module/test paths in the isolated worktree. Before provisioning, verify the exact approved sagorsarker checkpoint locator and artifact integrity alongside the pinned revision; do not guess a model ID. Record measurable latency/listening acceptance thresholds before claiming improvement. These gates refine execution; they do not reopen the approved scope or silently invent requirements.
+- I01 schema 1 `NarrationPlan`: `offsetUnit: utf16`, `rangeConvention: end-exclusive`, `languageStatus: unresolved`, base language, detached policy, blocks/segments/omissions, bounded length, complete/truncated/unsplittable outcome.
+- Python converts UTF16 endpoints through cumulative scalar prefixes; rejects mid-surrogate/out-of-range input; no normalization; offsets never recovered by substring search.
+- I02 resolved schema 1 keeps the detached `structuralPlan`; units keep source, derived range, spoken text, language, reason, protection and raw detector evidence. `decisionRange` and detector offsets are block-derived Python codepoints. `synthesisReady` and `resolutionOutcome` gate expansion/unsplittable input.
+- I03 packed chunks keep block identity and `runs[]` (indices, language, ranges, raw/adapted phonemes, mappings, `separatorBefore`, chunk-local `phonemeRange`/`rawPhonemeRange`). Trace boundaries, not exact original-token ranges.
 
+## Delivery
+
+`delivery_strategy: auto-chain`; `chain_strategy: feature-branch-chain`; advisory budget 400 additions+deletions per slice, never reached by deleting tests/docs. Dependency order: `975b447 -> I01 db77b0b -> I02 a7c9db9 -> I03 966a182 -> I04 f43c3db -> f3d9025 -> 95d6faf -> 3338f0a -> 19e992c -> 3b7dd02`. Native review authority belongs to the owner.
+
+Historical PN-01–PN-05 tasks stay open as umbrella items: PN-01 language/context and protected meanings (I01/I02); PN-02 superseded LLM proposal, resource/accuracy evaluation remains; PN-03 derived integration and lifecycle (I01/I03); PN-04 superseded approval wait; PN-05 fidelity/fluency/listening evaluation (pending).
+
+## Unit closures and retained evidence
+
+### PN-I01 — Structure, contracts, policies (`db77b0b`)
+- [x] Versioned contracts, source offsets, immutable-original traces; Markdown/GFM extraction, omissions, numbering, protected meanings; 4000 cap with explicit outcomes.
+- Evidence: RED 24 pass/8 fail; focused 32 pass/201 assertions; typecheck 0; full 356 pass/2 skip. Fixed cross-paragraph HTML suppression, joins after omissions, non-HTTP autolinks, protected-code whitespace. Authored 1,039 lines plus lock changes (Markdown dependencies belong here).
+- Rollback: unwind consumers first, then remove parser/contracts/policy/tests and dependency entries together.
+
+### PN-I02 — Local detector and resolver (`a7c9db9`)
+- [x] Strict wire validation; deterministic policy priority, protected meanings, known expressions/names, identifier routing, configured fallback; local-only detector with bounded windows and explicit missing-asset/dependency failures.
+- Detector: lazy Torch/Transformers, absolute local path, `local_files_only=True`, `trust_remote_code=False`, CPU/eval/no-grad, label/config/logit validation, at most 512 tokens per window; oversized atoms degrade explicitly. Scores are uncalibrated softmax.
+- Evidence: Python 37 pass; 30 actual TS plans across ES/EN. Fixed protected dictionary boundaries, prose-parenthetical acronyms, dollar/environment references.
+
+### PN-I03 — Fixed-voice bounded synthesis (`966a182`)
+- [x] Plan-aware engine/sink, explicit `es`/`en` setting (`open-vox language es|en`, default `es`), unchanged voice slots, bounded unfiltered per-language G2P, within-block packing, explicit protected/unsupported/expansion failures, block pauses (0.18 s), text-only non-Kokoro fallback, live-engine dispatch.
+- Runtime contract: strict one-document JSON on stdin; one reused Kokoro model/style per utterance; one raw `create` per packed chunk; bounded audio (600 s ceiling); one final mono 24 kHz PCM16 WAV written only after all inference succeeds; failed write removes the candidate. Voice/speed snapshot once per synthesis; 120 s process budget.
+- Packing defect fixed: `Hola local, Open editor y seguimos.` gave three model calls instead of one. RED 16 tests/3 failures; GREEN Python 56. Actual run (absent LID, degraded): one 38-char input, one inference, 2.176 s audio. That run proved packing, not contextual detection.
+- Evidence before fixes: focused 127 pass/366 assertions; full 367 pass/2 skip.
+
+### PN-I04 — Managed provisioning and operational closure (`f43c3db`)
+- [x] Explicit `open-vox setup narration` creates `<app-home>/pn-venv`; existing Kokoro assets are required and reused read-only; no `setup all` exists. Pinned CPU Torch index plus anonymous PyPI; child isolation, offline flags, no implicit Hub token; inference never provisions.
+- Pins: Torch 2.14.1+cpu, Transformers 5.19.0, Tokenizers 0.23.3, safetensors 0.8.0, huggingface_hub 2.2.0, kokoro-onnx 0.6.1, onnxruntime 1.31.0, soundfile 0.14.0, numpy 2.5.3.
+- Model: bundled `resources/lid-model.json`, five files, 712,465,856 bytes (weights 711,469,178 bytes, SHA256 `623ce7a7aa55e3ed5516b9962c66cdd5d51fe04725ff2eaf9f60d9daad8833b4`). Strict manifest, exact HTTPS URLs, anonymous manual redirects, owned `.partial` staging, hash check before exclusive publication; corrupt/extra/redirected assets fail closed without overwrite.
+- Readiness: schema-1 hint with `provenance: managed-environment-v1`; doctor hashes files and probes imports/versions/CPU without loading weights; Python re-verifies hashes once per detector load. Missing PN leaves Kokoro available with explicit degraded LID.
+- Provenance correction: the first probe accepted matching versions from a foreign interpreter/module origin and setup reached pip first. Now `narrationProbeArgs(expectedVenv, basic)` passes the expected root; the basic identity probe runs before pip, the full probe checks all nine package specs/distributions before and after import. RED 60 pass/3 fail; GREEN focused 68 pass/251 assertions, full 396 pass/2 skip, Python 61, typecheck 0.
+- Closure: 14 files, 986 additions / 41 deletions at `f43c3db` (over budget; no exception inferred).
+- Rollback: remove I04 provisioning/doctor/docs; never uninstall the user's Kokoro environment.
+
+### PN-I05 — Standalone ONNX FP32 LID backend, inactive (IN PROGRESS, 2026-10-13)
+Direction (Engram #2229 evidence, #2232 integration limits, #2250 resume runbook): replace the Torch/Transformers detector runtime with the original token classifier exported to ONNX FP32, run with onnxruntime + tokenizers + numpy only. No int8, Lingua, LLM student or retraining; no new studies. Units, in order:
+- [x] **I05.1 Backend, manifest, tests (inactive).** `scripts/narration_lid_onnx.py`, `resources/lid-model-onnx-fp32.json`, `test/python/test_narration_lid_onnx.py`. Keep nine labels, Unicode offsets, 510/512 windows, whole-word evidence, non-binary fallback, original source and protected controls. Not selected from the plugin; active install, defaults and `main` unchanged. Backend identity/hashes recorded separately from the strict schema-1 `narration_synthesis` contract.
+  - Observed evidence: RED = `python -m unittest discover -s test/python -p "test_narration_*.py"` gave 69 tests/1 import error (module absent) on top of the 68-test baseline; GREEN = new file 31 tests OK (1 skip: symlink creation unavailable), full Python narration suite 99 OK/1 skip with the managed `pn-venv` interpreter (numpy 2.5.3, onnxruntime 1.31.0, tokenizers 0.23.3), `bun test` 418 pass/2 skip/0 fail, `tsc --noEmit` exit 0. The real-asset integration test runs against hard-linked reference files in an exact-set directory (layout: `model.onnx` plus `tokenizer/*`) and pins only high-confidence labels (score > 0.8); it skips when assets or runtime are absent (system Python without numpy: 31 tests OK/3 skips). Nothing imports the module outside its tests; backend marker lives in result field `backend`, schema-1 `identity` keys unchanged.
+- [x] I05.2 Reproducible packaging, tokenizers full LICENSE, bundle (local verified bundle; ~709 MB graph never a plain Git file). Parallel inactive ONNX asset layer `src/narration-onnx-assets.ts` (strict manifest validator mirroring `validate_manifest`, `narrationOnnxPaths`, `ONNX_PACKAGES`, ready record + `resolveNarrationOnnxPython`, `assertOnnxLidDirectory`, `copyOnnxModelFromSource`), `test/narration-onnx-assets.test.ts`, `THIRD_PARTY_NOTICES.md`. Torch layer untouched; nothing imports the module.
+  - Observed evidence: RED = `bun test test/narration-onnx-assets.test.ts` failed with "Cannot find module ../src/narration-onnx-assets" (0 pass/1 error) with the module absent; GREEN = 17 tests/0 fail (143 -> 149 expects incl. the real-asset hash check, ~0.5 s), full `bun test` 435 pass/2 skip/0 fail (418 baseline + 17), `bun run typecheck` clean, Python narration suite 99 OK/1 skip unchanged. A test runs the same 12 manifests through the TS and Python validators and requires identical accept/reject plus equal filenames and graph/tokenizer hashes; real reference assets match the manifest. Directory junctions are exercised; file symlinks are not creatable here (EPERM), so that branch exits early. **Licensing status (updated 2026-10-13, see the license-notices bullet below): the tokenizers Apache-2.0 text, onnxruntime MIT text and the bundled libsndfile LGPL-2.1 pointer are now verified; the model licensing chain is NOT closed (MIT tag without a license file, owner confirmation pending), so derived ONNX/tokenizer assets must not be redistributed.**
+  - Observed evidence (license notices): `THIRD_PARTY_NOTICES.md` now names a source per entry. tokenizers 0.23.3 ships no LICENSE locally, so the Apache-2.0 text comes from the upstream tag `v0.23.3` (raw.githubusercontent.com/huggingface/tokenizers); onnxruntime 1.31.0 has `onnxruntime/LICENSE` (MIT) and `ThirdPartyNotices.txt` in the package dir; the soundfile wheel bundles `_soundfile_data/libsndfile_x64.dll` plus an LGPL-2.1 `COPYING`; the model card at the pinned revision declares `license: mit` but the repo has no LICENSE file and the base model/LinCE terms are unchecked. Newly found and left open: `phonemizer` (GPL-3+) and `espeakng-loader` (license not verified) arrive transitively through kokoro-onnx.
+- [x] I05.3 `setup`/`doctor` for a dedicated environment (versions, import origin, hashes). Explicit `open-vox setup narration-onnx --lid-source <dir>` (new target; `setup narration` and the Torch path unchanged, no `setup all`), `src/setup-onnx.ts` (`ONNX_PROBE`, `onnxProbeArgs`, `setupNarrationOnnx`), `inspectNarrationOnnx` in `src/narration-onnx-assets.ts`, doctor INFO/OK/WARN line, README.
+  - Observed evidence: RED = new `test/setup-onnx.test.ts`/`test/narration-onnx-doctor.test.ts` and 6 new `test/cli.test.ts` cases failed (modules/exports absent); GREEN = full `bun test` 474 pass/2 skip/0 fail (435 baseline + 39), `bun run typecheck` clean, Python narration suite 99 OK/1 skip unchanged (all injected fake deps and temp dirs; no real setup, pip, venv, download or app-home access). Flow: Kokoro files required, managed-path checks, source verified by size+sha256 BEFORE any write, existing model dir verified or preserved, venv `pn-onnx-venv`, identity probe before pip, old ONNX marker deleted, one `--isolated --only-binary=:all:` pip from anonymous PyPI (no torch index), `ONNX_PROBE` (all origins/roots/versions before import, re-check after, requires CPUExecutionProvider, never imports torch/transformers), verified staged copy, directory recheck, marker last. Doctor ONNX line is printed only when the ONNX inspector is wired; absence is INFO and never red. Backend is still NOT selected (I05.4).
+- [x] I05.4 Coherent explicit interpreter/backend/manifest selection. New persisted `narrationBackend` (`torch` default | `onnx`, validated like `language`; old files without the key keep working), `open-vox narration-backend [torch|onnx]` (no arg prints; `onnx` refused with exit 1 and nothing persisted unless the doctor's ONNX readiness holds; `torch` always allowed), `src/narration-runtime.ts` (`resolveNarrationRuntime` returns ONE tuple {backend, python, lidManifest, lidDirectory?}; onnx only when selected AND the cheap marker/file readiness resolves, otherwise the unchanged torch tuple plus one deduplicated `onnx-backend-unavailable` diagnostic through the existing OPEN_VOX_LOG channel), `kokoroEngine` appends `--lid-backend onnx --lid-dir <abs>` only for the onnx tuple (torch args byte-identical), `scripts/kokoro_say.py` `--lid-backend {torch,onnx}` / `--lid-dir` (absolute, onnx only; lazy imports; generic exit 2). Schema-1 `narration_synthesis` contract and `detectorIdentity` untouched. Default NOT changed; nothing activated.
+  - Observed evidence: see the I05.4 verification in the commit report (RED: new config/cli/runtime/engine/Python tests failed on missing exports/commands/functions; GREEN: full `bun test`, `bun run typecheck`, Python unit suites incl. a stub-ONNX and a real-reference-asset end-to-end `resolve_plan` through `kokoro_say.build_detector`; no synthesis, no real app home).
+- [x] **Real provisioning (2026-10-13, user-authorized):** `open-vox setup narration-onnx --lid-source <hard-linked clean dir>` exit 0; `pn-onnx-venv` (onnxruntime 1.31.0, tokenizers 0.23.3, numpy 2.5.3, no torch) and `lid-onnx/codeswitch-spaeng-lid-lince/66d0e899…-onnx-fp32-a322d9809cd3` created; `open-vox doctor` reports ONNX "verified local assets/dependencies (inactive backend, not selected)"; `narration-backend` still `torch`. Real `OnnxDetector` run from the new venv: status available, no diagnostics, torch/transformers not in sys.modules, 1.22 s first call, ~0.01 s warm on short sentences; same known `cambies` quirk as Torch. Existing pn-venv, kokoro-venv, torch model dir and config untouched.
+- [x] I05.5 Regression and listening in the installed host (separate permission; user must listen to ES/EN short + long texts and Pause/Resume/Repeat). **2026-10-13: the user ACCEPTED this ONNX listening gate for short ES/EN mixed narration in the live OpenCode host (user statement: "lo acepto").** Honest limits: the user accepted without enumerating further tests, so long-text and Pause/Resume/Repeat coverage is not separately evidenced here.
+  - Observed evidence (bug found while listening, fixed): the Spanish message "Para dar PN por aceptado (I05.5), escuchá esto en OpenCode:" read `OpenCode:` in Spanish. Root cause: `technical()` in `scripts/narration_resolver.py` was applied to whole whitespace-delimited atoms, so edge prose punctuation (`:`) made the atom `protected-technical` and the detector was ignored. Fix: `core_range()` strips only prose marks from atom edges (leading `("'«“‘¿¡`, trailing `:;,!?.…)"'”»’`, a `)` only when it does not balance a `(` inside the core) and the protected range covers the core only; technical syntax characters are never stripped. RED = 4 new tests, 318 failures + 1 error on the old resolver; GREEN = Python suite 116 OK/1 skip (112 baseline + 4), `bun test` and `bun run typecheck` unchanged. End-to-end with the real TS `createNarrationPlan` and real `OnnxDetector` (no audio): before, `OpenCode:` and `deployment:` were `es`/`protected-technical`; after, `OpenCode` is `en`/`english-identifier`/spoken "open code", `deployment` is `en`/`detected-unanimous`, `:` is neutral base, `I05.5` stays protected. Still read in the base language (not changed): `and/or`, `y/o`, `Q&A`, `10%`, dates, `e-mail`/`well-known`-style hyphenated words, `e.g.`/`i.e.`, `OpenCode/Claude`.
+  - Observed evidence (follow-up, plain compounds): `technical()` in `scripts/narration_resolver.py` now returns false for `prose_compound()` cores. Rule: hyphen compound = 2..5 Latin-letter parts (accents allowed; no digits, `_`, `.` or other symbols) joined by single `-`, no leading/trailing `-`; slash alternative = exactly 2 Latin-letter parts, each <= 12 chars, one `/`, and (a part has an uppercase letter OR both parts are in a closed function-word list such as and/or, y/o, on/off). Everything else (`--flag`, `-x`, `foo-1`, `v2-beta`, `src/app`, `read/write`, `a/b/c`, paths, URLs, `key:value`, dates) stays protected. Unmarked kebab-case (`my-component`) is now prose-routed; accepted because real code arrives as protected inline code, which stays `protected-technical` (tested). RED = 6 new failing tests (4 behavior tests, 6 subtests-level failures; negative-control tests already green); GREEN = Python suite 121 OK/1 skip (116 + 5), `bun test` 500 pass/2 skip, `bun run typecheck` clean. E2E (real TS plan + real `OnnxDetector`, no audio): before, `back-end`, `real-time`, `y/o`, `OpenCode/Claude`, `e-mail`, `well-known` were all `es`/`protected-technical`; after, `back`/`end`/`real`/`time`/`e`/`mail`/`well`/`known` are `en`/`detected-unanimous`, `y`/`o` are `es`, `OpenCode` is `en`/`english-identifier` ("open code"), `Claude` is `es`/`fallback-nonbinary` (detector quirk), `src/app` and `--flag` stay protected. Still protected (not changed): `%`, `&`, digits/dates, `e.g.`/`i.e.`/`U.S.`.
+- [x] I05.6 Controlled activation (done by user authorization): backend `onnx` was selected on 2026-10-13 with `open-vox narration-backend onnx` at the user's request.
+Reference assets (temporary, verified present 2026-10-13): `<reference-assets>`; `assets/model.onnx` 709,298,327 B SHA256 `a322d980…a7283f86`, `assets/tokenizer/tokenizer.json` SHA256 `f5c46e58…b2409f7` (both match). Baseline at start: branch `feat/pn-implementation`, HEAD `dfc1307`, worktree clean, tracking `origin/PN-01`.
+
+### Operational evidence (HEAD `f3d9025`, source unchanged during runs)
+- Offline run (`pn-offline-result-v2.json`): detector `available`, no fallback; `health`/`check`/`deployment`/ES `timeout` retained `en` evidence (`detected-unanimous`); `getUserName` -> `get user name`; API `a pe i` (ES) / `ay pee eye` (EN).
+
+| Run | ES | EN |
+| --- | --- | --- |
+| Voice | `em_alex` | `af_heart` |
+| G2P runs / chunks / raw phonemes | 9 / 1 / 130 | 1 / 1 / 105 |
+| Style reads / ONNX inferences | 1 / 1 | 1 / 1 |
+| Fresh process / detector load | 7.075 s / 3.568 s | 6.396 s / 3.582 s |
+| WAV | 6.059 s | 5.952 s |
+
+  Mono 24 kHz PCM16; ES SHA256 `573c89431c80f5cf97c2c7e09b4009a90898d3bd1e61c6b5ccd8f3251d052688`, EN `fd61d1ba81002e9fa3e9dfbeadaf1e12d09991afd02b19f460dd03b3dda3d9f9`. Same-instance warm LID 15.85 ms (not whole-pipeline). v1 harness was blocked by its own write guard, not a model defect; v2 allowed only owned runtime-temp. Zero application-level network attempts (not a firewall proof). Tokenizer-regex and unexpected pooler-weight warnings are disclosed.
+- Playback run (`pn-playback-result.json`, production sink + managed Python + real Kokoro + cache + WPF host, 22.061 s): Pause held 650 ms over 523 ms and Resume advanced to 1159 ms; exact Repeat reused the same file (SHA256 `0c25fda76fe62791d51944484bd942d2b8b03ff751be77b4f89889aa8e4cc53e`) with preparation/synthesis/runner/resolver counts unchanged at 1 and player calls 1 -> 2; stale revision inert; pending synthesis child killed once (~211 ms), exited within 3.37 ms, prior artifact preserved, no late promotion. This proves pending-child cancellation, not interruption inside ONNX. Selection to playing took 5.979 s.
+
+### Host-found corrections (2026-10-12)
+- **SDK summary metadata (`3338f0a`):** user `summary: {title?, body?, diffs}` objects were rejected before a turn existed. Now accepted; scalar/null rejection and lifecycle guards kept. RED 72 pass/1 fail -> GREEN 73; full 408 pass/2 skip.
+- **Cross-session cancellation (`19e992c`):** the plugin called `sink.stop()` on any `session.error` or any session's first user update, so another session could discard pending narration. New optional `SpeechSink.stopSession(sessionID)` cancels only that session's queued jobs and the active job if it belongs to it; sinks without it, or errors without a session id, keep global `stop()`. RED 122 pass/6 fail -> GREEN 128; full 418 pass/2 skip. Proven defect, not proven to be the cause of the observed silence.
+- **Spanish inverted punctuation (`3b7dd02`):** live replies exited the plan child with code 2 because the vocabulary lacks `¡ ¿ « » [ ] { }`. Fix as described under final-phoneme symbols. 26 synthesis tests (RED 5 fail/5 error), 68 narration tests green; production-argv child exit 2 -> 0 with a 1.9 s WAV; TS untouched.
+
+## Acceptance gates and retained limits
+
+- [x] Managed assets, provenance, doctor readiness and actual offline LID availability/integrity (separate from synthesis success).
+- [x] Scoped actual TS/Python source/UTF16 fixture trace (emoji in omitted HTML).
+- [x] One fixed voice across a bilingual block; exact cached Repeat without re-synthesis; real WPF Pause/Resume/Repeat; stale-revision rejection; pending-child cancellation; owned disposal.
+- [x] Installed-host loaders point to this worktree; user confirmed audible narration (basic audibility only).
+- [ ] Human ES/EN pronunciation quality of production audio, short and long, and Pause/Resume/Repeat by ear. The earlier scratch 15-phrase listening was accepted separately and does not certify production audio.
+- [ ] Both base languages with negative controls: identifiers, API/HTTP, names, whole expressions, `>=`, versions, paths, URLs/links, numbers, commands/flags/variables, quotes, code/tables/images/HTML, ambiguous adjacent text.
+- [ ] Observed 4000/510 outcomes and bounded full audio on long texts.
+- [ ] Exhaustive UI/history invariance and cross-session/ownership/generation/error timing through the installed plugin; cancellation inside ONNX inference.
+- [ ] Peak/sustained resource and whole-pipeline warm measurements.
+- [ ] Graceful-degrade decision for unsupported symbols; path-to-main decisions above.
+
+Limits: LID scores are uncalibrated and accuracy is not certified; no naturalness guarantee. Provenance checks assume ordinary controlled Python. Playback speed and Repeat remain separate preserved features.
+
+## Tracking and review locator
+
+- Authority: this repository document. Mirror: one full snapshot at Engram `agentvoz` / `odd/pronunciation-normalization/tasks` (#1680), prompt capture off, no nested wrappers.
 - [Open-Vox overview](../../README.md)
-- Authoritative current root: `<pn-worktree>`; branch `feat/pn-implementation`; initial reviewed boundary `975b447`.
-- Engram full-document mirror: project `agentvoz`, topic `odd/pronunciation-normalization/tasks`, locator `odd/tasks/pronunciation-normalization.md` relative to the authoritative current root. Mirror observation identity/readback is recorded in the delivery report, not hard-coded before save.
-- Original checkout `<playback-worktree>` remains read-only; its earlier dirty tracking document and concurrent dirty playback work remain untouched.
-- Private sprint notes and Obsidian files remain untouched. No SDD artifacts are created.
-- Playback-speed (including nested PS-05) and Repeat remain separate existing features; only their preservation requirements are recorded here.
 
 ## Local preparation context
 

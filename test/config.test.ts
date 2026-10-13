@@ -16,13 +16,35 @@ function memoryFs(initial?: string): ConfigFs & { files: Map<string, string> } {
 const PATH = "C:\\h\\config.json";
 
 describe("parseConfig", () => {
+  test("narration language is explicit, validated and persisted with readback", () => {
+    const fs = memoryFs();
+    expect(parseConfig({}).narrationLanguage).toBe("es");
+    expect(parseConfig({ narrationLanguage: "fr" }).narrationLanguage).toBe("es");
+    writeConfig({ narrationLanguage: "en" }, PATH, fs);
+    expect(readConfig(PATH, fs).narrationLanguage).toBe("en");
+    expect(JSON.parse(fs.files.get(PATH)!).narrationLanguage).toBe("en");
+  });
   test("defaults to Alex for Spanish, speed 1, auto engine, with no runtime flags", () => {
-    expect(DEFAULT_CONFIG).toEqual({ voices: { es: "em_alex", en: "af_heart" }, speed: 1, engine: "auto" });
+    expect(DEFAULT_CONFIG).toEqual({ voices: { es: "em_alex", en: "af_heart" }, speed: 1, engine: "auto", narrationLanguage: "es", narrationBackend: "torch" });
     expect(parseConfig(undefined)).toEqual(DEFAULT_CONFIG);
+  });
+  test("narration backend defaults to torch, validates, persists, and old files without the key keep working", () => {
+    expect(parseConfig({}).narrationBackend).toBe("torch");
+    for (const bad of ["ONNX", "tensorrt", 1, null, true, ["onnx"]]) expect(parseConfig({ narrationBackend: bad }).narrationBackend).toBe("torch");
+    expect(parseConfig({ narrationBackend: "onnx" }).narrationBackend).toBe("onnx");
+    const fs = memoryFs(JSON.stringify({ speed: 1.1, narrationLanguage: "en" }));
+    expect(readConfig(PATH, fs)).toEqual({ ...DEFAULT_CONFIG, speed: 1.1, narrationLanguage: "en" });
+    writeConfig({ narrationBackend: "onnx" }, PATH, fs);
+    expect(JSON.parse(fs.files.get(PATH)!).narrationBackend).toBe("onnx");
+    expect(readConfig(PATH, fs)).toMatchObject({ narrationBackend: "onnx", speed: 1.1, narrationLanguage: "en" });
+    writeConfig({ speed: 1.2 }, PATH, fs);
+    expect(readConfig(PATH, fs).narrationBackend).toBe("onnx");
+    writeConfig({ narrationBackend: "bogus" as never }, PATH, fs);
+    expect(readConfig(PATH, fs).narrationBackend).toBe("torch");
   });
   test("accepts valid values", () => {
     expect(parseConfig({ voices: { es: "ef_dora", en: "bm_george" }, speed: 1.25, engine: "piper" }))
-      .toEqual({ voices: { es: "ef_dora", en: "bm_george" }, speed: 1.25, engine: "piper" });
+      .toEqual({ voices: { es: "ef_dora", en: "bm_george" }, speed: 1.25, engine: "piper", narrationLanguage: "es", narrationBackend: "torch" });
   });
   test("rejects invalid values field by field, keeping valid ones", () => {
     const r = parseConfig({ voices: { es: "nope", en: "bm_george" }, speed: 99, engine: "weird" });
