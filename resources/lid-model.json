@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "modelId": "sagorsarker/codeswitch-spaeng-lid-lince",
+  "revision": "66d0e899b3fcf70d8727e4521c7a9c3f7a1fa73c",
+  "files": [
+    { "filename": "config.json", "bytes": 991, "sha256": "af40913ef475ebd5cead533258a0a1cdb0e6ea563fb7ecc36fe20106ce58f9bd" },
+    { "filename": "model.safetensors", "bytes": 711469178, "sha256": "623ce7a7aa55e3ed5516b9962c66cdd5d51fe04725ff2eaf9f60d9daad8833b4" },
+    { "filename": "special_tokens_map.json", "bytes": 112, "sha256": "303df45a03609e4ead04bc3dc1536d0ab19b5358db685b6f3da123d05ec200e3" },
+    { "filename": "tokenizer_config.json", "bytes": 49, "sha256": "0f6d13e6f4da6f9e24f22ada6bc3be571123d858d7c0c05a8a7cd55a9c23c2e8" },
+    { "filename": "vocab.txt", "bytes": 995526, "sha256": "fe0fda7c425b48c516fc8f160d594c8022a0808447475c1a7c6d6479763f310c" }
+  ]
+}
