@@ -37,6 +37,9 @@ export const KOKORO_VOICES: readonly KokoroVoice[] = [
   voice("em_alex", "es", "male", "Spanish"),
   voice("em_santa", "es", "male", "Spanish"),
   voice("ef_dora", "es", "female", "Spanish"),
+  // Bundled custom voice: not part of Kokoro. Its style lives in resources/voices/em_blocktype.npy and
+  // `open-vox setup kokoro` merges it into voices-v1.0.bin; without that step the engine cannot play it.
+  voice("em_blocktype", "es", "male", "Spanish"),
   ...["heart", "bella", "nicole", "sarah", "sky", "alloy", "aoede", "jessica", "kore", "nova", "river"]
     .map((n) => voice(`af_${n}`, "en", "female", "American")),
   ...["adam", "michael", "echo", "eric", "fenrir", "liam", "onyx", "puck", "santa"]

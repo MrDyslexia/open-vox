@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { win32 } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { fileURLToPath } from "node:url";
 import { DEFAULT_VOICES } from "./piper-engine";
 import { LID_BYTES, LID_MANIFEST, PN_PACKAGES, PN_READY_RECORD, assertLidDirectory, fileFingerprint, lidDownloadUrl, matchesLidFile, narrationPaths, type Fingerprint } from "./narration-assets";
 
@@ -34,7 +35,15 @@ async function must(deps: SetupDeps, cmd: string, args: string[]): Promise<void>
   if (code !== 0) throw new Error(`${cmd} ${args.slice(0, 3).join(" ")} failed with exit code ${code}`);
 }
 
-/** Creates an isolated venv, installs kokoro-onnx, and downloads the model and voices (about 340 MB). */
+/** Custom voices shipped with open-vox (resources/voices/<id>.npy) and the helper that merges them into the pack. */
+export const BUNDLED_VOICES_SCRIPT = fileURLToPath(new URL("../scripts/add_voices.py", import.meta.url));
+export const BUNDLED_VOICES_DIR = fileURLToPath(new URL("../resources/voices", import.meta.url));
+
+/**
+ * Creates an isolated venv, installs kokoro-onnx, and downloads the model and voices (about 340 MB).
+ * Then merges the bundled custom voices into the voices pack. That step is idempotent and also runs on
+ * existing installs, so re-running `setup kokoro` is how an older install receives a new bundled voice.
+ */
 export async function setupKokoro(deps: SetupDeps): Promise<void> {
   const venv = win32.join(deps.home, "kokoro-venv");
   const python = win32.join(venv, "Scripts", "python.exe");
@@ -50,6 +59,12 @@ export async function setupKokoro(deps: SetupDeps): Promise<void> {
     deps.log(`Downloading ${file.name} (${file.note})...`);
     await deps.download(`${KOKORO_BASE}/${file.name}`, dest);
   }
+  deps.log("Adding bundled voices...");
+  await must(deps, python, [
+    BUNDLED_VOICES_SCRIPT,
+    "--pack", win32.join(deps.home, "kokoro", "voices-v1.0.bin"),
+    "--voices-dir", BUNDLED_VOICES_DIR,
+  ]);
   deps.log("Kokoro is ready.");
 }
 

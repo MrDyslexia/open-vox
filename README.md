@@ -41,6 +41,11 @@ no restart, even while OpenCode is running.
 Defaults: Spanish `em_alex`, English `af_heart`. Voices whose id starts with `b`
 (for example `bm_george`) are British and use British phonemes automatically.
 
+`em_blocktype` is a custom Spanish male voice bundled with open-vox (see
+[`resources/voices`](resources/voices/README.md)). `open-vox setup kokoro` adds it to your
+voices pack, including on an existing install: re-run the command to receive it, then
+`open-vox voice em_blocktype`.
+
 ## Contextual pronunciation (explicit setup)
 
 Kokoro speech availability and contextual pronunciation readiness are separate.

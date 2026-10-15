@@ -121,6 +121,12 @@ describe("voices", () => {
     expect(es).toEqual(expect.arrayContaining(["em_alex", "em_santa", "ef_dora"]));
     expect(KOKORO_VOICES.find((v) => v.id === "bm_george")?.label).toBe("George");
   });
+  test("bundled Spanish voice is selectable and phonemized as Spanish", () => {
+    expect(KOKORO_VOICES.find((v) => v.id === "em_blocktype")).toMatchObject({ language: "es", gender: "male", label: "Blocktype" });
+    expect(parseConfig({ voices: { es: "em_blocktype" } }).voices.es).toBe("em_blocktype");
+    expect(parseConfig({ voices: { en: "em_blocktype" } }).voices.en).toBe("af_heart");
+    expect(kokoroLanguageCode("em_blocktype")).toBe("es");
+  });
   test("language code follows the voice accent", () => {
     expect(kokoroLanguageCode("em_alex")).toBe("es");
     expect(kokoroLanguageCode("af_heart")).toBe("en-us");
