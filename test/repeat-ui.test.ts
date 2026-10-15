@@ -522,12 +522,18 @@ test("rate transport failure returns neutral state until fresh confirmation", as
   h.time(5250); expect(h.ui.view("s").playbackSpeed).toBe(2); h.ui.dispose();
 });
 
-test("rate button uses a second equal-slot row, confirmed fresh guards and no synthesis/config writes", () => {
+test("rate button shares one row with the other three buttons, confirmed fresh guards and no synthesis/config writes", () => {
   const source = readFileSync(new URL("../tui/open-vox.tsx", import.meta.url), "utf8");
   expect(source).toContain("repeat.cycleSpeed("); expect(source).toContain("speedLabel(view().playbackSpeed)");
   expect(source).toContain("!canSetSpeed(view()) || !canSetSpeed(repeat.view(session()))");
-  expect(source.match(/<box flexGrow=\{1\} flexBasis=\{0\} minWidth=\{8\} \/>/g)).toHaveLength(2);
-  expect(source.indexOf("speedLabel(view()")).toBeGreaterThan(source.indexOf('button(() => "Repeat"'));
+  // No empty spacer slots: all four buttons are real buttons in one row, in this order.
+  expect(source.match(/<box flexGrow=\{1\} flexBasis=\{0\} minWidth=\{8\} \/>/g)).toBeNull();
+  const order = ['(paused() ? "Resume" : "Pause")', 'button(() => "Voice"', 'button(() => "Repeat"', "speedLabel(view()"]
+    .map((marker) => source.indexOf(marker, source.indexOf("return (")));
+  expect(order.every((i) => i > 0)).toBe(true);
+  expect([...order].sort((a, b) => a - b)).toEqual(order);
+  const buttonRows = source.slice(source.indexOf("return ("), source.lastIndexOf("</box>\n  )")).match(/<box flexDirection="row" gap=\{1\}>/g);
+  expect(buttonRows).toHaveLength(2); // header row + one button row
   expect(source).not.toMatch(/writeConfig\(\s*\{\s*(speed|playbackSpeed)/);
   expect(source).toMatch(/button\(\(\) => "Voice", chooseVoice, undefined, true\)/);
   expect(source).toContain("repeat.togglePause("); expect(source).toContain("repeat.toggleEnabled(");
