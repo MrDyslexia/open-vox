@@ -17,7 +17,11 @@ function harness(overrides: Partial<CliDeps> = {}) {
   const deps: CliDeps = {
     out: (l) => out.push(l), err: (l) => err.push(l),
     readConfig: () => config,
-    writeConfig: (patch) => { config = parseConfig({ ...config, ...patch, voices: { ...config.voices, ...(patch.voices ?? {}) } }); return config; },
+    writeConfig: (patch) => { config = parseConfig({ ...config, ...patch,
+      voices: { ...config.voices, ...(patch.voices ?? {}) },
+      toneVoice: { ...config.toneVoice, ...(patch.toneVoice ?? {}) },
+      toneWeight: { ...config.toneWeight, ...(patch.toneWeight ?? {}) },
+    }); return config; },
     configPath: "C:\\h\\config.json",
     installFs: fs, configDir: "C:\\cfg", repoRoot: "C:\\repo", tuiTemplate: 'import "../src/config";',
     exists: () => false,
@@ -77,6 +81,53 @@ describe("voice", () => {
     const text = h.out.join("\n");
     expect(text).toMatch(/em_alex/);
     expect(text).toMatch(/bm_george/);
+  });
+});
+
+describe("tone", () => {
+  test("reads both languages or one selected language without writing", async () => {
+    const h = harness({ writeConfig: () => { throw Error("read must not write"); } });
+    expect(await runCli(["tone"], h.deps)).toBe(0);
+    expect(h.out).toEqual(["es: off (weight 0)", "en: off (weight 0)"]);
+    h.out.length = 0;
+    expect(await runCli(["tone", "en"], h.deps)).toBe(0);
+    expect(h.out).toEqual(["en: off (weight 0)"]);
+  });
+  test("sets a cross-language donor, preserves the sibling and clears donor and weight on off", async () => {
+    const h = harness();
+    expect(await runCli(["tone", "en", "em_alex", "1"], h.deps)).toBe(0);
+    expect(await runCli(["tone", "es", "am_onyx", "0.75"], h.deps)).toBe(0);
+    expect(h.config()).toMatchObject({ toneVoice: { es: "am_onyx", en: "em_alex" }, toneWeight: { es: 0.75, en: 1 } });
+    await runCli(["tone", "es"], h.deps);
+    expect(h.out.at(-1)).toBe("es: am_onyx (weight 0.75)");
+    expect(await runCli(["tone", "es", "off"], h.deps)).toBe(0);
+    expect(h.config()).toMatchObject({ toneVoice: { es: "", en: "em_alex" }, toneWeight: { es: 0, en: 1 } });
+    expect(h.config().voices).toEqual(DEFAULT_CONFIG.voices);
+    expect(h.config().speed).toBe(1);
+  });
+  test("invalid donor, weight, language or arity writes nothing", async () => {
+    const h = harness({ writeConfig: () => { throw Error("invalid input must not write"); } });
+    for (const args of [["fr"], ["es", "am_onyx"], ["es", "unknown", "0.75"], ["es", "off", "0"],
+      ["es", "off", "extra"], ["es", "am_onyx", "0.75", "extra"],
+      ...["", " ", "NaN", "Infinity", "-0.1", "1.1", "abc"].map(w => ["es", "am_onyx", w])]) {
+      expect(await runCli(["tone", ...args], h.deps)).toBe(2);
+    }
+    expect(h.config()).toEqual(DEFAULT_CONFIG);
+  });
+  test("zero weight is accepted; help, status and reset describe tone without promising orthogonality", async () => {
+    const h = harness();
+    expect(await runCli(["tone", "es", "am_onyx", "0"], h.deps)).toBe(0);
+    await runCli(["tone", "es", "am_onyx", "0.75"], h.deps);
+    await runCli(["status"], h.deps);
+    expect(h.out.join("\n")).toContain("tone es: am_onyx (weight 0.75)");
+    expect(h.out.join("\n")).toContain("tone en: off (weight 0)");
+    const help = (await run(["help"])).h.out.join("\n");
+    expect(help).toContain("tone");
+    expect(help).toContain("experimental style interpolation");
+    expect(help).toContain("duration");
+    expect(help).toContain("separate rate control");
+    await runCli(["config", "reset"], h.deps);
+    expect(h.config()).toEqual(DEFAULT_CONFIG);
   });
 });
 
@@ -200,7 +251,7 @@ describe("status, config and misc", () => {
     const base = h.deps.writeConfig;
     h.deps.writeConfig = (patch) => { patches.push(patch); return base(patch); };
     await runCli(["config", "reset"], h.deps);
-    expect(patches).toEqual([{ voices: { es: "em_alex", en: "af_heart" }, speed: 1, engine: "auto", narrationLanguage: "es", narrationBackend: "torch" }]);
+    expect(patches).toEqual([DEFAULT_CONFIG]);
   });
   test("setup delegates", async () => {
     const { code, h } = await run(["setup", "kokoro"]);

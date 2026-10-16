@@ -1,0 +1,4 @@
+.venv-comparator/
+.venv-fit/
+.models/
+__pycache__/

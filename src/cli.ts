@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  KOKORO_VOICES, MAX_SPEED, MIN_SPEED, appHome, configPath, readConfig, writeConfig,
+  DEFAULT_CONFIG, KOKORO_VOICES, MAX_SPEED, MIN_SPEED, appHome, configPath, readConfig, writeConfig, validToneVoice, validToneWeight,
   type Config, type ConfigPatch, type EngineName,
 } from "./config";
 import { envValue, legacyHomeMigration } from "./brand";
@@ -54,12 +54,16 @@ Setup
 Controls (apply immediately, no restart)
   voice [<id>] | voice es|en <id>           Show or change the voice (see "voices")
   voices                                    List available voices
-  speed <0.5-2>                             Speaking speed
+  tone [es|en]                              Show tone donors and weights (Kokoro plans only)
+  tone es|en <donor> <0-1> | tone es|en off  Set or disable experimental style interpolation
+  speed <0.5-2>                             Synthesis speed (separate rate control)
   engine auto|kokoro|piper|sapi             Speech engine
   language es|en                           Narration base language (one voice per utterance)
   narration-backend [torch|onnx]           Show or select the contextual LID backend (default torch; onnx needs setup narration-onnx)
   say <text>                                Speak a test sentence
   config path|show|reset                    Inspect or reset the settings file
+
+Tone defaults to off. Blend weight can also change duration; it is not a speed control.
 `;
 
 const usage = (deps: CliDeps, message: string): number => { deps.err(message); return 2; };
@@ -119,6 +123,7 @@ function status(deps: CliDeps): void {
   const config = deps.readConfig();
   const state = inspectInstall({ fs: deps.installFs, configDir: deps.configDir });
   deps.out(`voices: es: ${config.voices.es}, en: ${config.voices.en}`);
+  for (const language of ["es", "en"] as const) deps.out(`tone ${toneSetting(config, language)}`);
   deps.out(`speed: ${config.speed}`);
   deps.out(`engine: ${config.engine}`);
   deps.out(`narration language: ${config.narrationLanguage}`);
@@ -126,6 +131,10 @@ function status(deps: CliDeps): void {
   deps.out(`plugin: ${state.plugin ? "installed" : "not installed"}`);
   deps.out(`sidebar block: ${state.tuiFile && state.tuiRegistered ? "installed" : "not installed"}`);
   deps.out(`config file: ${deps.configPath}`);
+}
+
+function toneSetting(config: Config, language: "es" | "en"): string {
+  return `${language}: ${config.toneVoice[language] || "off"} (weight ${config.toneWeight[language]})`;
 }
 
 export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
@@ -154,6 +163,29 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
       if (!found) return usage(deps, `Unknown voice "${id}"${forced ? ` for ${forced}` : ""}. Run "open-vox voices" to list them.`);
       deps.writeConfig({ voices: { [found.language]: found.id } });
       deps.out(`${found.language === "es" ? "Spanish" : "English"} voice set to ${found.label} (${found.id}).`);
+      return 0;
+    }
+
+    case "tone": {
+      const USAGE = "Usage: open-vox tone [es|en] | tone es|en <donor> <0-1> | tone es|en off";
+      const language = args[0];
+      if (args.length === 0) {
+        const config = deps.readConfig();
+        for (const lang of ["es", "en"] as const) deps.out(toneSetting(config, lang));
+        return 0;
+      }
+      if (language !== "es" && language !== "en") return usage(deps, USAGE);
+      if (args.length === 1) { deps.out(toneSetting(deps.readConfig(), language)); return 0; }
+      if (args.length === 2 && args[1] === "off") {
+        deps.writeConfig({ toneVoice: { [language]: "" }, toneWeight: { [language]: 0 } });
+        deps.out(`Tone for ${language} disabled.`);
+        return 0;
+      }
+      const donor = args[1];
+      const weight = args[2]?.trim() ? Number(args[2]) : NaN;
+      if (args.length !== 3 || !donor || !validToneVoice(donor) || !validToneWeight(weight)) return usage(deps, USAGE);
+      deps.writeConfig({ toneVoice: { [language]: donor }, toneWeight: { [language]: weight } });
+      deps.out(`Tone for ${language} set to ${donor} (weight ${weight}).`);
       return 0;
     }
 
@@ -257,7 +289,7 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
       if (sub === "path") { deps.out(deps.configPath); return 0; }
       if (sub === "show") { deps.out(JSON.stringify(deps.readConfig(), null, 2)); return 0; }
       if (sub === "reset") {
-        deps.writeConfig({ voices: { es: "em_alex", en: "af_heart" }, speed: 1, engine: "auto", narrationLanguage: "es", narrationBackend: "torch" });
+        deps.writeConfig(DEFAULT_CONFIG);
         deps.out("Settings reset to defaults.");
         return 0;
       }

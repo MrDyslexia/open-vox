@@ -76,10 +76,12 @@ function Block(props: { api: TuiPluginApi; sessionID: string }) {
     <box
       flexGrow={1}
       flexBasis={0}
-      minWidth={8}
+      minWidth={6}
+      flexDirection="row"
       alignItems="center"
-      paddingLeft={1}
-      paddingRight={1}
+      justifyContent="center"
+      paddingLeft={0}
+      paddingRight={0}
       paddingTop={1}
       paddingBottom={1}
       backgroundColor={active?.() ? theme().warning : theme().backgroundElement}
@@ -110,15 +112,11 @@ function Block(props: { api: TuiPluginApi; sessionID: string }) {
         {button(() => "Voice", chooseVoice, undefined, true)}
         {button(() => "Repeat", () => { void repeat.repeat(session()) }, undefined, false,
           () => !view().canRepeat || !repeat.available(session()))}
-      </box>
-      {/* A second three-slot row keeps the rate button as wide as the existing buttons.
-          It displays only confirmed preference, highlights non-1x and stays usable while paused. */}
-      <box flexDirection="row" gap={1}>
+        {/* The rate button shares the row: four equal slots. It displays only confirmed
+            preference, highlights non-1x and stays usable while paused. */}
         {button(() => speedLabel(view().playbackSpeed), () => { void repeat.cycleSpeed(session()) },
           () => view().playbackSpeed !== undefined && view().playbackSpeed !== 1, false,
           () => !canSetSpeed(view()) || !canSetSpeed(repeat.view(session())))}
-        <box flexGrow={1} flexBasis={0} minWidth={8} />
-        <box flexGrow={1} flexBasis={0} minWidth={8} />
       </box>
     </box>
   )

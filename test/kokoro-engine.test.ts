@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { kokoroEngine, narrationRunner, resolveKokoro } from "../src/kokoro-engine";
+import { kokoroEngine, narrationRunner, resolveKokoro, type KokoroSettings } from "../src/kokoro-engine";
 import type { Runner } from "../src/piper-engine";
 import { createNarrationPlan } from "../src/markdown-narration";
 import { LID_MANIFEST_PATH, narrationPaths, PN_READY_RECORD, resolveNarrationPython } from "../src/narration-assets";
@@ -23,6 +23,42 @@ function harness() {
 }
 
 describe("kokoro engine", () => {
+  test("active tone flags follow out, precede plan flags, and sample the base language per utterance", async () => {
+    const calls: string[][] = [];
+    let reads = 0;
+    let settings: KokoroSettings = { voices: { es: "em_alex", en: "bm_george" }, speed: 1.2,
+      toneVoice: { es: "am_onyx", en: "em_santa" }, toneWeight: { es: 0.75, en: 1 } };
+    const engine = kokoroEngine({ python: "p", script: "s", modelPath: "m", voicesPath: "v",
+      voices: settings.voices, speed: 1, tmpDir: "R", unlink() {},
+      settings: () => { reads++; return settings; },
+      run: (_c, args) => { calls.push(args); return { exited: Promise.resolve(0), kill() {} }; } });
+    for (const language of ["es", "en"] as const) await engine.synthesizePlan!(createNarrationPlan("text", language), "o.wav").exited;
+    expect(reads).toBe(2);
+    expect(calls[0]).toEqual(["s", "--model", "m", "--voices", "v", "--voice", "em_alex", "--lang", "es",
+      "--speed", "1.2", "--out", "o.wav", "--tone-voice", "am_onyx", "--tone-weight", "0.75",
+      "--plan-json", "--lid-manifest", LID_MANIFEST_PATH]);
+    expect(calls[1]).toEqual(expect.arrayContaining(["--voice", "bm_george", "--lang", "en-gb", "--tone-voice", "em_santa", "--tone-weight", "1"]));
+    settings = { ...settings, toneWeight: { es: 0.5, en: 0 } };
+    await engine.synthesizePlan!(createNarrationPlan("text", "es"), "o.wav").exited;
+    expect(calls[2]!.slice(13, 17)).toEqual(["--tone-voice", "am_onyx", "--tone-weight", "0.5"]);
+    await engine.synthesize!("plain", "es", "o.wav").exited;
+    expect(calls[3]!.slice(13)).toEqual([]); // The helper only blends planned synthesis.
+  });
+  test("inactive or invalid tone settings preserve the exact legacy planned arguments", async () => {
+    const calls: string[][] = [];
+    let settings: KokoroSettings = { voices: { es: "em_alex", en: "af_heart" }, speed: 1 };
+    const engine = kokoroEngine({ python: "p", script: "s", modelPath: "m", voicesPath: "v",
+      voices: settings.voices, speed: 1, tmpDir: "R", unlink() {}, settings: () => settings,
+      run: (_c, args) => { calls.push(args); return { exited: Promise.resolve(0), kill() {} }; } });
+    const plan = createNarrationPlan("text", "es");
+    await engine.synthesizePlan!(plan, "o.wav").exited;
+    for (const [donor, weight] of [["", 0.75], ["am_onyx", 0], ["unknown", 0.75],
+      ...[-1, 2, NaN, Infinity, -Infinity].map(w => ["am_onyx", w])] as [string, number][]) {
+      settings = { ...settings, toneVoice: { es: donor, en: "" }, toneWeight: { es: weight, en: 0 } };
+      await engine.synthesizePlan!(plan, "o.wav").exited;
+      expect(calls.at(-1)).toEqual(calls[0]);
+    }
+  });
   test("plan dispatch uses only the managed app-home interpreter after readiness, otherwise existing Kokoro", async () => {
     const paths = narrationPaths("R");
     let ready = false;

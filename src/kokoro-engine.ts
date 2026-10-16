@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { envValue, homeFor } from "./brand";
-import { DEFAULT_CONFIG, MAX_SPEED, MIN_SPEED, createConfigReader, kokoroLanguageCode } from "./config";
+import { DEFAULT_CONFIG, MAX_SPEED, MIN_SPEED, createConfigReader, kokoroLanguageCode, validToneVoice, validToneWeight } from "./config";
 import { wavEngine, type Runner } from "./piper-engine";
 import type { Engine } from "./speech-sink";
 import type { Language } from "./speech-text";
@@ -17,6 +17,8 @@ export type KokoroPaths = {
   voicesPath: string;
   voices: Record<Language, string>;
   speed: number;
+  toneVoice?: Partial<Record<Language, string>>;
+  toneWeight?: Partial<Record<Language, number>>;
 };
 export type KokoroConfig = KokoroPaths & {
   script: string;
@@ -28,14 +30,14 @@ export type KokoroConfig = KokoroPaths & {
    * When absent the legacy `narrationPython`/`lidManifest` pair is used unchanged.
    */
   narrationRuntime?: () => NarrationRuntime | undefined;
-  /** Read on every utterance so voice and speed changes apply immediately. */
+  /** Read on every utterance so voice, tone and speed changes apply immediately. */
   settings?: () => KokoroSettings;
   run: Runner;
   tmpDir: string;
   unlink: (file: string) => void;
 };
 
-export type KokoroSettings = { voices: Record<Language, string>; speed: number };
+export type KokoroSettings = Pick<KokoroPaths, "voices" | "speed" | "toneVoice" | "toneWeight">;
 export const DEFAULT_KOKORO_VOICES: Record<Language, string> = DEFAULT_CONFIG.voices;
 
 /** Locates the Kokoro venv, model and voices under `root`; undefined when anything is missing. */
@@ -68,6 +70,11 @@ export function kokoroEngine(config: KokoroConfig): Engine {
       const live = config.settings?.() ?? config;
       const voice = live.voices[language];
       const speed = Number.isFinite(live.speed) && live.speed >= MIN_SPEED && live.speed <= MAX_SPEED ? live.speed : 1;
+      const donor = live.toneVoice?.[language];
+      const weight = live.toneWeight?.[language];
+      // Python only interpolates planned synthesis. Direct text keeps the legacy argument list.
+      const toneArgs = plan && donor && validToneVoice(donor) && validToneWeight(weight) && weight > 0
+        ? ["--tone-voice", donor, "--tone-weight", String(weight)] : [];
       const runtime = plan ? config.narrationRuntime?.() : undefined;
       return {
         cmd: plan ? runtime?.python ?? config.narrationPython?.() ?? config.python : config.python,
@@ -79,6 +86,7 @@ export function kokoroEngine(config: KokoroConfig): Engine {
           "--lang", kokoroLanguageCode(voice),
           "--speed", String(speed),
           "--out", wav,
+          ...toneArgs,
           ...(plan ? ["--plan-json", ...(config.appHome ? ["--app-home", config.appHome] : []),
             "--lid-manifest", runtime?.lidManifest ?? config.lidManifest ?? LID_MANIFEST_PATH,
             ...(runtime?.backend === "onnx" && runtime.lidDirectory
@@ -154,6 +162,8 @@ export function defaultKokoroEngine(
           en: envValue(env, "KOKORO_VOICE_EN") || config.voices.en,
         },
         speed: Number.isFinite(Number(envValue(env, "SPEED"))) && envValue(env, "SPEED") ? Number(envValue(env, "SPEED")) : config.speed,
+        toneVoice: config.toneVoice,
+        toneWeight: config.toneWeight,
       };
     },
     run: narrationRunner(onDiagnostic),

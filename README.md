@@ -32,6 +32,9 @@ no restart, even while OpenCode is running.
 | `open-vox doctor` / `status` | Check the installation / show current settings |
 | `open-vox voices` | List the voices (`*` marks the current ones) |
 | `open-vox voice <id>` | Change the voice, e.g. `voice em_alex`, `voice bm_george` |
+| `open-vox tone` / `tone es` / `tone en` | Show both tone settings or the selected language |
+| `open-vox tone es am_onyx 0.75` | Set an experimental Kokoro tone donor and weight for Spanish |
+| `open-vox tone es off` | Clear the Spanish donor and reset its weight to zero |
 | `open-vox speed <0.5-2>` | Speaking speed |
 | `open-vox engine auto\|kokoro\|piper\|sapi` | Speech engine |
 | `open-vox language es\|en` | Set the narration base language; preserve both voice slots |
@@ -40,6 +43,31 @@ no restart, even while OpenCode is running.
 
 Defaults: Spanish `em_alex`, English `af_heart`. Voices whose id starts with `b`
 (for example `bm_george`) are British and use British phonemes automatically.
+
+### Experimental Kokoro tone blend
+
+Tone is **off by default** for both languages (`toneVoice` is empty and `toneWeight`
+is zero). A donor from any voice in `open-vox voices` can interpolate the prosody
+half of the style vector without replacing the base voice's timbre half. Weights
+must be finite numbers from 0 to 1; each language setting preserves the other.
+`config reset` restores both to off. `am_onyx` at `0.75` is a suggested experimental
+preset, not an enabled default or a listening-qualified JARVIS voice.
+
+Blend weight is style interpolation; `speed` is a separate synthesis rate control.
+They are not physically orthogonal: the blend can also change duration. The
+phonemizer language still follows the base voice, not the donor, but this does not
+guarantee that the donor embedding leaves perceived accent unchanged.
+
+Tone applies only to **Kokoro planned narration**, including the plugin and `say`.
+Piper/SAPI and direct text calls to the low-level Kokoro engine do not blend; the
+TypeScript engine emits no tone flags for that direct route. New utterances sample
+the persisted settings; Repeat keeps the previously generated WAV. No new tone
+environment overrides are provided, and the downloaded voice pack is not modified.
+
+From this checkout, use `bun run src/cli.ts tone` (the package executable maps
+`open-vox` to `src/cli.ts`); no global link or plugin reinstall is needed to invoke
+the CLI. Setting a donor explicitly changes the persisted profile, so leave it off
+until you choose to audition the preset.
 
 ## Contextual pronunciation (explicit setup)
 

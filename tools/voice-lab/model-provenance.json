@@ -1,0 +1,27 @@
+{
+  "model": "speechbrain/spkrec-ecapa-voxceleb",
+  "revision": "0f99f2d0ebe89ac095bcc5903c4dd8f72b367286",
+  "license": "Apache-2.0 (model card)",
+  "modelCardSource": "https://huggingface.co/speechbrain/spkrec-ecapa-voxceleb/raw/0f99f2d0ebe89ac095bcc5903c4dd8f72b367286/README.md",
+  "filename": "embedding_model.ckpt",
+  "bytes": 83316686,
+  "sha256": "0575cb64845e6b9a10db9bcb74d5ac32b326b8dc90352671d345e2ee3d0126a2",
+  "url": "https://huggingface.co/speechbrain/spkrec-ecapa-voxceleb/resolve/0f99f2d0ebe89ac095bcc5903c4dd8f72b367286/embedding_model.ckpt",
+  "configurationSource": "https://huggingface.co/speechbrain/spkrec-ecapa-voxceleb/resolve/0f99f2d0ebe89ac095bcc5903c4dd8f72b367286/hyperparams.yaml",
+  "configurationReviewed": "2026-10-14",
+  "constructors": {
+    "Fbank": {"n_mels": 80},
+    "InputNormalization": {"norm_type": "sentence", "std_norm": false},
+    "ECAPA_TDNN": {
+      "input_size": 80,
+      "channels": [1024, 1024, 1024, 1024, 3072],
+      "kernel_sizes": [5, 3, 3, 3, 1],
+      "dilations": [1, 2, 3, 4, 1],
+      "attention_channels": 128,
+      "lin_neurons": 192
+    }
+  },
+  "pipeline": "16 kHz mono; Fbank; sentence mean normalization; ECAPA embedding; per-window L2 normalization; mean and L2 normalization; cosine",
+  "excludedAssets": "Classifier, label encoder and global embedding normalization are unused: equivalent to encode_batch(normalize=False), followed by explicit L2 normalization.",
+  "safety": "No remote YAML execution, from_hparams or trust_remote_code. CPU torch.load(weights_only=True) and strict state matching. Setup-only public download; no serving-time network."
+}

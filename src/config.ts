@@ -10,6 +10,8 @@ export type NarrationBackend = "torch" | "onnx";
 export type Config = {
   narrationLanguage: Language;
   voices: Record<Language, string>;
+  toneVoice: Record<Language, string>;
+  toneWeight: Record<Language, number>;
   speed: number;
   engine: EngineName;
   narrationBackend: NarrationBackend;
@@ -17,6 +19,8 @@ export type Config = {
 export type ConfigPatch = {
   narrationLanguage?: Language;
   voices?: Partial<Record<Language, string>>;
+  toneVoice?: Partial<Record<Language, string>>;
+  toneWeight?: Partial<Record<Language, number>>;
   speed?: number;
   engine?: EngineName;
   narrationBackend?: NarrationBackend;
@@ -37,6 +41,9 @@ export const KOKORO_VOICES: readonly KokoroVoice[] = [
   voice("em_alex", "es", "male", "Spanish"),
   voice("em_santa", "es", "male", "Spanish"),
   voice("ef_dora", "es", "female", "Spanish"),
+  // Bundled custom voice: not part of Kokoro. Its style lives in resources/voices/em_blocktype.npy and
+  // `open-vox setup kokoro` merges it into voices-v1.0.bin; without that step the engine cannot play it.
+  voice("em_blocktype", "es", "male", "Spanish"),
   ...["heart", "bella", "nicole", "sarah", "sky", "alloy", "aoede", "jessica", "kore", "nova", "river"]
     .map((n) => voice(`af_${n}`, "en", "female", "American")),
   ...["adam", "michael", "echo", "eric", "fenrir", "liam", "onyx", "puck", "santa"]
@@ -48,6 +55,8 @@ export const KOKORO_VOICES: readonly KokoroVoice[] = [
 export const DEFAULT_CONFIG: Config = {
   narrationLanguage: "es",
   voices: { es: "em_alex", en: "af_heart" },
+  toneVoice: { es: "", en: "" },
+  toneWeight: { es: 0, en: 0 },
   speed: 1,
   engine: "auto",
   narrationBackend: "torch",
@@ -59,6 +68,11 @@ export const MAX_SPEED = 2;
 
 const validVoice = (id: unknown, language: Language): id is string =>
   typeof id === "string" && KOKORO_VOICES.some((v) => v.id === id && v.language === language);
+/** Tone donors may come from any catalog language; an empty donor disables interpolation. */
+export const validToneVoice = (id: unknown): id is string =>
+  typeof id === "string" && (id === "" || KOKORO_VOICES.some((v) => v.id === id));
+export const validToneWeight = (value: unknown): value is number =>
+  typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
 const validSpeed = (value: unknown): value is number =>
   typeof value === "number" && Number.isFinite(value) && value >= MIN_SPEED && value <= MAX_SPEED;
 
@@ -69,11 +83,21 @@ const validSpeed = (value: unknown): value is number =>
 export function parseConfig(raw: unknown): Config {
   const input = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
   const voices = input.voices && typeof input.voices === "object" ? (input.voices as Record<string, unknown>) : {};
+  const toneVoice = input.toneVoice && typeof input.toneVoice === "object" ? (input.toneVoice as Record<string, unknown>) : {};
+  const toneWeight = input.toneWeight && typeof input.toneWeight === "object" ? (input.toneWeight as Record<string, unknown>) : {};
   return {
     narrationLanguage: input.narrationLanguage === "en" ? "en" : "es",
     voices: {
       es: validVoice(voices.es, "es") ? voices.es : DEFAULT_CONFIG.voices.es,
       en: validVoice(voices.en, "en") ? voices.en : DEFAULT_CONFIG.voices.en,
+    },
+    toneVoice: {
+      es: validToneVoice(toneVoice.es) ? toneVoice.es : DEFAULT_CONFIG.toneVoice.es,
+      en: validToneVoice(toneVoice.en) ? toneVoice.en : DEFAULT_CONFIG.toneVoice.en,
+    },
+    toneWeight: {
+      es: validToneWeight(toneWeight.es) ? toneWeight.es : DEFAULT_CONFIG.toneWeight.es,
+      en: validToneWeight(toneWeight.en) ? toneWeight.en : DEFAULT_CONFIG.toneWeight.en,
     },
     speed: validSpeed(input.speed) ? input.speed : DEFAULT_CONFIG.speed,
     engine: ENGINES.includes(input.engine as EngineName) ? (input.engine as EngineName) : DEFAULT_CONFIG.engine,
@@ -107,6 +131,14 @@ export function writeConfig(patch: ConfigPatch, path: string = configPath(), fs:
     ...current,
     ...patch,
     voices: { ...current.voices, ...(patch.voices ?? {}) },
+    toneVoice: {
+      es: validToneVoice(patch.toneVoice?.es) ? patch.toneVoice.es : current.toneVoice.es,
+      en: validToneVoice(patch.toneVoice?.en) ? patch.toneVoice.en : current.toneVoice.en,
+    },
+    toneWeight: {
+      es: validToneWeight(patch.toneWeight?.es) ? patch.toneWeight.es : current.toneWeight.es,
+      en: validToneWeight(patch.toneWeight?.en) ? patch.toneWeight.en : current.toneWeight.en,
+    },
   });
   fs.writeAtomic(path, JSON.stringify(next, null, 2) + "\n");
   return next;

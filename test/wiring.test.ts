@@ -1,11 +1,14 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import * as nodeFs from "node:fs";
+import * as childProcess from "node:child_process";
+import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { OpenVoxPlugin, chooseEngine, createLiveSink, createOpenVox, createPauseState, disableService, liveEngine, withPause } from "../src/plugin";
 import * as plugin from "../src/plugin";
 import { createNarrationPlan } from "../src/markdown-narration";
-import { createConfigReader, DEFAULT_CONFIG } from "../src/config";
+import { createConfigReader, DEFAULT_CONFIG, readConfig, writeConfig } from "../src/config";
 import { createSpeechSink, type Engine, type SpeechProcess, type SpeechSink } from "../src/speech-sink";
 import { encodeCommand, decodeCommand } from "../src/repeat-control";
 import { fixture } from "./final-response.test";
@@ -14,7 +17,7 @@ import { wavBytes } from "./audio-cache.test";
 import { flattenNarrationPlan } from "../src/narration-plan";
 import { createPlayer, type Player, type HostProcess } from "../src/player";
 import * as playerModule from "../src/player";
-import { kokoroEngine } from "../src/kokoro-engine";
+import { defaultKokoroEngine, kokoroEngine } from "../src/kokoro-engine";
 import type { Client } from "../src/plugin";
 
 function fakeSink() {
@@ -518,6 +521,37 @@ describe("live sink player wiring", () => {
 });
 
 describe("chooseEngine", () => {
+  test("default Kokoro wiring reads persisted tone changes on each new plan without changing the live profile", async () => {
+    let stored = "{}";
+    const fs = { read: () => stored, writeAtomic: (_path: string, data: string) => { stored = data; } };
+    const calls: string[][] = [];
+    const exists = spyOn(nodeFs, "existsSync").mockReturnValue(true);
+    const spawn = spyOn(childProcess, "spawn").mockImplementation(((_cmd: string, args: string[]) => {
+      calls.push(args);
+      const child = new EventEmitter() as any;
+      child.stdout = new EventEmitter();
+      child.stdin = new EventEmitter();
+      child.stdin.end = () => queueMicrotask(() => {
+        child.stdout.emit("data", Buffer.from('{"diagnostics":[]}'));
+        child.emit("close", 0);
+      });
+      child.kill = () => {};
+      return child;
+    }) as any);
+    try {
+      const engine = defaultKokoroEngine({ OPEN_VOX_HOME: "C:\\synthetic-tone-home" }, () => readConfig("memory", fs))!;
+      const plan = createNarrationPlan("Synthetic narration", "es");
+      await engine.synthesizePlan!(plan, "fake.wav").exited;
+      expect(calls[0]).not.toContain("--tone-voice");
+      writeConfig({ toneVoice: { es: "am_onyx" }, toneWeight: { es: 0.75 } }, "memory", fs);
+      await engine.synthesizePlan!(plan, "fake.wav").exited;
+      expect(calls[1]).toEqual(expect.arrayContaining(["--tone-voice", "am_onyx", "--tone-weight", "0.75"]));
+      expect(calls[1]![calls[1]!.indexOf("--lang") + 1]).toBe("es");
+      writeConfig({ toneVoice: { es: "" }, toneWeight: { es: 0 } }, "memory", fs);
+      await engine.synthesizePlan!(plan, "fake.wav").exited;
+      expect(calls[2]).toEqual(calls[0]);
+    } finally { spawn.mockRestore(); exists.mockRestore(); }
+  });
   test("plan dispatch selects the actual engine at execution and text fallback never receives JSON", async () => {
     const seen: string[] = [], diagnostics: string[] = [];
     const done = { exited: Promise.resolve(0), kill() {} };
