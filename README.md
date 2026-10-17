@@ -198,7 +198,7 @@ an instance-local service icon and four buttons across two rows:
   unconfirmed (neutral and not clickable). Off cancels this instance's work,
   clears Pause without resuming and deletes retained WAV audio after holds release.
   On permits new narration only; it restores neither discarded audio nor position.
-  Pause/Repeat are unavailable while Off; Voice remains available. State is held
+  Pause/Speak/Repeat are unavailable while Off; Voice remains available. State is held
   in memory, not shared config. A statically unavailable instance cannot be enabled.
   Playback-rate preference is separate from this service control and synthesis speed.
 
@@ -216,11 +216,19 @@ an instance-local service icon and four buttons across two rows:
   plugin has answered.
 - **Voice**: opens a list of voices; picking one changes the voice for that
   language immediately.
-- **Repeat**: restarts the last successfully generated audio from the beginning,
-  using the same WAV bytes without synthesizing again. Later voice, synthesis speed
-  or engine changes affect new narration, not Repeat. It is disabled while paused, without
-  audio for the displayed session, or when instance discovery is missing/ambiguous.
-  Pause stays usable in those last two cases, as long as the plugin answered.
+- **Speak / Repeat**: **Speak** generates and plays the latest eligible
+  response when it has no audio of its own. Failed or cancelled generation can be
+  retried manually; repeated clicks cannot restart pending preparation or synthesis.
+  Once that response has audio, **Repeat** restarts its exact WAV without synthesis.
+  Older response audio never enables Repeat for newer text. Voice, synthesis speed
+  and engine changes apply to Speak/new narration, not Repeat. Both actions are
+  unavailable while paused or Off, without a valid latest target for the displayed
+  session, or while instance discovery is missing/ambiguous. After a restart or
+  re-enabling, the displayed session can recover its latest persisted response for
+  an explicit Speak click. Discovery never generates or plays audio. A newer user
+  request or unfinished response prevents falling back to an older answer.
+  Recovery examines at most 100 recent messages, caches discovery for five seconds
+  and revalidates clicks; ambiguous, missing or invalid history leaves Speak disabled.
 - **Playback rate**: the second-row button cycles **1.0x → 1.5x → 2.0x → 1.0x**
   from the confirmed instance preference. Unconfirmed state shows **Speed**;
   clicks never advance the label optimistically. It is disabled while Off or
@@ -230,10 +238,12 @@ an instance-local service icon and four buttons across two rows:
   The label confirms stored preference, not audible application: missing host
   acknowledgment or SoundPlayer fallback can leave playback at its original rate.
 
-Each server plugin instance retains only one last audio, owned by its session.
-Switching sessions or inactivity keeps it; another session cannot replay it, and
-returning to the owner session enables Repeat until a successful new generation
-replaces it. Failed/cancelled/invalid generation keeps the prior audio. Pause keeps
+Each server plugin instance retains at most one latest manual response and one last
+audio artifact, bound to its session and message. Switching sessions invalidates
+in-flight manual discovery; another session cannot act on the old target. Returning to the owner session
+permits Repeat only while the latest valid response still owns that audio.
+Failed/cancelled/invalid generation keeps prior audio without assigning it to newer
+text. Pause keeps
 the paused playback (and its audio file) until Resume or until it is discarded: a new
 user turn, a session error, message removal, an assistant error, deleting the owner
 session or disposing the plugin invalidates affected work, including retained text,
@@ -244,10 +254,11 @@ restart. Deleting the owner session or disposing the plugin removes owned audio
 after player handles close. Repeat requests received while paused remain rejected;
 they are not retained completed responses.
 
-Repeat and Pause use correlated, metadata-only `tui.command.execute` events sent
+Speak, Repeat and Pause use correlated, metadata-only `tui.command.execute` events sent
 through the attached SDK client's `tui.publish`. Instance nonce, session, request
-identity and expiry guard replay on the server (Repeat also checks the audio
-revision; Pause sends an explicit `pause` or `resume` action, never a toggle); the
+identity and expiry guard replay on the server. Speak/Repeat also validate the
+latest message identity; Repeat checks the audio revision. Pause sends an explicit
+`pause` or `resume` action, never a toggle; the
 nonce is routing metadata, not an authentication secret. Other attached clients
 ignore unmatched challenges. No transient commands are written into shared settings.
 
@@ -263,8 +274,10 @@ and registers in `tui.json`; existing entries are preserved.
 
 ## How it works
 
-1. `src/plugin.ts` watches OpenCode events and picks a candidate only after a
-   fresh user turn is observed. It never reads history or replays old messages.
+1. `src/plugin.ts` admits automatic narration only after a fresh user turn is
+   observed. Separately, sidebar discovery may read bounded persisted history for
+   explicit Speak/Repeat eligibility. Historical responses never autoplay, including
+   after service re-enabling or Pause/Resume.
 2. `src/final-response.ts` accepts a message only when it is a root-session
    assistant reply with `finish: "stop"`, a completion time, no error, no
    summary flag, and permitted text. Tool turns, errors, aborts, compaction,

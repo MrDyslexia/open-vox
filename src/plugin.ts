@@ -1,7 +1,7 @@
 import { envValue } from "./brand";
 import { appendFileSync } from "node:fs";
 import type { Hooks, Plugin } from "@opencode-ai/plugin";
-import { selectFinalResponse, validID, type MessageData, type Selection } from "./final-response";
+import { selectFinalResponse, selectLatestPersisted, validID, type MessageData, type Selection } from "./final-response";
 import { defaultKokoroEngine } from "./kokoro-engine";
 import { defaultPiperEngine } from "./piper-engine";
 import { createConfigReader, readConfig, type ConfigReader } from "./config";
@@ -14,8 +14,9 @@ import { flattenNarrationPlan } from "./narration-plan";
 type Result<T> = { data?: T; error?: unknown };
 export type Client = {
   session: {
-    get(input: { path: { id: string }; query: { directory: string } }): Promise<Result<import("@opencode-ai/sdk").Session>>;
+    get(input: { path: { id: string }; query: { directory: string }; signal?: AbortSignal }): Promise<Result<import("@opencode-ai/sdk").Session>>;
     message(input: { path: { id: string; messageID: string }; query: { directory: string } }): Promise<Result<MessageData>>;
+    messages?(input: { path: { id: string }; query: { directory: string; limit: number }; signal?: AbortSignal }): Promise<Result<MessageData[]>>;
   };
 };
 export type Sink = (selection: Selection) => Promise<void>;
@@ -38,15 +39,90 @@ type CoordinatorOptions = {
 export function createCoordinator(client: Client, directory: string, sink: Sink = async () => {}, options: CoordinatorOptions = {}) {
   const sessions = new Map<string, State>();
   let disposed = false;
-  // One validated latest completed response is retained while paused (never a backlog).
+  // Latest manual target is independent of the consumable paused slot (never a backlog).
   let epoch = 0, sequence = 0;
   let resumedThrough = 0;
   let latest: { completed: number; sequence: number } | undefined;
   let pending: { selection: Selection; current: () => boolean } | undefined;
+  let target: typeof pending;
+  // Manual discovery owns one displayed-session slot, not the observed-turn autoplay state.
+  let displayed: string | undefined, discoveryEpoch = 0, recovered = false;
+  let cachedUntil = 0, reading: Promise<boolean> | undefined;
+  let discoveryAbort: AbortController | undefined;
+  const recoveryBlocked = new Set<string>();
+  const resetDiscovery = (resetCooldown = true) => {
+    discoveryEpoch++;
+    if (resetCooldown) cachedUntil = 0;
+    discoveryAbort?.abort();
+    if (recovered) target = undefined;
+    recovered = false;
+  };
+  const view = (sessionID: string) => {
+    if (displayed === sessionID) return;
+    resetDiscovery(); displayed = sessionID;
+  };
+  const refresh = async (sessionID: string, force = false) => {
+    if (!client.session.messages) return true; // Older embedders keep observed-response-only behavior.
+    if (disposed || !enabled() || options.isPaused?.() || displayed !== sessionID ||
+        recoveryBlocked.has(sessionID) || recoveryBlocked.size >= 128 || sessions.get(sessionID)?.blocked) return false;
+    const requestedEpoch = discoveryEpoch;
+    if (reading) return await reading && requestedEpoch === discoveryEpoch;
+    if (target?.current() && busy.has(selectionKey(target.selection))) return true;
+    if (!force && Date.now() < cachedUntil) return true;
+    const version = discoveryEpoch, serviceEpoch = epoch;
+    const state = sessions.get(sessionID), generation = state?.generation;
+    const current = () => !disposed && enabled() && !options.isPaused?.() && displayed === sessionID &&
+      version === discoveryEpoch && serviceEpoch === epoch && state?.generation === generation;
+    const abort = new AbortController(); discoveryAbort = abort;
+    cachedUntil = Date.now() + 5000; // Positive, negative and failed reads share a bounded polling cooldown.
+    reading = (async () => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const result = await Promise.race([
+          Promise.all([
+            client.session.get({ path: { id: sessionID }, query: { directory }, signal: abort.signal }),
+            client.session.messages!({ path: { id: sessionID }, query: { directory, limit: 100 }, signal: abort.signal }),
+          ]),
+          new Promise<undefined>(resolve => { timer = setTimeout(() => { abort.abort(); resolve(undefined); }, 1500); }),
+        ]);
+        if (!current()) return false;
+        // Revalidation replaces only the manual target, never the Pause pending slot.
+        target = undefined; recovered = false;
+        if (!result) return false;
+        const [session, history] = result;
+        if (session.error !== undefined || history.error !== undefined || session.data?.id !== sessionID || !history.data) return false;
+        const messages = history.data;
+        const selection = selectLatestPersisted(session.data, messages);
+        if (!selection) return false;
+        const response = messages.find(m => m.info.id === selection.messageID)!.info;
+        const parent = messages.find(m => response.role === "assistant" && m.info.id === response.parentID)!.info;
+        if (state && (parent.time.created < state.created ||
+            (parent.time.created === state.created && parent.id !== state.turn))) return false;
+        target = { selection, current }; recovered = true;
+        return true;
+      } catch {
+        if (current()) { target = undefined; recovered = false; }
+        return false;
+      } finally { if (timer) clearTimeout(timer); }
+    })();
+    try { return await reading; } finally { reading = undefined; }
+  };
+  const selectionKey = (selection: Selection) => JSON.stringify([selection.sessionID, selection.messageID]);
+  const busy = new Set<string>();
+  const deliver = async (selection: Selection) => {
+    const key = selectionKey(selection);
+    if (busy.has(key)) return;
+    busy.add(key);
+    try { await sink(selection); } finally { busy.delete(key); }
+  };
   const enabled = () => options.isEnabled?.() ?? true;
-  const clearPending = () => { epoch++; pending = undefined; latest = undefined; resumedThrough = 0; };
+  const clearPending = () => { resetDiscovery(); epoch++; pending = undefined; target = undefined; latest = undefined; resumedThrough = 0; };
   const cancel = (sessionID?: string, deleted = false) => {
+    if (sessionID === undefined || displayed === sessionID) resetDiscovery();
+    if (sessionID !== undefined && recoveryBlocked.size < 128) recoveryBlocked.add(sessionID);
+    else if (sessionID === undefined && displayed && recoveryBlocked.size < 128) recoveryBlocked.add(displayed);
     if (sessionID === undefined || pending?.selection.sessionID === sessionID) pending = undefined;
+    if (sessionID === undefined || target?.selection.sessionID === sessionID) target = undefined;
     try { options.onInvalidate?.(sessionID, deleted); } catch {}
   };
   const invalidate = (state: State) => {
@@ -57,6 +133,24 @@ export function createCoordinator(client: Client, directory: string, sink: Sink 
     // The host does not await event hooks. All SDK and sink failures stay here.
     try {
       if (disposed) return;
+      if (event.type === "message.part.updated") {
+        if (displayed === event.properties.part.sessionID) resetDiscovery(false);
+        return;
+      }
+      if (event.type === "session.updated") {
+        const session = event.properties.info;
+        if (displayed === session.id) resetDiscovery(false);
+        if (session.revert !== undefined || session.parentID !== undefined || session.time?.compacting !== undefined)
+          cancel(session.id);
+        return;
+      }
+      if (event.type === "session.compacted" || event.type === "message.part.removed") {
+        const id = event.properties.sessionID;
+        const state = sessions.get(id);
+        if (state) invalidate(state);
+        cancel(id);
+        return;
+      }
       if (event.type === "session.error") {
         if (event.properties.sessionID === undefined) sessions.forEach(invalidate);
         else {
@@ -72,6 +166,8 @@ export function createCoordinator(client: Client, directory: string, sink: Sink 
         if (state) {
           invalidate(state);
           if (event.type === "session.deleted") state.blocked = true;
+        } else if (event.type === "session.deleted" && sessions.size < 128) {
+          sessions.set(id, { created: -Infinity, generation: 0, users: new Set(), claimed: new Set(), blocked: true });
         }
         cancel(id, event.type === "session.deleted");
         return;
@@ -93,14 +189,16 @@ export function createCoordinator(client: Client, directory: string, sink: Sink 
         if (state.blocked || state.users.has(info.id) || info.time.created <= state.created) return;
         invalidate(state);
         cancel(info.sessionID);
+        recoveryBlocked.delete(info.sessionID);
         if (state.users.size >= 64) { state.blocked = true; return; }
         state.users.add(info.id);
         state.turn = info.id;
         state.created = info.time.created;
         return;
       }
+      if (info.role === "assistant" && displayed === info.sessionID) resetDiscovery(false);
+      if (info.role === "assistant" && info.error !== undefined) { if (state) invalidate(state); cancel(info.sessionID); return; }
       if (info.role !== "assistant" || !state || state.blocked) return;
-      if (info.error !== undefined) { invalidate(state); cancel(info.sessionID); return; }
       if (!state.turn || info.parentID !== state.turn || info.finish !== "stop" ||
           !Number.isFinite(info.time?.completed) || state.claimed.has(info.id)) return;
       if (state.claimed.size >= 256) { invalidate(state); state.blocked = true; return; }
@@ -128,15 +226,25 @@ export function createCoordinator(client: Client, directory: string, sink: Sink 
       if ((pausedAtClaim || paused || order.sequence <= resumedThrough) && latest && (order.completed < latest.completed ||
           (order.completed === latest.completed && order.sequence < latest.sequence))) return;
       if (!latest || order.completed > latest.completed ||
-          (order.completed === latest.completed && order.sequence > latest.sequence)) latest = order;
+          (order.completed === latest.completed && order.sequence > latest.sequence)) {
+        latest = order;
+        target = { selection, current };
+        recovered = false;
+      }
       if (paused) pending = { selection, current };
-      else await sink(selection);
+      else await deliver(selection);
     } catch {
       // Claimed messages remain claimed after failures; there is no automatic retry.
     }
   };
   return {
     event,
+    view,
+    refresh,
+    resetDiscovery,
+    deliver,
+    latest: () => target?.current() && (displayed === undefined || target.selection.sessionID === displayed)
+      ? { selection: target.selection, busy: busy.has(selectionKey(target.selection)) } : undefined,
     /** Consumes the retained paused response once; undefined when none is valid. */
     takePending: () => {
       const retained = pending;
@@ -219,7 +327,18 @@ export function createOpenVox(client: Client, directory: string, sink: SpeechSin
     },
   });
   const control = controlOptions && createRepeatControl({ ...controlOptions,
+    view: coordinator.view,
+    refresh: coordinator.refresh,
     status: () => sink.status?.(), isPaused: pause.isPaused, isEnabled: pause.isEnabled,
+    latest: () => {
+      const target = coordinator.latest();
+      return target && { sessionID: target.selection.sessionID, messageID: target.selection.messageID, busy: target.busy };
+    },
+    speak: async (sessionID, messageID) => {
+      const target = coordinator.latest();
+      if (target && !target.busy && target.selection.sessionID === sessionID && target.selection.messageID === messageID)
+        await coordinator.deliver(target.selection);
+    },
     getPlaybackSpeed: pause.getPlaybackSpeed,
     control: (action) => {
       const speed = speedOfAction(action);
@@ -232,10 +351,10 @@ export function createOpenVox(client: Client, directory: string, sink: SpeechSin
         }
         pause.setPaused(false);
         if (retained && pause.isEnabled()) {
-          try { void sink(retained).catch(() => {}); } catch {}
+          try { void coordinator.deliver(retained).catch(() => {}); } catch {}
         }
       }
-      else if (action === "pause") pause.setPaused(true);
+      else if (action === "pause") { coordinator.resetDiscovery(); pause.setPaused(true); }
       else if (action === "resume") pause.setPaused(false);
       else if (action === "disable") {
         if (pause.isEnabled()) coordinator.clearPending();
@@ -426,6 +545,11 @@ export const OpenVoxPlugin: Plugin = async ({ client, directory }) => {
       message: async (input) => {
         try { const r = await client.session.message(input as never); log(`session.message ${r.error ? "error" : "ok"}`); return r as never; }
         catch (error) { log(`session.message threw ${String(error)}`); throw error; }
+      },
+      messages: async (input) => {
+        const result = await client.session.messages(input);
+        log(`session.messages ${result.error ? "error" : "ok"}`);
+        return result as Result<MessageData[]>;
       },
     },
   } : (client as unknown as Client);

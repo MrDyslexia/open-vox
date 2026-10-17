@@ -2,6 +2,53 @@ import { expect, test } from "bun:test";
 import { createRepeatControl, encodeCommand, decodeCommand } from "../src/repeat-control";
 import * as rateControl from "../src/repeat-control";
 
+test("Speak validates latest ownership, busy state, service gates, expiry and shared deduplication", async () => {
+  let busy = true, enabled = true, paused = false, target = "b", requests = 0;
+  const replies: string[] = [];
+  const c = createRepeatControl({ instance: "host", now: () => 1000,
+    latest: () => ({ sessionID: "s", messageID: target, busy }),
+    status: () => ({ sessionID: "s", messageID: "a", revision: 1 }),
+    isPaused: () => paused, isEnabled: () => enabled,
+    speak: async () => { requests++; }, repeat: async () => { throw Error("old audio"); },
+    publish: async command => { replies.push(command); } });
+  let sequence = 0;
+  const speak = (extra = {}) => c.handle(encodeCommand({ kind: "speak", instance: "host", sessionID: "s",
+    messageID: "b", revision: 0, requestID: `r-${++sequence}`, expires: 2000, ...extra }));
+  await c.handle(encodeCommand({ kind: "hello", sessionID: "s", challenge: "c", expires: 2000 }));
+  expect(decodeCommand(replies[0])).toMatchObject({ messageID: "b", revision: 0, busy: true });
+  await speak(); busy = false;
+  for (const extra of [{ messageID: "a" }, { sessionID: "other" }, { instance: "other" },
+    { expires: 1000 }, { expires: 3001 }, { revision: 1 }, { messageID: "bad id" }]) await speak(extra);
+  paused = true; await speak(); paused = false;
+  enabled = false; await speak(); enabled = true;
+  expect(requests).toBe(0);
+  await speak({ requestID: "once" }); await speak({ requestID: "once" });
+  expect(requests).toBe(1);
+  target = "c"; await speak(); expect(requests).toBe(1);
+  c.dispose(); target = "b"; await speak(); expect(requests).toBe(1);
+});
+
+test("async selection rechecks expiry and Repeat can restart playback already in progress", async () => {
+  let time = 1000, repeats = 0, releaseRead!: () => void, releasePlayback!: () => void;
+  let refresh = async () => true;
+  const c = createRepeatControl({ instance: "host", now: () => time,
+    latest: () => ({ sessionID: "s", messageID: "a", busy: false }),
+    status: () => ({ sessionID: "s", messageID: "a", revision: 1 }),
+    isPaused: () => false, refresh: () => refresh(), publish: async () => {},
+    repeat: async () => { if (++repeats === 1) await new Promise<void>(resolve => { releasePlayback = resolve; }); } });
+  const request = (id: string) => c.handle(encodeCommand({ kind: "repeat", instance: "host", sessionID: "s",
+    messageID: "a", revision: 1, requestID: id, expires: 2000 }));
+  try {
+    refresh = () => new Promise<boolean>(resolve => { releaseRead = () => resolve(true); });
+    const late = request("late"); time = 2000; releaseRead(); await late;
+    expect(repeats).toBe(0);
+    time = 1000; refresh = async () => true;
+    const first = request("first"); await Promise.resolve(); await Promise.resolve();
+    await request("second"); expect(repeats).toBe(2);
+    releasePlayback(); await first;
+  } finally { releasePlayback?.(); c.dispose(); }
+});
+
 test("attached hello replies with correlated metadata; bounded replay consumes paused and duplicate requests", async () => {
   let paused = false, now = 1000;
   const replies: string[] = [], repeats: string[] = [];

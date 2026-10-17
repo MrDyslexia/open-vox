@@ -28,6 +28,18 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 const item = (id: string, text: string) => ({ sessionID: "s", messageID: id, text });
 
 describe("speech sink", () => {
+  test.each(["stopSession", "removeSession", "pause"] as const)("%s invalidates asynchronous preparation before it can be retried", async action => {
+    let finish!: (plan: ReturnType<typeof createNarrationPlan>) => void;
+    const h = harness();
+    const sink = createSpeechSink({ spawn: h.spawn,
+      preparePlan: () => new Promise(resolve => { finish = resolve; }) });
+    const pending = sink(item("b", "Latest response"));
+    if (action === "pause") { sink.pause!(); sink.resume!(); }
+    else sink[action]!("s");
+    finish(createNarrationPlan("Latest response", "es")); await pending;
+    expect(h.procs).toHaveLength(0);
+    await sink.dispose!();
+  });
   test("dynamic or static Off rejects admission before PN parsing or synthesis", async () => {
     let parses = 0, syntheses = 0;
     const sink = createSpeechSink({ isEnabled: () => false, preparePlan: (text, language) => {

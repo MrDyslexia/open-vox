@@ -114,7 +114,7 @@ export function playWav(wav: string, spawn: Spawn = windowsSpawn): SpeechProcess
   return spawn(["-NoProfile", "-NonInteractive", "-Command", script], "");
 }
 
-type Job = { sessionID: string; plan?: NarrationPlan; revision?: number; expires?: number; done: () => void };
+type Job = { sessionID: string; messageID?: string; plan?: NarrationPlan; revision?: number; expires?: number; done: () => void };
 
 /** The process the pump is waiting on, with its backstop timer under the sink's control. */
 type Active = { proc: SpeechProcess; audible: boolean; arm(): void; disarm(): void };
@@ -143,6 +143,7 @@ export function createSpeechSink(options: SpeechSinkOptions = {}): SpeechSink {
   let reducedReported = false;
   const reduced = () => { if (!reducedReported) { reducedReported = true; diagnostic("reduced-pronunciation:text-only-engine"); } };
   const queue: Job[] = [];
+  const preparations = new Set<{ sessionID: string; cancelled: boolean }>();
   let current: Active | undefined;
   let frozen: Frozen | undefined;
   let running = false;
@@ -260,7 +261,7 @@ export function createSpeechSink(options: SpeechSinkOptions = {}): SpeechSink {
               const code = await run(proc);
               if (code !== 0) throw new Error(`synthesis process exited with code ${code}`);
               if (!valid()) continue;
-              if (!cache.promote(candidate, job.sessionID)) throw new Error("Invalid generated audio");
+              if (!cache.promote(candidate, job.sessionID, job.messageID)) throw new Error("Invalid generated audio");
               candidate = undefined;
               release(); release = undefined;
             }
@@ -294,6 +295,8 @@ export function createSpeechSink(options: SpeechSinkOptions = {}): SpeechSink {
   const sink = (async (selection: Selection) => {
     if (disposed || !enabled() || paused()) return;
     const mine = generation;
+    const preparation = { sessionID: selection.sessionID, cancelled: false };
+    preparations.add(preparation);
     let plan: NarrationPlan;
     try {
       const language = typeof options.narrationLanguage === "function" ? options.narrationLanguage() : options.narrationLanguage ?? "es";
@@ -306,11 +309,12 @@ export function createSpeechSink(options: SpeechSinkOptions = {}): SpeechSink {
       if (plan.outcome !== "complete") diagnostic(`narration-limit:${plan.outcome}`);
       if (plan.outcome === "unsplittable") throw new Error("Narration contains an unsplittable technical unit");
     } catch (error) { report(error); return Promise.resolve(); }
+    finally { preparations.delete(preparation); }
     // Preparation callbacks/diagnostics may invalidate this selection synchronously.
-    if (disposed || !enabled() || mine !== generation || paused() || !flattenNarrationPlan(plan)) return;
+    if (preparation.cancelled || disposed || !enabled() || mine !== generation || paused() || !flattenNarrationPlan(plan)) return;
     return new Promise<void>((resolve) => {
       while (queue.length >= maxPending) queue.shift()!.done();
-      queue.push({ sessionID: selection.sessionID, plan, done: resolve });
+      queue.push({ sessionID: selection.sessionID, messageID: selection.messageID, plan, done: resolve });
       if (!running) idle = pump();
     });
   }) as SpeechSink;
@@ -330,6 +334,7 @@ export function createSpeechSink(options: SpeechSinkOptions = {}): SpeechSink {
   };
   // Jobs read the generation when they start, so queued jobs of other sessions are not invalidated by the bump.
   sink.stopSession = (sessionID) => {
+    for (const preparation of preparations) if (preparation.sessionID === sessionID) preparation.cancelled = true;
     for (let i = queue.length - 1; i >= 0; i--) if (queue[i]!.sessionID === sessionID) queue.splice(i, 1)[0]!.done();
     if (activeSession === sessionID) cancelActive();
   };
@@ -343,7 +348,9 @@ export function createSpeechSink(options: SpeechSinkOptions = {}): SpeechSink {
     if (!enabled()) return;
     while (queue.length > 0) queue.shift()!.done();
     const active = current;
-    if (disposed || !active) return;
+    if (disposed) return;
+    for (const preparation of preparations) preparation.cancelled = true;
+    if (!active) { sink.stop(); return; }
     if (!active.audible || !active.proc.pause || !active.proc.resume) { sink.stop(); return; }
     let f = frozen?.active === active ? frozen : undefined;
     if (!f) { f = { active, paused: false, want: true, ops: Promise.resolve() }; frozen = f; }
@@ -362,7 +369,8 @@ export function createSpeechSink(options: SpeechSinkOptions = {}): SpeechSink {
   sink.status = () => {
     if (!enabled()) return;
     const audio = cache?.current();
-    return !disposed && options.enabled !== false && audio ? { sessionID: audio.sessionID, revision: audio.revision } : undefined;
+    return !disposed && options.enabled !== false && audio ? { sessionID: audio.sessionID, revision: audio.revision,
+      ...(audio.messageID === undefined ? {} : { messageID: audio.messageID }) } : undefined;
   };
   sink.repeat = (sessionID, revision, expires) => {
     const audio = sink.status?.();
@@ -374,6 +382,7 @@ export function createSpeechSink(options: SpeechSinkOptions = {}): SpeechSink {
     });
   };
   sink.removeSession = (sessionID) => {
+    for (const preparation of preparations) if (preparation.sessionID === sessionID) preparation.cancelled = true;
     if (activeSession === sessionID) sink.stop();
     for (let i = queue.length - 1; i >= 0; i--) if (queue[i]!.sessionID === sessionID) queue.splice(i, 1)[0]!.done();
     cache?.forget(sessionID);

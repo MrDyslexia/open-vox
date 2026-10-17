@@ -26,7 +26,7 @@ function Block(props: { api: TuiPluginApi; sessionID: string }) {
     return route.name === "session" && route.params?.sessionID === props.sessionID ? props.sessionID : ""
   }
   // Pause, service and playback preference remain neutral until confirmed by this instance.
-  const [view, setView] = createSignal({ paused: undefined, enabled: undefined, canControl: false, canRepeat: false, playbackSpeed: undefined }, { equals: sameView })
+  const [view, setView] = createSignal({ paused: undefined, enabled: undefined, canControl: false, canRepeat: false, canSpeak: false, playbackSpeed: undefined }, { equals: sameView })
   const repeat = createRepeatUi({
     subscribe: (receive) => props.api.event.on("tui.command.execute", (event) => receive(event.properties.command)),
     publish: (command) => publishAttached(props.api.client, props.api.state.path.directory, command),
@@ -110,8 +110,11 @@ function Block(props: { api: TuiPluginApi; sessionID: string }) {
         {button(() => (paused() ? "Resume" : "Pause"), () => { void repeat.togglePause(session()) }, paused, false,
           () => !canPause(view()) || !canPause(repeat.view(session())))}
         {button(() => "Voice", chooseVoice, undefined, true)}
-        {button(() => "Repeat", () => { void repeat.repeat(session()) }, undefined, false,
-          () => !view().canRepeat || !repeat.available(session()))}
+        {button(() => view().canRepeat ? "Repeat" : "Speak", () => {
+          if (repeat.view(session()).canRepeat) void repeat.repeat(session())
+          else void repeat.speak(session())
+        }, undefined, false,
+          () => !(view().canRepeat || view().canSpeak) || !(repeat.view(session()).canRepeat || repeat.view(session()).canSpeak))}
         {/* The rate button shares the row: four equal slots. It displays only confirmed
             preference, highlights non-1x and stays usable while paused. */}
         {button(() => speedLabel(view().playbackSpeed), () => { void repeat.cycleSpeed(session()) },
