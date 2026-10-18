@@ -1,12 +1,18 @@
 import { randomUUID } from "node:crypto";
 import { CONTROL_TTL, decodeCommand, encodeCommand, nextPlaybackSpeed, speedAction,
-  type ControlAction, type ControlMessage, type PlaybackSpeed } from "./repeat-control";
+  type ControlAction, type ControlMessage, type PlaybackSpeed, type ModelDevice } from "./repeat-control";
 
 /** Confirmed instance state only; undefined is neutral, never an optimistic On/Off. */
-export type SidebarView = { paused: boolean | undefined; enabled: boolean | undefined; canControl: boolean; canRepeat: boolean; playbackSpeed: PlaybackSpeed | undefined };
+export type SidebarView = { paused: boolean | undefined; enabled: boolean | undefined; canControl: boolean; canRepeat: boolean; canSpeak?: boolean; playbackSpeed: PlaybackSpeed | undefined; lidDevice?: ModelDevice; kokoroDevice?: ModelDevice };
 export const sameView = (a: SidebarView, b: SidebarView) =>
   a.paused === b.paused && a.enabled === b.enabled && a.canControl === b.canControl && a.canRepeat === b.canRepeat &&
-  a.playbackSpeed === b.playbackSpeed;
+  a.playbackSpeed === b.playbackSpeed && a.canSpeak === b.canSpeak &&
+  a.lidDevice === b.lidDevice && a.kokoroDevice === b.kokoroDevice;
+
+export const deviceLabel = (view: Pick<SidebarView, "lidDevice" | "kokoroDevice">) => {
+  const label = (device: ModelDevice | undefined) => device === "cpu" ? "CPU" : device === "gpu" ? "GPU" : "Pending";
+  return `LID: ${label(view.lidDevice)} · Kokoro: ${label(view.kokoroDevice)}`;
+};
 
 export const canPause = (view: SidebarView) => view.canControl && view.enabled === true;
 /** Rate cycling also requires a confirmed value; paused playback still accepts it. */
@@ -66,7 +72,9 @@ export function createRepeatUi(options: {
     // The accepted instance reports its latest pause/audio state right away (restrictions must not wait
     // for settlement); the lease keeps its original expiry, so only a settled reply can extend it.
     else if (status && status.expires > now() && status.instance === m.instance)
-      status = { ...status, paused: m.paused, enabled: m.enabled, playbackSpeed: m.playbackSpeed, revision: m.revision };
+      status = { ...status, paused: m.paused, enabled: m.enabled, playbackSpeed: m.playbackSpeed,
+        revision: m.revision, messageID: m.messageID, busy: m.busy,
+        lidDevice: m.lidDevice, kokoroDevice: m.kokoroDevice };
     options.onChange();
   });
   /** The confirmed status for this session, or undefined when nothing validated and unexpired exists. */
@@ -83,8 +91,12 @@ export function createRepeatUi(options: {
       paused: current ? current.paused === true : undefined,
       enabled: current ? current.enabled !== false : undefined,
       playbackSpeed: current ? current.playbackSpeed ?? 1 : undefined,
+      ...(current?.enabled !== false && current?.lidDevice ? { lidDevice: current.lidDevice } : {}),
+      ...(current?.enabled !== false && current?.kokoroDevice ? { kokoroDevice: current.kokoroDevice } : {}),
       canControl: !!current && !sending,
       canRepeat: !!current && !sending && current.enabled !== false && !current.paused && current.revision! > 0,
+      canSpeak: !!current && !sending && current.enabled !== false && !current.paused && !current.busy &&
+        !!current.messageID && current.revision === 0,
     };
   };
   const available = (sessionID: string) => view(sessionID).canRepeat;
@@ -149,8 +161,18 @@ export function createRepeatUi(options: {
       if (!available(sessionID)) return;
       try {
         await send(encodeCommand({ kind: "repeat", instance: status!.instance, sessionID,
-          revision: status!.revision, requestID: id(), expires: now() + CONTROL_TTL }));
+          messageID: status!.messageID, revision: status!.revision, requestID: id(), expires: now() + CONTROL_TTL }));
       } catch { status = undefined; conflict = true; if (!disposed) options.onChange(); }
+    },
+    async speak(sessionID: string): Promise<void> {
+      const target = confirmed(sessionID);
+      if (!target || !view(sessionID).canSpeak) return;
+      try {
+        await send(encodeCommand({ kind: "speak", instance: target.instance, sessionID,
+          messageID: target.messageID, revision: 0, requestID: id(), expires: now() + CONTROL_TTL }));
+      } catch { status = undefined; conflict = true; if (!disposed) options.onChange(); return; }
+      pending = undefined;
+      refresh(sessionID);
     },
     dispose() { disposed = true; pending = undefined; status = undefined; off(); },
   };

@@ -202,3 +202,32 @@ test("service epoch invalidates paused fetches without requiring a new user turn
   expect(h.output).toEqual([]);
   coordinator.dispose();
 });
+
+test.each(["turn", "error", "removed", "deleted", "off", "dispose"])("latest manual target cannot survive %s", async kind => {
+  const h = harness(), coordinator = h.coordinator;
+  await coordinator.event({ event: updated(h.fixtures[0]!.parent.info) });
+  await coordinator.event({ event: updated(h.fixtures[0]!.response.info) });
+  expect(coordinator.latest()?.selection.messageID).toBe("a");
+  if (kind === "turn") {
+    const next = fixture("s", "new").parent.info; next.time.created = 10;
+    await coordinator.event({ event: updated(next) });
+  } else if (kind === "error") await coordinator.event({ event: { type: "session.error", properties: { sessionID: "s" } } });
+  else if (kind === "removed") await coordinator.event({ event: { type: "message.removed", properties: { sessionID: "s", messageID: "a" } } });
+  else if (kind === "deleted") await coordinator.event({ event: { type: "session.deleted", properties: { info: h.fixtures[0]!.session } } });
+  else if (kind === "off") coordinator.clearPending();
+  else coordinator.dispose();
+  await coordinator.event({ event: updated(h.fixtures[0]!.response.info) });
+  expect(coordinator.latest()).toBeUndefined();
+  coordinator.dispose();
+});
+
+test("consuming Pause pending leaves the manual latest target intact", async () => {
+  const h = harness();
+  const c = createCoordinator(h.client, "local", async () => {}, { isPaused: () => true });
+  await c.event({ event: updated(h.fixtures[0]!.parent.info) });
+  await c.event({ event: updated(h.fixtures[0]!.response.info) });
+  expect(c.takePending()?.messageID).toBe("a");
+  expect(c.takePending()).toBeUndefined();
+  expect(c.latest()?.selection.messageID).toBe("a");
+  c.dispose();
+});

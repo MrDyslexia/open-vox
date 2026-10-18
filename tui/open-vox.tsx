@@ -7,7 +7,7 @@
 import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import { For, createMemo, createSignal, onCleanup } from "solid-js"
 import { KOKORO_VOICES, readConfig, writeConfig } from "../src/config"
-import { createRepeatUi, buttonHandlers, canPause, canSetSpeed, publishAttached, sameView, serviceIcon, speedLabel } from "../src/repeat-ui"
+import { createRepeatUi, buttonHandlers, canPause, canSetSpeed, deviceLabel, publishAttached, sameView, serviceIcon, speedLabel } from "../src/repeat-ui"
 
 const id = "open-vox"
 
@@ -26,7 +26,7 @@ function Block(props: { api: TuiPluginApi; sessionID: string }) {
     return route.name === "session" && route.params?.sessionID === props.sessionID ? props.sessionID : ""
   }
   // Pause, service and playback preference remain neutral until confirmed by this instance.
-  const [view, setView] = createSignal({ paused: undefined, enabled: undefined, canControl: false, canRepeat: false, playbackSpeed: undefined }, { equals: sameView })
+  const [view, setView] = createSignal({ paused: undefined, enabled: undefined, canControl: false, canRepeat: false, canSpeak: false, playbackSpeed: undefined }, { equals: sameView })
   const repeat = createRepeatUi({
     subscribe: (receive) => props.api.event.on("tui.command.execute", (event) => receive(event.properties.command)),
     publish: (command) => publishAttached(props.api.client, props.api.state.path.directory, command),
@@ -106,12 +106,16 @@ function Block(props: { api: TuiPluginApi; sessionID: string }) {
           </span>
         </text>
       </box>
+      <text fg={theme().textMuted} wrapMode="word">{deviceLabel(view())}</text>
       <box flexDirection="row" gap={1}>
         {button(() => (paused() ? "Resume" : "Pause"), () => { void repeat.togglePause(session()) }, paused, false,
           () => !canPause(view()) || !canPause(repeat.view(session())))}
         {button(() => "Voice", chooseVoice, undefined, true)}
-        {button(() => "Repeat", () => { void repeat.repeat(session()) }, undefined, false,
-          () => !view().canRepeat || !repeat.available(session()))}
+        {button(() => view().canRepeat ? "Repeat" : "Speak", () => {
+          if (repeat.view(session()).canRepeat) void repeat.repeat(session())
+          else void repeat.speak(session())
+        }, undefined, false,
+          () => !(view().canRepeat || view().canSpeak) || !(repeat.view(session()).canRepeat || repeat.view(session()).canSpeak))}
         {/* The rate button shares the row: four equal slots. It displays only confirmed
             preference, highlights non-1x and stays usable while paused. */}
         {button(() => speedLabel(view().playbackSpeed), () => { void repeat.cycleSpeed(session()) },
@@ -136,4 +140,3 @@ const tui: TuiPlugin = async (api) => {
 const plugin = { id, tui }
 
 export default plugin
-

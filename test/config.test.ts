@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
-  DEFAULT_CONFIG, KOKORO_VOICES, appHome, createConfigReader, kokoroLanguageCode, parseConfig, readConfig, writeConfig,
+  DEFAULT_CONFIG, KOKORO_VOICES, appHome, createConfigReader, kokoroLanguageCode, parseConfig, readConfig, writeConfig, writeRuntimeProfile,
   type ConfigFs,
 } from "../src/config";
 
@@ -16,6 +16,14 @@ function memoryFs(initial?: string): ConfigFs & { files: Map<string, string> } {
 const PATH = "C:\\h\\config.json";
 
 describe("parseConfig", () => {
+  test("runtime profiles are fixed enums, CPU by default, and preserve unrelated settings", () => {
+    for (const runtimeProfile of [undefined, "C:\\foreign\\python.exe", "CUDA13", {}, 1]) expect(parseConfig({ runtimeProfile }).runtimeProfile).toBe("cpu");
+    const fs = memoryFs(JSON.stringify({ voices: { es: "ef_dora", en: "bm_george" }, speed: 1.2, narrationBackend: "onnx" }));
+    writeConfig({ runtimeProfile: "cuda13" }, PATH, fs);
+    expect(readConfig(PATH, fs)).toMatchObject({ runtimeProfile: "cuda13", speed: 1.2, narrationBackend: "onnx", voices: { es: "ef_dora", en: "bm_george" } });
+    writeConfig({ speed: 1.3 }, PATH, fs);
+    expect(readConfig(PATH, fs).runtimeProfile).toBe("cuda13");
+  });
   test("narration language is explicit, validated and persisted with readback", () => {
     const fs = memoryFs();
     expect(parseConfig({}).narrationLanguage).toBe("es");
@@ -25,7 +33,7 @@ describe("parseConfig", () => {
     expect(JSON.parse(fs.files.get(PATH)!).narrationLanguage).toBe("en");
   });
   test("defaults to Alex for Spanish, speed 1, auto engine, with no runtime flags", () => {
-    expect(DEFAULT_CONFIG).toEqual({ voices: { es: "em_alex", en: "af_heart" }, speed: 1, engine: "auto", narrationLanguage: "es", narrationBackend: "torch" });
+    expect(DEFAULT_CONFIG).toEqual({ voices: { es: "em_alex", en: "af_heart" }, toneVoice: { es: "", en: "" }, toneWeight: { es: 0, en: 0 }, speed: 1, engine: "auto", narrationLanguage: "es", narrationBackend: "torch", runtimeProfile: "cpu" });
     expect(parseConfig(undefined)).toEqual(DEFAULT_CONFIG);
   });
   test("narration backend defaults to torch, validates, persists, and old files without the key keep working", () => {
@@ -44,7 +52,7 @@ describe("parseConfig", () => {
   });
   test("accepts valid values", () => {
     expect(parseConfig({ voices: { es: "ef_dora", en: "bm_george" }, speed: 1.25, engine: "piper" }))
-      .toEqual({ voices: { es: "ef_dora", en: "bm_george" }, speed: 1.25, engine: "piper", narrationLanguage: "es", narrationBackend: "torch" });
+      .toEqual({ ...DEFAULT_CONFIG, voices: { es: "ef_dora", en: "bm_george" }, speed: 1.25, engine: "piper" });
   });
   test("rejects invalid values field by field, keeping valid ones", () => {
     const r = parseConfig({ voices: { es: "nope", en: "bm_george" }, speed: 99, engine: "weird" });
@@ -66,6 +74,46 @@ describe("parseConfig", () => {
 });
 
 describe("readConfig / writeConfig", () => {
+  test("profile activation patches only the raw profile field, including unknown settings, and preserves invalid files", () => {
+    const original = { custom: { retain: true }, speed: 1.3, narrationBackend: "onnx", voices: { en: "bm_george" } };
+    const fs = memoryFs(JSON.stringify(original));
+    writeRuntimeProfile("cuda13", PATH, fs);
+    expect(JSON.parse(fs.files.get(PATH)!)).toEqual({ ...original, runtimeProfile: "cuda13" });
+    fs.files.set(PATH, "invalid");
+    expect(() => writeRuntimeProfile("cuda13", PATH, fs)).toThrow(); expect(fs.files.get(PATH)).toBe("invalid");
+  });
+  test("tone records round-trip and merge per language without weakening identity validation", () => {
+    const fs = memoryFs();
+    writeConfig({ toneVoice: { es: "am_onyx" }, toneWeight: { es: 0.75 } }, PATH, fs);
+    writeConfig({ toneVoice: { en: "em_alex" }, toneWeight: { en: 1 }, voices: { es: "am_onyx" } }, PATH, fs);
+    expect(readConfig(PATH, fs)).toMatchObject({
+      toneVoice: { es: "am_onyx", en: "em_alex" }, toneWeight: { es: 0.75, en: 1 }, voices: DEFAULT_CONFIG.voices,
+    });
+    writeConfig({ speed: 1.2 }, PATH, fs);
+    expect(JSON.parse(fs.files.get(PATH)!)).toEqual(readConfig(PATH, fs));
+    writeConfig({ toneVoice: { es: "" }, toneWeight: { es: 0 } }, PATH, fs);
+    expect(readConfig(PATH, fs)).toMatchObject({ toneVoice: { es: "", en: "em_alex" }, toneWeight: { es: 0, en: 1 } });
+  });
+  test("invalid tone patches preserve stored settings and never persist rejected values", () => {
+    const fs = memoryFs();
+    writeConfig({ toneVoice: { es: "am_onyx" }, toneWeight: { es: 0.75 } }, PATH, fs);
+    for (const bad of [-0.1, 1.1, NaN, Infinity, -Infinity, "0.5", null, true]) {
+      const next = writeConfig({ toneVoice: { es: "unknown" }, toneWeight: { es: bad as never } }, PATH, fs);
+      expect(next.toneVoice.es).toBe("am_onyx");
+      expect(next.toneWeight.es).toBe(0.75);
+      expect(JSON.parse(fs.files.get(PATH)!)).toEqual(next);
+    }
+  });
+  test("tone parsing uses off defaults, finite inclusive weights and a cross-language donor catalog", () => {
+    expect(parseConfig({ toneVoice: { es: "am_onyx", en: "em_alex" }, toneWeight: { es: 0, en: 1 } }))
+      .toMatchObject({ toneVoice: { es: "am_onyx", en: "em_alex" }, toneWeight: { es: 0, en: 1 } });
+    for (const bad of [null, [], true, "am_onyx", { es: "unknown", en: 42 }]) {
+      expect(parseConfig({ toneVoice: bad }).toneVoice).toEqual({ es: "", en: "" });
+    }
+    for (const bad of [-1, 2, NaN, Infinity, "0.75", null, true]) {
+      expect(parseConfig({ toneWeight: { es: bad } }).toneWeight).toEqual({ es: 0, en: 0 });
+    }
+  });
   test("missing or corrupt files yield defaults", () => {
     expect(readConfig(PATH, memoryFs())).toEqual(DEFAULT_CONFIG);
     expect(readConfig(PATH, memoryFs("{not json"))).toEqual(DEFAULT_CONFIG);

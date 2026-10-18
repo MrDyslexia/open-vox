@@ -10,6 +10,7 @@ import hashlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'scripts'))
 from narration_lid import CHECKPOINT, REVISION, FILES, LABELS, LocalDetector, sanitize_evidence, token_windows, validate_manifest, verify_local_assets
+from runtime_device import RuntimeDevice
 
 
 class Tensor:
@@ -24,7 +25,8 @@ class Tensor:
         return self.values
 
     def to(self, device):
-        assert device == 'cpu'
+        assert device in ('cpu', 'cuda')
+        self.device = device
         return self
 
 
@@ -58,6 +60,7 @@ class FakeModel:
         self.device = device
 
     def __call__(self, input_ids):
+        assert getattr(input_ids, 'device', 'cpu') == (self.device or 'cpu')
         size = input_ids.shape[1]
         assert size <= 512
         self.sizes.append(size)
@@ -65,7 +68,8 @@ class FakeModel:
         return SimpleNamespace(logits=Tensor([scores], (1, size, 9)))
 
 
-TORCH = SimpleNamespace(no_grad=nullcontext, isfinite=lambda value: SimpleNamespace(all=lambda: True),
+TORCH = SimpleNamespace(float32='float32', cuda=SimpleNamespace(is_available=lambda: False),
+                        no_grad=nullcontext, isfinite=lambda value: SimpleNamespace(all=lambda: True),
                         softmax=lambda value, dim: value)
 
 
@@ -100,6 +104,69 @@ def token(start, end, label='en', **extras):
 
 
 class LidTests(unittest.TestCase):
+    def test_cuda_model_and_inputs_match_and_probe_precedes_weights(self):
+        events = []
+        model = FakeModel()
+        transformers = SimpleNamespace(
+            AutoTokenizer=SimpleNamespace(from_pretrained=lambda *a, **k: FakeTokenizer()),
+            AutoModelForTokenClassification=SimpleNamespace(from_pretrained=lambda *a, **k: (events.append('model'), model)[1]))
+        with assets() as (directory, manifest), \
+                patch.dict(sys.modules, {'torch': TORCH, 'transformers': transformers, 'onnxruntime': None}), \
+                patch('narration_lid.probe_runtime', side_effect=lambda **k: (events.append('probe'), RuntimeDevice(torch_cuda=True))[1]):
+            detector = LocalDetector(directory, manifest)
+            self.assertEqual(detector.detect('word')['status'], 'available')
+        self.assertEqual(events, ['probe', 'model'])
+        self.assertEqual(model.device, 'cuda')
+        self.assertTrue(model.eval_called)
+        self.assertEqual(detector.device_diagnostics, ['lid-torch-device-cuda'])
+
+    def test_cuda_placement_failure_loads_one_fresh_cpu_model(self):
+        models = [FakeModel(), FakeModel()]
+        calls = []
+
+        def fail(device):
+            raise RuntimeError('CUDA allocation failed private')
+
+        models[0].to = fail
+        def load(*args, **kwargs):
+            calls.append(kwargs)
+            return models[len(calls) - 1]
+
+        transformers = SimpleNamespace(AutoTokenizer=SimpleNamespace(from_pretrained=lambda *a, **k: FakeTokenizer()),
+                                       AutoModelForTokenClassification=SimpleNamespace(from_pretrained=load))
+        with assets() as (directory, manifest), patch.dict(sys.modules, {'torch': TORCH, 'transformers': transformers}), \
+                patch('narration_lid.probe_runtime', side_effect=AssertionError('already probed')):
+            detector = LocalDetector(directory, manifest, runtime_device=RuntimeDevice(torch_cuda=True))
+            result = detector.detect('word')
+        self.assertEqual(result['status'], 'available')
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all(call['torch_dtype'] == TORCH.float32 for call in calls))
+        self.assertEqual(models[1].device, 'cpu')
+        self.assertTrue(models[1].eval_called)
+        self.assertEqual(detector.device_diagnostics, ['lid-torch-device-cpu'])
+        self.assertNotIn('private', json.dumps(result))
+
+    def test_non_acceleration_placement_or_loading_errors_do_not_retry(self):
+        for phase in ('load', 'placement'):
+            calls = []
+            model = FakeModel()
+            def fail(device):
+                raise ValueError('private invalid weights')
+            model.to = fail
+            def load(*args, **kwargs):
+                calls.append(phase)
+                if phase == 'load':
+                    raise RuntimeError('CUDA in asset path must not retry weight loading')
+                return model
+            transformers = SimpleNamespace(AutoTokenizer=SimpleNamespace(from_pretrained=lambda *a, **k: FakeTokenizer()),
+                                           AutoModelForTokenClassification=SimpleNamespace(from_pretrained=load))
+            with self.subTest(phase=phase), assets() as (directory, manifest), \
+                    patch.dict(sys.modules, {'torch': TORCH, 'transformers': transformers}):
+                detector = LocalDetector(directory, manifest, runtime_device=RuntimeDevice(torch_cuda=True))
+                self.assertEqual(detector.detect('word')['diagnostics'], ['local-model-load-failed'])
+                self.assertEqual(calls, [phase])
+                self.assertEqual(detector.device_diagnostics, [])
+
     def test_unchecked_local_weights_are_rejected_before_dependency_import(self):
         with tempfile.TemporaryDirectory() as root:
             directory = Path(root)
@@ -186,7 +253,7 @@ class LidTests(unittest.TestCase):
 
         transformers = SimpleNamespace(AutoTokenizer=SimpleNamespace(from_pretrained=load_tokenizer),
                                        AutoModelForTokenClassification=SimpleNamespace(from_pretrained=load_model))
-        with assets() as (directory, manifest), patch.dict(sys.modules, {'torch': TORCH, 'transformers': transformers}), \
+        with assets() as (directory, manifest), patch.dict(sys.modules, {'torch': TORCH, 'transformers': transformers, 'onnxruntime': None}), \
                 patch('narration_lid.verify_local_assets', wraps=verify_local_assets) as verify:
             detector = LocalDetector(directory, manifest)
             result = detector.detect('word')
@@ -201,6 +268,7 @@ class LidTests(unittest.TestCase):
             self.assertFalse(kwargs['trust_remote_code'])
             if kind == 'model':
                 self.assertTrue(kwargs['use_safetensors'])
+                self.assertEqual(kwargs['torch_dtype'], TORCH.float32)
 
     def test_mutated_bytes_never_load_and_failure_is_cached(self):
         with assets() as (directory, manifest):

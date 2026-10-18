@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { inspectInstall, install, uninstall, updateTuiConfig, type InstallFs } from "../src/installer";
+import { readFileSync } from "node:fs";
 
 function memoryFs(initial: Record<string, string> = {}): InstallFs & { files: Map<string, string> } {
   const files = new Map(Object.entries(initial));
@@ -43,6 +44,16 @@ describe("updateTuiConfig", () => {
 });
 
 describe("install", () => {
+  test("actual sidebar template copies the device formatter using the existing two import rewrites", () => {
+    const fs = memoryFs();
+    const template = readFileSync(new URL("../tui/open-vox.tsx", import.meta.url), "utf8");
+    install({ ...base, fs, tui: true, tuiTemplate: template });
+    const copied = fs.files.get(TUI_FILE)!;
+    expect(copied).toContain('from "file:///C:/repo/agentVoz/src/config.ts"');
+    expect(copied).toContain('from "file:///C:/repo/agentVoz/src/repeat-ui.ts"');
+    expect(copied).toContain("{deviceLabel(view())}");
+    expect(copied).not.toContain('from "../src/');
+  });
   test("rewrites the Repeat helper import in the copied TUI without touching settings", () => {
     const fs = memoryFs();
     install({ ...base, fs, tui: true, tuiTemplate: TEMPLATE + 'import { x } from "../src/repeat-ui";' });

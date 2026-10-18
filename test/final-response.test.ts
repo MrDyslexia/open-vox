@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { AssistantMessage, Part, Session, UserMessage } from "@opencode-ai/sdk";
-import { selectFinalResponse, type MessageData } from "../src/final-response";
+import { selectFinalResponse, selectLatestPersisted, type MessageData } from "../src/final-response";
 
 export function fixture(sessionID = "s", userID = "u", messageID = "a") {
   const session: Session = {
@@ -28,6 +28,26 @@ export function fixture(sessionID = "s", userID = "u", messageID = "a") {
 }
 
 describe("conservative final response", () => {
+  test("persisted selection uses timestamps rather than list ordering", () => {
+    const a = fixture(), b = fixture("s", "v", "b");
+    b.parent.info.time.created = 4; b.response.info.time = { created: 5, completed: 6 };
+    const messages = [b.response, a.parent, b.parent, a.response];
+    expect(selectLatestPersisted(a.session, messages)?.messageID).toBe("b");
+    b.response.info.time.completed = undefined;
+    expect(selectLatestPersisted(a.session, messages)).toBeUndefined();
+  });
+  test.each(["duplicate", "ambiguous-user", "ambiguous-response", "missing-parent", "oversized", "bad-time"])(
+    "persisted %s is rejected without fallback", kind => {
+      const f = fixture(), other = fixture("s", "v", "b");
+      let messages = [f.parent, f.response];
+      if (kind === "duplicate") messages.push(f.response);
+      if (kind === "ambiguous-user") messages.push(other.parent);
+      if (kind === "ambiguous-response") messages.push(other.response);
+      if (kind === "missing-parent") messages = [f.response];
+      if (kind === "oversized") messages = Array.from({ length: 101 }, () => f.response);
+      if (kind === "bad-time") f.response.info.time.created = NaN;
+      expect(selectLatestPersisted(f.session, messages)).toBeUndefined();
+    });
   test("selects eligible prose", () => {
     const f = fixture();
     expect(selectFinalResponse(f.session, f.response, f.parent)).toEqual({ sessionID: "s", messageID: "a", text: "Answer" });

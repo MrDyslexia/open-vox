@@ -6,6 +6,25 @@ export type Selection = { sessionID: string; messageID: string; text: string };
 export const validID = (value: unknown): value is string =>
   typeof value === "string" && value.trim().length > 0;
 
+/** Fail closed on ambiguous ordering or a truncated turn; never search backwards for eligible prose. */
+export function selectLatestPersisted(session: Session, messages: MessageData[]): Selection | undefined {
+  if (!Array.isArray(messages) || messages.length > 100 || messages.length === 0) return;
+  const ids = new Set<string>();
+  for (const message of messages) {
+    if (!message?.info || !["user", "assistant"].includes(message.info.role) || !validID(message.info.id) || ids.has(message.info.id) ||
+        message.info.sessionID !== session.id || !Number.isFinite(message.info.time?.created)) return;
+    ids.add(message.info.id);
+  }
+  const users = messages.filter(m => m.info.role === "user").sort((a, b) => b.info.time.created - a.info.time.created);
+  const user = users[0];
+  if (!user || users[1]?.info.time.created === user.info.time.created) return;
+  const responses = messages.filter(m => m.info.role === "assistant" && m.info.time.created >= user.info.time.created)
+    .sort((a, b) => b.info.time.created - a.info.time.created);
+  const response = responses[0];
+  if (!response || responses[1]?.info.time.created === response.info.time.created) return;
+  return selectFinalResponse(session, response, user);
+}
+
 function permittedText(data: MessageData): string | undefined {
   if (!Array.isArray(data.parts)) return undefined;
   const ids = new Set<string>();

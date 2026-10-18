@@ -36,6 +36,27 @@ test("one valid audio is retained; handles defer replacement/deletion and bad ca
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("sink promotion binds successful audio to its response and failure preserves older ownership", async () => {
+  const root = mkdtempSync(join(tmpdir(), "open-vox-test-")), cache = new AudioCache(root);
+  let fail = false, syntheses = 0;
+  const played: string[] = [];
+  const done = () => ({ exited: Promise.resolve(0), kill() {} });
+  const engine = Object.assign(done, { synthesize(_text: string, _language: string, file: string) {
+    syntheses++; if (fail) throw Error("failed generation"); writeFileSync(file, wavBytes()); return done();
+  } });
+  const sink = createSpeechSink({ cache, engine, player: file => { played.push(file); return done(); } });
+  try {
+    await sink({ sessionID: "s", messageID: "a", text: "Answer A" });
+    expect(sink.status!()).toMatchObject({ messageID: "a", revision: 1 });
+    fail = true; await sink({ sessionID: "s", messageID: "b", text: "Answer B" });
+    expect(sink.status!()).toMatchObject({ messageID: "a", revision: 1 });
+    fail = false; await sink({ sessionID: "s", messageID: "b", text: "Answer B" });
+    expect(cache.current()).toMatchObject({ messageID: "b", revision: 2 });
+    await sink.repeat!("s", 2);
+    expect(syntheses).toBe(3); expect(played[2]).toBe(played[1]);
+  } finally { await sink.dispose!(); rmSync(root, { recursive: true, force: true }); }
+});
+
 const retain = (cache: AudioCache, sessionID = "s") => {
   const file = cache.candidate(); writeFileSync(file, wavBytes());
   expect(cache.promote(file, sessionID)).toBe(true);

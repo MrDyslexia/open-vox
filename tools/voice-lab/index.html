@@ -1,0 +1,693 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Local voice lab</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; background: #11151c; color: #e8edf4; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    main { max-width: 960px; margin: auto; padding: 32px 20px 60px; }
+    h1 { margin-bottom: 8px; font-size: 2rem; }
+    h2 { font-size: 1.15rem; margin-top: 0; }
+    p { line-height: 1.6; }
+    .muted, small { color: #aebbcf; }
+    section { background: #1a202b; border: 1px solid #303b4f; border-radius: 12px; padding: 22px; margin: 20px 0; }
+    label { display: block; margin-bottom: 8px; }
+    textarea, select, input[type=number] { background: #111722; color: inherit; border: 1px solid #53617a; border-radius: 6px; padding: 10px; font: inherit; }
+    textarea { width: 100%; resize: vertical; min-height: 100px; }
+    select { width: 100%; }
+    input[type=range] { width: 100%; accent-color: #92b4ff; }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px; }
+    .field { margin: 18px 0; }
+    .toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+    button, .download { border: 1px solid #657caa; border-radius: 7px; background: #27354e; color: #edf4ff; padding: 10px 16px; font: inherit; cursor: pointer; text-decoration: none; }
+    button.primary { background: #a4bfff; color: #0e1c35; border-color: #a4bfff; font-weight: 650; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    :focus-visible { outline: 3px solid #a4bfff; outline-offset: 3px; }
+    #status { min-height: 3em; padding: 12px 0; }
+    #status[data-error=true] { color: #ffb7b7; }
+    audio { width: 100%; margin: 12px 0; }
+    summary { cursor: pointer; padding: 12px 0; }
+    .component { display: grid; grid-template-columns: 100px minmax(80px, 1fr) 85px; gap: 12px; align-items: center; padding: 6px 0; }
+    .component label { margin: 0; font-size: .9rem; }
+    .component input[type=number] { width: 85px; padding: 7px; }
+    [hidden] { display: none !important; }
+    @media (max-width: 580px) { .grid { grid-template-columns: 1fr; gap: 0; } section { padding: 16px; } main { padding: 18px 12px; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Local voice lab</h1>
+    <p class="muted">Experimental Kokoro styles. Text and audio stay in this local process. No plugin settings or voice assets are changed.</p>
+  </header>
+  <section aria-labelledby="sentence-heading">
+    <h2 id="sentence-heading">Sentence and voices</h2>
+    <label for="text">Text to synthesize (up to 500 characters)</label>
+    <textarea id="text" maxlength="500" spellcheck="false">Los sistemas claros nos ayudan a pensar mejor y a construir con confianza.</textarea>
+    <div class="grid">
+      <div class="field"><label for="baseVoice">Base voice</label><select id="baseVoice" disabled></select></div>
+      <div class="field"><label for="donorVoice">Donor voice</label><select id="donorVoice" disabled></select></div>
+    </div>
+    <div class="field">
+      <label for="lang">Synthesis language</label>
+      <select id="lang"><option value="es">Spanish</option><option value="en-us">English (US)</option><option value="en-gb">English (UK)</option></select>
+      <small>Language is selected here, never inferred from the donor voice.</small>
+    </div>
+  </section>
+  <section aria-labelledby="blend-heading">
+    <h2 id="blend-heading">Style blending</h2>
+    <div class="grid">
+      <div class="field">
+        <label for="timbreWeight">Timbre blend · <output id="timbreValue">0.00</output></label>
+        <input id="timbreWeight" type="range" min="0" max="1" step="0.01" value="0">
+        <small>First half of the style vector (0–127).</small>
+      </div>
+      <div class="field">
+        <label for="prosodyWeight">Prosody blend · <output id="prosodyValue">0.00</output></label>
+        <input id="prosodyWeight" type="range" min="0" max="1" step="0.01" value="0">
+        <small>Second half of the style vector (128–255).</small>
+      </div>
+    </div>
+    <p class="muted">Zero means no donor contribution; one means the donor half. These mathematical halves do not guarantee independent audible effects.</p>
+    <div class="field">
+      <label for="speed">Speech rate · <output id="speedValue">1.00</output>×</label>
+      <input id="speed" type="range" min="0.5" max="2" step="0.01" value="1">
+    </div>
+  </section>
+  <section aria-labelledby="advanced-heading">
+    <h2 id="advanced-heading">Advanced experimental offsets</h2>
+    <p class="muted">256 raw style-component deltas, not 256 named semantic voice controls. Each offset (−2 to +2) is added uniformly across all length rows after blending. Large changes may degrade speech.</p>
+    <div class="toolbar"><button id="resetOffsets" type="button">Reset offsets</button><span id="offsetCount">0 nonzero offsets</span></div>
+    <details id="timbreDetails"><summary>Timbre components · 0–127</summary><div id="timbreComponents"></div></details>
+    <details id="prosodyDetails"><summary>Prosody components · 128–255</summary><div id="prosodyComponents"></div></details>
+  </section>
+  <section aria-labelledby="generate-heading">
+    <h2 id="generate-heading">Generate a new sample</h2>
+    <p class="muted">Changing controls does not change current audio. Press Generate to synthesize again. The first request loads the model and can take longer; later requests reuse it.</p>
+    <div class="toolbar">
+      <button class="primary" id="generate" disabled type="button">Generate &amp; play</button>
+      <button id="reset" disabled type="button">Reset all</button>
+      <button id="export" disabled type="button">Download preset JSON</button>
+      <button id="import" disabled type="button">Import preset JSON</button>
+      <input id="presetFile" type="file" accept=".json,application/json" hidden>
+    </div>
+    <div id="status" role="status" aria-live="polite">Loading available voices…</div>
+    <div id="result" hidden>
+      <audio id="audio" controls preload="metadata"></audio>
+      <a id="download" class="download" download="voice-lab.wav">Download WAV</a>
+    </div>
+  </section>
+  <section aria-labelledby="comparison-heading">
+    <h2 id="comparison-heading">Optional local speaker comparison</h2>
+    <p class="muted">Use a WAV containing one speaker whose recording you own or have permission to use. Audio is processed only in this local server. Energy filtering does not verify consent, remove other speakers or clean a recording.</p>
+    <label><input id="referenceConsent" type="checkbox"> I have permission and have selected a single-speaker recording.</label>
+    <label for="referenceFile">Reference PCM WAV · 2–60 seconds, one or two channels, up to 10 MiB</label>
+    <input id="referenceFile" type="file" accept=".wav,audio/wav">
+    <div class="toolbar field">
+      <button id="uploadReference" type="button" disabled>Upload reference locally</button>
+      <button id="clearReference" type="button" disabled>Clear reference</button>
+      <button id="compareAudio" type="button" disabled>Compare current audio</button>
+    </div>
+    <p id="comparatorAvailability" class="muted">Checking optional comparator…</p>
+    <p id="referenceMetadata">No reference loaded.</p>
+    <p id="compareStatus" role="status" aria-live="polite"></p>
+    <div id="comparisonResult" hidden>
+      <p id="cosineResult"></p>
+      <p id="comparisonDetails" class="muted"></p>
+      <ul id="comparisonWarnings"></ul>
+    </div>
+    <small>The score belongs to the current audio and reference, not the current slider settings. Raw cosine (−1 to +1) is not a probability, identity proof, quality score or perceptual resemblance rating.</small>
+  </section>
+  <section aria-labelledby="search-heading">
+    <h2 id="search-heading">Explicit bounded parameter search</h2>
+    <p class="muted">Uses the current server reference and freezes this sentence, voices, language and speed. Each trial costs one local synthesis and comparison: seconds to minutes, with uncertain timing. No retries or continuous search. Cancellation waits for the current inference; leaving the page does not stop the bounded job.</p>
+    <div class="grid">
+      <div><label for="searchTrials">Trials (including baseline)</label><input id="searchTrials" type="number" min="2" max="32" step="1" value="12"></div>
+      <div><label for="searchSeed">Seed (unsigned 32-bit integer)</label><input id="searchSeed" type="number" min="0" max="4294967295" step="1" value="0"></div>
+    </div>
+    <label class="field"><input id="advancedOffsets" type="checkbox"> Advanced: also explore small sparse raw offsets (0.025–0.1), clipped to −2…+2</label>
+    <div class="toolbar">
+      <button id="startSearch" type="button" disabled>Start search</button>
+      <button id="cancelSearch" type="button" disabled>Cancel search</button>
+      <button id="refreshSearch" type="button" disabled>Refresh search status</button>
+      <button id="applyBest" type="button" disabled>Apply best preset and load exact WAV</button>
+      <button id="exportBest" type="button" disabled>Download best preset JSON</button>
+    </div>
+    <p id="searchFrozen" class="muted"></p>
+    <progress id="searchProgress" value="0" max="12" aria-label="Successful search evaluations"></progress>
+    <p id="searchStatus" role="status" aria-live="polite">Load a permitted reference before starting.</p>
+    <ol id="searchHistory"></ol>
+    <small>Maximizes observed raw cosine, not perceptual quality. May overfit this sentence; no global optimum or full 256-component exploration is promised. Best playback and WAV download use the main audio player after explicit Apply.</small>
+  </section>
+</main>
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const keys = ['version', 'text', 'baseVoice', 'donorVoice', 'timbreWeight', 'prosodyWeight', 'speed', 'lang', 'offsets'];
+const languages = ['es', 'en-us', 'en-gb'];
+let available = [];
+let offsets = Array(256).fill(0);
+let audioURL = null;
+let audioBlob = null;
+let audioRevision = 0;
+let referenceId = null;
+let referenceRevision = 0;
+let compareRevision = 0;
+let comparatorAvailable = false;
+let referenceBusy = false;
+let compareBusy = false;
+let busy = false;
+let searchActive = false;
+let searchId = null;
+let searchGeneration = 0;
+let searchBest = null;
+let searchTimer = null;
+let searchPolling = false;
+let searchApplying = false;
+let pageHidden = false;
+let defaultText = $('text').value;
+const componentControls = new Map();
+
+function status(message, error = false) {
+  $('status').textContent = message;
+  $('status').dataset.error = String(error);
+}
+
+function bounded(value, min, max) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max;
+}
+
+function validate(preset) {
+  if (!preset || typeof preset !== 'object' || Array.isArray(preset) ||
+      Object.keys(preset).length !== keys.length || !keys.every(key => Object.hasOwn(preset, key)) || preset.version !== 1) {
+    throw new Error('Use a complete version 1 voice-lab preset.');
+  }
+  if (typeof preset.text !== 'string' || !preset.text.trim() || Array.from(preset.text).length > 500) {
+    throw new Error('Text must contain 1 to 500 characters.');
+  }
+  if (typeof preset.baseVoice !== 'string' || !available.includes(preset.baseVoice) ||
+      (preset.donorVoice !== null && (typeof preset.donorVoice !== 'string' || !available.includes(preset.donorVoice)))) {
+    throw new Error('Preset voices must be available in this voicepack.');
+  }
+  if (!languages.includes(preset.lang) || !bounded(preset.timbreWeight, 0, 1) ||
+      !bounded(preset.prosodyWeight, 0, 1) || !bounded(preset.speed, 0.5, 2)) {
+    throw new Error('Check language, blend weights (0–1) and rate (0.5–2).');
+  }
+  if (preset.donorVoice === null && (preset.timbreWeight !== 0 || preset.prosodyWeight !== 0)) {
+    throw new Error('Donor Off requires both blend weights to be zero.');
+  }
+  if (!Array.isArray(preset.offsets) || preset.offsets.length !== 256 || !preset.offsets.every(value => bounded(value, -2, 2))) {
+    throw new Error('Provide exactly 256 finite offsets from −2 to +2.');
+  }
+  if (new TextEncoder().encode(JSON.stringify(preset)).length > 32768) {
+    throw new Error('Preset exceeds the 32 KiB request limit.');
+  }
+  return preset;
+}
+
+function snapshot() {
+  return validate({version: 1, text: $('text').value, baseVoice: $('baseVoice').value,
+    donorVoice: $('donorVoice').value || null, timbreWeight: Number($('timbreWeight').value),
+    prosodyWeight: Number($('prosodyWeight').value), speed: Number($('speed').value),
+    lang: $('lang').value, offsets: offsets.slice()});
+}
+
+function syncControls() {
+  $('timbreValue').value = Number($('timbreWeight').value).toFixed(2);
+  $('prosodyValue').value = Number($('prosodyWeight').value).toFixed(2);
+  $('speedValue').value = Number($('speed').value).toFixed(2);
+  const off = $('donorVoice').value === '';
+  $('timbreWeight').disabled = off;
+  $('prosodyWeight').disabled = off;
+  $('offsetCount').textContent = `${offsets.filter(value => value !== 0).length} nonzero offsets`;
+  for (const [index, controls] of componentControls) {
+    for (const control of controls) control.value = String(offsets[index]);
+  }
+}
+
+function apply(preset) {
+  validate(preset);
+  for (const key of ['text', 'baseVoice', 'timbreWeight', 'prosodyWeight', 'speed', 'lang']) {
+    $(key).value = String(preset[key]);
+  }
+  $('donorVoice').value = preset.donorVoice || '';
+  offsets = preset.offsets.slice();
+  syncControls();
+}
+
+function defaults() {
+  return {version: 1, text: defaultText,
+    baseVoice: available.includes('em_alex') ? 'em_alex' : available[0],
+    donorVoice: available.includes('am_onyx') ? 'am_onyx' : null,
+    timbreWeight: 0, prosodyWeight: 0, speed: 1, lang: 'es', offsets: Array(256).fill(0)};
+}
+
+function clearAudio() {
+  audioRevision++;
+  audioBlob = null;
+  clearScore();
+  $('audio').pause();
+  $('audio').removeAttribute('src');
+  $('audio').load();
+  $('result').hidden = true;
+  $('download').removeAttribute('href');
+  if (audioURL) URL.revokeObjectURL(audioURL);
+  audioURL = null;
+  comparisonControls();
+}
+
+function clearScore() {
+  compareRevision++;
+  $('comparisonResult').hidden = true;
+  $('compareStatus').textContent = '';
+}
+
+function comparisonControls() {
+  $('uploadReference').disabled = searchActive || searchApplying || !comparatorAvailable || referenceBusy || compareBusy ||
+    !$('referenceConsent').checked || !$('referenceFile').files.length;
+  $('clearReference').disabled = searchActive || searchApplying || referenceBusy || compareBusy || !referenceId;
+  $('compareAudio').disabled = searchActive || !comparatorAvailable || referenceBusy || compareBusy || !referenceId || !audioBlob;
+  $('generate').disabled = searchActive || searchApplying || busy || !available.length;
+  $('reset').disabled = searchActive || searchApplying || !available.length;
+  $('startSearch').disabled = searchActive || searchApplying || busy || referenceBusy || compareBusy || !referenceId || !comparatorAvailable || !available.length;
+  $('cancelSearch').disabled = !searchActive || !searchId;
+  $('refreshSearch').disabled = !searchId || searchPolling;
+  $('applyBest').disabled = searchActive || searchApplying || busy || compareBusy || referenceBusy || !searchBest;
+  $('exportBest').disabled = searchActive || !searchBest;
+}
+
+function showReference(reference) {
+  if (referenceId !== (reference ? reference.referenceId : null) && !searchActive) {
+    searchGeneration++;
+    searchId = null;
+    searchBest = null;
+    clearTimeout(searchTimer);
+    $('searchHistory').replaceChildren();
+  }
+  referenceId = reference ? reference.referenceId : null;
+  $('referenceMetadata').textContent = reference
+    ? `Reference ${referenceId.slice(0, 8)} · ${reference.durationSeconds.toFixed(2)} s · ${reference.windowCount} windows`
+    : 'No reference loaded.';
+  comparisonControls();
+}
+
+async function comparisonFetch(path, body, headers = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 120000);
+  try {
+    const response = await fetch(path, {method: 'POST', headers, body, signal: controller.signal});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `Comparison request failed (HTTP ${response.status}).`);
+    return data;
+  } catch (error) {
+    if (error.name === 'AbortError') throw new Error('Stopped waiting after 120 seconds; CPU work may still be running. Wait before retrying.');
+    throw error;
+  } finally { clearTimeout(timer); }
+}
+
+for (const id of ['referenceFile', 'referenceConsent']) $(id).addEventListener('change', comparisonControls);
+$('uploadReference').addEventListener('click', async () => {
+  const file = $('referenceFile').files[0];
+  if (!file || !$('referenceConsent').checked || referenceBusy || compareBusy || searchActive || searchApplying) return;
+  if (file.size > 10 * 1024 * 1024) {
+    $('compareStatus').textContent = 'Reference exceeds 10 MiB.';
+    return;
+  }
+  const revision = ++referenceRevision;
+  clearScore();
+  referenceBusy = true;
+  comparisonControls();
+  $('compareStatus').textContent = 'Loading reference locally… first use includes model loading.';
+  try {
+    const data = await comparisonFetch('/api/reference', file, {'Content-Type': 'audio/wav'});
+    if (referenceRevision !== revision) return;
+    showReference(data);
+    $('compareStatus').textContent = 'Reference ready. Generate audio, then explicitly compare it.';
+  } catch (error) {
+    if (referenceRevision === revision) $('compareStatus').textContent = error.message;
+  } finally { referenceBusy = false; comparisonControls(); }
+});
+
+$('clearReference').addEventListener('click', async () => {
+  if (referenceBusy || compareBusy || searchActive || searchApplying) return;
+  const revision = ++referenceRevision;
+  clearScore();
+  referenceBusy = true;
+  comparisonControls();
+  try {
+    await comparisonFetch('/api/reference/clear', '{}', {'Content-Type': 'application/json'});
+    if (referenceRevision !== revision) return;
+    showReference(null);
+    $('referenceFile').value = '';
+    $('compareStatus').textContent = 'Reference removed from server memory.';
+  } catch (error) {
+    if (referenceRevision === revision) $('compareStatus').textContent = error.message;
+  } finally { referenceBusy = false; comparisonControls(); }
+});
+
+$('compareAudio').addEventListener('click', async () => {
+  if (!referenceId || !audioBlob || compareBusy || referenceBusy || searchActive || searchApplying) return;
+  clearScore();
+  const revision = compareRevision;
+  const audioVersion = audioRevision;
+  const referenceVersion = referenceRevision;
+  const id = referenceId;
+  const blob = audioBlob;
+  compareBusy = true;
+  comparisonControls();
+  $('compareStatus').textContent = 'Comparing current audio locally…';
+  try {
+    const data = await comparisonFetch('/api/compare', blob,
+      {'Content-Type': 'audio/wav', 'X-Reference-Id': id});
+    if (revision !== compareRevision || audioVersion !== audioRevision ||
+        referenceVersion !== referenceRevision || id !== referenceId || blob !== audioBlob || data.referenceId !== id) return;
+    if (!Number.isFinite(data.cosine) || data.cosine < -1 || data.cosine > 1) throw new Error('Invalid cosine response; no score shown.');
+    $('cosineResult').textContent = `Current audio cosine: ${data.cosine.toFixed(4)} · reference ${id.slice(0, 8)}`;
+    const spread = data.pairWindowSpread;
+    $('comparisonDetails').textContent = `Reference ${data.reference.durationSeconds.toFixed(2)} s / ${data.reference.windowCount} windows; current audio ${data.candidate.durationSeconds.toFixed(2)} s / ${data.candidate.windowCount} windows. Observed pair-window spread ${spread.min.toFixed(4)}–${spread.max.toFixed(4)} (std ${spread.std.toFixed(4)}, ${spread.count} pairs). ${data.model} @ ${data.revision}`;
+    $('comparisonWarnings').replaceChildren();
+    for (const warning of data.warnings) {
+      const item = document.createElement('li'); item.textContent = warning; $('comparisonWarnings').append(item);
+    }
+    $('comparisonResult').hidden = false;
+    $('compareStatus').textContent = 'Comparison complete for this exact audio and reference.';
+  } catch (error) {
+    if (revision === compareRevision && audioVersion === audioRevision && referenceVersion === referenceRevision) {
+      $('compareStatus').textContent = error.message;
+    }
+  } finally { compareBusy = false; comparisonControls(); }
+});
+
+async function initializeComparator() {
+  const revision = referenceRevision;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  try {
+    const response = await fetch('/api/comparator/status', {signal: controller.signal});
+    if (!response.ok) throw new Error(`Status unavailable (HTTP ${response.status}).`);
+    const data = await response.json();
+    comparatorAvailable = data.available === true;
+    $('comparatorAvailability').textContent = `${data.message} ${data.model} @ ${data.revision}`;
+    if (revision === referenceRevision) showReference(data.reference);
+    if (data.search && data.search.referenceId === referenceId) {
+      searchId = data.search.jobId; searchActive = ['running', 'cancelling'].includes(data.search.state); searchGeneration++;
+      $('searchFrozen').textContent = `Recovered user-started job ${searchId.slice(0, 8)} against the current reference; configuration is frozen on the server.`;
+      await pollSearch();
+    }
+  } catch (error) {
+    $('comparatorAvailability').textContent = `Optional comparator unavailable: ${error.message}. Synthesis is independent.`;
+  } finally { clearTimeout(timer); comparisonControls(); }
+}
+
+function renderComponents(containerId, start, end) {
+  const container = $(containerId);
+  if (container.childElementCount) return;
+  const fragment = document.createDocumentFragment();
+  for (let index = start; index < end; index++) {
+    const row = document.createElement('div');
+    row.className = 'component';
+    const label = document.createElement('label');
+    label.textContent = `Offset ${index}`;
+    const slider = document.createElement('input');
+    const numeric = document.createElement('input');
+    slider.type = 'range';
+    numeric.type = 'number';
+    slider.id = `offset-${index}`;
+    label.htmlFor = slider.id;
+    numeric.setAttribute('aria-label', `Offset ${index} numeric value`);
+    for (const control of [slider, numeric]) {
+      control.min = '-2'; control.max = '2'; control.step = '0.01';
+      control.value = String(offsets[index]);
+    }
+    const update = control => {
+      const value = control.value === '' ? NaN : Number(control.value);
+      if (!bounded(value, -2, 2)) {
+        control.value = String(offsets[index]);
+        status('Offsets must be finite numbers from −2 to +2.', true);
+        return;
+      }
+      offsets[index] = value;
+      slider.value = String(value);
+      numeric.value = String(value);
+      $('offsetCount').textContent = `${offsets.filter(item => item !== 0).length} nonzero offsets`;
+    };
+    slider.addEventListener('input', () => update(slider));
+    numeric.addEventListener('change', () => update(numeric));
+    componentControls.set(index, [slider, numeric]);
+    row.append(label, slider, numeric);
+    fragment.append(row);
+  }
+  container.append(fragment);
+}
+
+$('timbreDetails').addEventListener('toggle', () => {
+  if ($('timbreDetails').open) renderComponents('timbreComponents', 0, 128);
+});
+$('prosodyDetails').addEventListener('toggle', () => {
+  if ($('prosodyDetails').open) renderComponents('prosodyComponents', 128, 256);
+});
+for (const id of ['timbreWeight', 'prosodyWeight', 'speed']) $(id).addEventListener('input', syncControls);
+$('donorVoice').addEventListener('change', () => {
+  if (!$('donorVoice').value) {
+    $('timbreWeight').value = '0'; $('prosodyWeight').value = '0';
+  }
+  syncControls();
+});
+$('resetOffsets').addEventListener('click', () => { offsets.fill(0); syncControls(); });
+$('reset').addEventListener('click', () => {
+  if (searchActive || searchApplying) return;
+  apply(defaults()); clearAudio(); status('Defaults restored. Press Generate for a new sample.');
+});
+
+function downloadBlob(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url; link.download = name;
+  document.body.append(link); link.click(); link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+$('export').addEventListener('click', () => {
+  try {
+    downloadBlob(new Blob([JSON.stringify(snapshot(), null, 2)], {type: 'application/json'}), 'voice-lab-preset.json');
+    status('Preset downloaded. Current audio is unchanged.');
+  } catch (error) { status(error.message, true); }
+});
+$('import').addEventListener('click', () => $('presetFile').click());
+$('presetFile').addEventListener('change', async () => {
+  const file = $('presetFile').files[0];
+  try {
+    if (!file) return;
+    if (file.size > 32768) throw new Error('Preset file exceeds 32 KiB.');
+    apply(JSON.parse(await file.text()));
+    status('Preset imported locally. Current audio is unchanged; press Generate to apply.');
+  } catch (error) { status(`Preset not imported: ${error.message}`, true); }
+  finally { $('presetFile').value = ''; }
+});
+
+$('generate').addEventListener('click', async () => {
+  if (busy || searchActive || searchApplying) return;
+  let preset;
+  try { preset = snapshot(); }
+  catch (error) { status(error.message, true); return; }
+  busy = true;
+  clearAudio();
+  const generationRevision = audioRevision;
+  $('generate').disabled = true;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 120000);
+  status('Synthesizing… first generation includes model loading. This may take a while.');
+  try {
+    const response = await fetch('/api/synthesize', {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify(preset), signal: controller.signal});
+    if (!response.ok) {
+      let message = `Generation failed (HTTP ${response.status}).`;
+      try { message = (await response.json()).error || message; } catch (_) { /* Keep HTTP fallback. */ }
+      throw new Error(message);
+    }
+    const blob = await response.blob();
+    if (generationRevision !== audioRevision) return;
+    audioBlob = blob;
+    audioURL = URL.createObjectURL(blob);
+    comparisonControls();
+    $('audio').src = audioURL;
+    $('download').href = audioURL;
+    $('result').hidden = false;
+    // Playback failure is not synthesis failure: the WAV remains usable.
+    clearTimeout(timer);
+    status('Sample ready. Current controls only affect the next generation.');
+    const playingURL = audioURL;
+    try {
+      $('audio').play().catch(() => {
+        if (audioURL === playingURL && !busy) status('Sample ready. Press Play in the audio controls to listen.');
+      });
+    } catch (_) { status('Sample ready. Press Play in the audio controls to listen.'); }
+  } catch (error) {
+    if (generationRevision !== audioRevision) return;
+    status(error.name === 'AbortError'
+      ? 'The browser stopped waiting after 120 seconds. Inference may still be running; wait before retrying.'
+      : `Could not generate: ${error.message}`, true);
+  } finally {
+    clearTimeout(timer); busy = false; comparisonControls();
+  }
+});
+
+async function initialize() {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  try {
+    const response = await fetch('/api/metadata', {signal: controller.signal});
+    if (!response.ok) throw new Error(`Metadata request failed (HTTP ${response.status}).`);
+    const metadata = await response.json();
+    if (!Array.isArray(metadata.voices) || !metadata.voices.length || !metadata.voices.every(name => typeof name === 'string')) {
+      throw new Error('The local voicepack has no available voices.');
+    }
+    available = metadata.voices;
+    defaultText = typeof metadata.defaultText === 'string' ? metadata.defaultText : defaultText;
+    const off = document.createElement('option'); off.value = ''; off.textContent = 'Off';
+    $('donorVoice').append(off);
+    for (const name of available) {
+      for (const id of ['baseVoice', 'donorVoice']) {
+        const option = document.createElement('option'); option.value = name; option.textContent = name;
+        $(id).append(option);
+      }
+    }
+    apply(defaults());
+    for (const id of ['baseVoice', 'donorVoice', 'generate', 'reset', 'export', 'import']) $(id).disabled = false;
+    status('Ready. Blending is off at zero weights. Press Generate to load the model.');
+  } catch (error) {
+    status(`Could not load voices: ${error.name === 'AbortError' ? 'request timed out' : error.message}. Check the local server, then reload.`, true);
+  } finally { clearTimeout(timer); comparisonControls(); }
+}
+function renderSearch(data, generation, id) {
+  if (generation !== searchGeneration || id !== searchId || data.jobId !== id || data.referenceId !== referenceId) return false;
+  searchActive = ['running', 'cancelling'].includes(data.state);
+  searchBest = !searchActive && data.bestPreset ? validate(data.bestPreset) : null;
+  $('searchProgress').max = data.trials;
+  $('searchProgress').value = data.completed;
+  const score = value => value === null ? 'none' : value.toFixed(4);
+  $('searchStatus').textContent = `${data.state} · ${data.completed}/${data.trials} succeeded · ${data.attempts} attempted · baseline ${score(data.baselineScore)} · best raw cosine ${score(data.bestScore)} · ${data.elapsedSeconds.toFixed(1)} s${data.error ? ' · ' + data.error : ''} · ${data.model || 'local comparator'} @ ${data.revision || 'see comparator metadata'}`;
+  $('searchHistory').replaceChildren();
+  for (const trial of data.history) {
+    const item = document.createElement('li');
+    item.textContent = `Trial ${trial.trial}: raw cosine ${trial.cosine.toFixed(4)}`;
+    $('searchHistory').append(item);
+  }
+  comparisonControls();
+  return true;
+}
+
+async function pollSearch(generation = searchGeneration, id = searchId) {
+  if (!id || searchPolling || pageHidden || generation !== searchGeneration) return;
+  clearTimeout(searchTimer);
+  searchPolling = true;
+  comparisonControls();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  try {
+    const response = await fetch(`/api/search/${id}`, {signal: controller.signal});
+    const data = await response.json();
+    if (generation !== searchGeneration || id !== searchId) return;
+    if (!response.ok) {
+      if (response.status === 404) {
+        searchActive = false; searchBest = null;
+        $('searchStatus').textContent = 'This job was replaced or is unknown. Its results are no longer retained.';
+        searchId = null;
+        return;
+      }
+      throw new Error(data.error || 'Search status unavailable.');
+    }
+    if (!renderSearch(data, generation, id)) throw new Error('Search/reference identity mismatch; no result applied.');
+    if (searchActive && !pageHidden) {
+      searchTimer = setTimeout(() => pollSearch(generation, id), 700);
+    }
+  } catch (error) {
+    if (generation === searchGeneration && id === searchId) {
+      $('searchStatus').textContent = `${error.message} Automatic polling stopped. Use Refresh; work may still be running.`;
+    }
+  } finally { clearTimeout(timeout); searchPolling = false; comparisonControls(); }
+}
+
+$('startSearch').addEventListener('click', async () => {
+  if (searchActive || searchApplying || busy || compareBusy || referenceBusy || !referenceId) return;
+  let body;
+  try {
+    const trials = Number($('searchTrials').value);
+    const seed = $('searchSeed').value === '' ? 0 : Number($('searchSeed').value);
+    if (!Number.isInteger(trials) || trials < 2 || trials > 32 || !Number.isInteger(seed) || seed < 0 || seed > 4294967295) throw new Error('Use 2–32 trials and an unsigned 32-bit integer seed.');
+    body = {preset: snapshot(), referenceId, trials, seed, advancedOffsets: $('advancedOffsets').checked};
+    if (body.preset.donorVoice === null && !body.advancedOffsets) throw new Error('Donor Off requires advanced offset search.');
+  } catch (error) { $('searchStatus').textContent = error.message; return; }
+  const previousId = searchId;
+  const generation = ++searchGeneration;
+  clearTimeout(searchTimer);
+  searchId = null; searchBest = null; searchActive = true;
+  clearScore();
+  $('searchHistory').replaceChildren();
+  $('searchFrozen').textContent = `Frozen: ${body.preset.baseVoice} / ${body.preset.donorVoice || 'Off'} · ${body.preset.lang} · speed ${body.preset.speed} · reference ${referenceId.slice(0, 8)} · ${body.preset.text}`;
+  $('searchStatus').textContent = 'Reserving the local resource…';
+  comparisonControls();
+  try {
+    const data = await comparisonFetch('/api/search/start', JSON.stringify(body), {'Content-Type': 'application/json'});
+    if (generation !== searchGeneration) return;
+    searchId = data.jobId;
+    await pollSearch(generation, searchId);
+  } catch (error) {
+    // Recover a possibly accepted start after a lost response, without retrying.
+    try {
+      const response = await fetch('/api/comparator/status');
+      if (!response.ok) throw new Error('Status unavailable');
+      const data = await response.json();
+      if (generation !== searchGeneration) return;
+      if (data.search && data.search.referenceId === referenceId &&
+          (data.search.jobId !== previousId || ['running', 'cancelling'].includes(data.search.state))) {
+        searchId = data.search.jobId;
+        $('searchFrozen').textContent = `Recovered job ${searchId.slice(0, 8)} against reference ${referenceId.slice(0, 8)}; its configuration is frozen on the server, not inferred from current controls.`;
+        await pollSearch(generation, searchId);
+      } else { searchActive = false; $('searchStatus').textContent = error.message; }
+    } catch (_) { $('searchStatus').textContent = 'Start outcome unknown. Reload to recover the server job; do not retry blindly.'; }
+  } finally { comparisonControls(); }
+});
+$('refreshSearch').addEventListener('click', () => pollSearch());
+$('cancelSearch').addEventListener('click', async () => {
+  const generation = searchGeneration, id = searchId;
+  if (!searchActive || !id) return;
+  try {
+    await comparisonFetch(`/api/search/${id}/cancel`, '{}', {'Content-Type': 'application/json'});
+    if (generation === searchGeneration && id === searchId) await pollSearch(generation, id);
+  } catch (error) { if (generation === searchGeneration) $('searchStatus').textContent = error.message; }
+});
+$('exportBest').addEventListener('click', () => {
+  if (!searchBest || searchActive) return;
+  downloadBlob(new Blob([JSON.stringify(searchBest, null, 2)], {type: 'application/json'}), 'voice-lab-best-preset.json');
+});
+$('applyBest').addEventListener('click', async () => {
+  if (!searchBest || searchActive || searchApplying || busy || compareBusy || referenceBusy) return;
+  const generation = searchGeneration, id = searchId, ref = referenceId, preset = searchBest;
+  searchApplying = true;
+  comparisonControls();
+  try {
+    const response = await fetch(`/api/search/${id}/audio`);
+    if (!response.ok) throw new Error('Best audio unavailable; refresh search status.');
+    const blob = await response.blob();
+    if (generation !== searchGeneration || id !== searchId || ref !== referenceId || preset !== searchBest) return;
+    apply(preset); clearAudio();
+    audioBlob = blob; audioURL = URL.createObjectURL(blob);
+    $('audio').src = audioURL; $('download').href = audioURL; $('result').hidden = false;
+    status('Best evaluated preset and exact WAV loaded. Press Play to listen or explicitly Compare.');
+  } catch (error) { if (generation === searchGeneration) status(error.message, true); }
+  finally { searchApplying = false; comparisonControls(); }
+});
+window.addEventListener('pagehide', () => {
+  pageHidden = true; clearTimeout(searchTimer);
+  if (audioURL) URL.revokeObjectURL(audioURL);
+});
+window.addEventListener('pageshow', () => { pageHidden = false; if (searchActive && searchId) pollSearch(); });
+initialize();
+initializeComparator();
+</script>
+</body>
+</html>

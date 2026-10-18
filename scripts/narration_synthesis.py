@@ -16,6 +16,9 @@ from narration_lid import CHECKPOINT, REVISION, sanitize_evidence
 from narration_plan import flatten_blocks, source_slice, utf16_length, validate_plan
 
 PHONEME_LIMIT = 510
+# Style vector layout: [..., :128] is the decoder reference (timbre), [..., 128:] is the text-encoder
+# style driving F0, duration and energy. Only the second half is ever blended.
+STYLE_PROSODY_OFFSET = 128
 SAMPLE_RATE = 24000
 BLOCK_PAUSE_SECONDS = 0.18
 MAX_AUDIO_SAMPLES = SAMPLE_RATE * 600
@@ -142,6 +145,9 @@ QUOTE_MAP = {'\u00ab': '"', '\u00bb': '"'}
 SPANISH_OPENING_MARKS = '\u00a1\u00bf'
 
 
+PAUSE_SYMBOL = ','
+
+
 def unsupported_symbol(char):
     """One generic diagnostic line: a codepoint only, never user prose."""
     code = 'U+%04X' % ord(char)
@@ -173,9 +179,22 @@ def adapt_phonemes(raw, vocab, protected=''):
         if replacement != char:
             mappings.append({'index': len(final), 'rawIndex': raw_index, 'from': char,
                              'codepoint': 'U+%04X' % ord(char), 'to': replacement})
-        if replacement:
-            if replacement not in vocab:
+        if replacement and replacement not in vocab:
+            # An unsupported symbol becomes a pause instead of silencing the whole narration.
+            # Only when the vocabulary has no pause symbol does it fail explicitly.
+            if PAUSE_SYMBOL not in vocab:
                 unsupported_symbol(replacement if replacement == char else char)
+            try:
+                sys.stderr.write('unsupported-symbol-as-pause: U+%04X\n' % ord(char))
+            except Exception:
+                pass
+            replacement = '' if final and final[-1] == PAUSE_SYMBOL else PAUSE_SYMBOL
+            mappings.append({'index': len(final), 'rawIndex': raw_index, 'from': char,
+                             'codepoint': 'U+%04X' % ord(char), 'to': replacement})
+            if replacement:
+                final.append(replacement)
+            continue
+        if replacement:
             final.append(replacement)
     return ''.join(final), mappings
 
@@ -270,16 +289,44 @@ def raw_phonemizer(kokoro, english_language='en-us'):
     return phonemize
 
 
-def synthesize_envelope(envelope, kokoro, voice, speed, output, phonemize):
+def validate_tone_weight(weight):
+    """Reject invalid weights without coercion, including booleans."""
+    if type(weight) not in (int, float) or not 0 <= weight <= 1 or not math.isfinite(weight):
+        raise ValueError('invalid-tone-weight')
+
+
+def blend_tone_style(style, donor_style, weight):
+    """Interpolate only the prosody half of the style vector toward a donor; timbre stays untouched.
+
+    Ellipsis indexing targets the last axis, so this stays correct for the measured runtime rank
+    (510, 1, 256) as well as the 2D shape the kokoro-onnx docs imply. The base array is copied first:
+    `get_voice_style` may hand back a library-owned array that must never be mutated in place.
+    """
+    validate_tone_weight(weight)
+    import numpy as np
+    if donor_style.shape != style.shape:
+        raise ValueError('tone-shape-mismatch')
+    blended = np.array(style, copy=True)
+    prosody = ((1.0 - weight) * style[..., STYLE_PROSODY_OFFSET:]
+               + weight * donor_style[..., STYLE_PROSODY_OFFSET:])
+    blended[..., STYLE_PROSODY_OFFSET:] = prosody.astype(style.dtype, copy=False)
+    return blended
+
+
+def synthesize_envelope(envelope, kokoro, voice, speed, output, phonemize, tone_voice='', tone_weight=0.0):
     import numpy as np
     import soundfile as sf
     if not isinstance(speed, (int, float)) or not math.isfinite(speed) or not 0.5 <= speed <= 2:
         raise ValueError('invalid-speed')
+    validate_tone_weight(tone_weight)
     chunks = prepare_chunks(envelope, phonemize, kokoro.tokenizer.vocab)
     if not chunks:
         raise ValueError('empty-narration')
     # Reuse one voice style and one already-loaded model for every chunk.
     style = kokoro.get_voice_style(voice)
+    # An empty donor or a zero weight skips the blend entirely, leaving the style byte-identical.
+    if tone_voice and tone_weight > 0:
+        style = blend_tone_style(style, kokoro.get_voice_style(tone_voice), float(tone_weight))
     parts, count = [], 0
     for chunk in chunks:
         samples, rate = kokoro.create(chunk['phonemes'], voice=style, speed=speed, is_phonemes=True,

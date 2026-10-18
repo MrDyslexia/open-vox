@@ -40,7 +40,12 @@ Diagnosis lesson: the `OPEN_VOX_LOG=<file>` environment variable enables the fil
 - [ ] Check LF/CRLF warnings (`.gitattributes`).
 - [ ] Confirm `bun.lock` and dependency additions are acceptable: `mdast-util-from-markdown` 2.0.3, `mdast-util-gfm` 3.1.0, `micromark-extension-gfm` 3.0.0.
 - [ ] README states that `open-vox setup narration` is explicit (about 712 MB model, about 1.64 GB total); release notes for the new `language es|en` setting.
-- [ ] Decide the fate of "one unsupported symbol silences everything" (graceful degrade) before or after merge.
+- [x] Decide the fate of "one unsupported symbol silences everything" (graceful degrade): decided 2026-10-15, unsupported symbols become a traced `,` pause (adjacent ones collapse); the vocabulary cannot be extended. Implemented in the working tree of `feat/jarvis-tone-blend` (`scripts/narration_synthesis.py`, `test/python/test_narration_synthesis.py`), 39 Python tests pass.
+- [ ] PN-GD-COMMIT - Commit the unsupported-symbol-as-pause change ONLY after it is verified in real use over a couple of separate sessions. Commit pending by user decision; do not commit earlier.
+  - [ ] Use the installed host for a few sessions with responses containing `[ ] { }`, emoji and code snippets; confirm nothing goes silent and the pauses sound acceptable (see `OPEN_VOX_LOG=<file>` for `unsupported-symbol-as-pause` lines).
+  - [ ] Check protected technical text (inline code) is acceptable with the uniform pause rule; open edge: a fragment made only of unsupported symbols synthesizes a lone `,`.
+  - [ ] Note: the installed loader reads another checkout, so the change must be carried there and the host reloaded before it can be observed.
+  - [ ] Isolate the commit from the unrelated dirty JARVIS changes (stage only the two files above), then run the Python suite and commit with a conventional message.
 - [ ] ES/EN listening acceptance on long texts.
 - [ ] Repoint installed-host loaders to the final checkout after merge.
 - [x] Delivery namespace uses new delivery/* refs; existing feat/pronunciation-normalization is preserved, not renamed or overwritten.
@@ -170,7 +175,7 @@ Reference assets (temporary, verified present 2026-10-13): `<reference-assets>`;
 - [ ] Observed 4000/510 outcomes and bounded full audio on long texts.
 - [ ] Exhaustive UI/history invariance and cross-session/ownership/generation/error timing through the installed plugin; cancellation inside ONNX inference.
 - [ ] Peak/sustained resource and whole-pipeline warm measurements.
-- [ ] Graceful-degrade decision for unsupported symbols; path-to-main decisions above.
+- [ ] Path-to-main decisions above. (Graceful-degrade for unsupported symbols is decided; its commit is tracked as PN-GD-COMMIT.)
 
 Limits: LID scores are uncalibrated and accuracy is not certified; no naturalness guarantee. Provenance checks assume ordinary controlled Python. Playback speed and Repeat remain separate preserved features.
 

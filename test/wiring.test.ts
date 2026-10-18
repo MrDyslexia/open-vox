@@ -1,11 +1,14 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import * as nodeFs from "node:fs";
+import * as childProcess from "node:child_process";
+import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { OpenVoxPlugin, chooseEngine, createLiveSink, createOpenVox, createPauseState, disableService, liveEngine, withPause } from "../src/plugin";
 import * as plugin from "../src/plugin";
 import { createNarrationPlan } from "../src/markdown-narration";
-import { createConfigReader, DEFAULT_CONFIG } from "../src/config";
+import { createConfigReader, DEFAULT_CONFIG, readConfig, writeConfig } from "../src/config";
 import { createSpeechSink, type Engine, type SpeechProcess, type SpeechSink } from "../src/speech-sink";
 import { encodeCommand, decodeCommand } from "../src/repeat-control";
 import { fixture } from "./final-response.test";
@@ -14,7 +17,7 @@ import { wavBytes } from "./audio-cache.test";
 import { flattenNarrationPlan } from "../src/narration-plan";
 import { createPlayer, type Player, type HostProcess } from "../src/player";
 import * as playerModule from "../src/player";
-import { kokoroEngine } from "../src/kokoro-engine";
+import { defaultKokoroEngine, kokoroEngine } from "../src/kokoro-engine";
 import type { Client } from "../src/plugin";
 
 function fakeSink() {
@@ -28,6 +31,30 @@ function fakeSink() {
 }
 const client = { session: { get: async () => ({ error: "x" }), message: async () => ({ error: "x" }) } } as any;
 const user = (id: string, created: number) => ({ type: "message.updated", properties: { info: { id, sessionID: "ses_a", role: "user", time: { created } } } }) as any;
+
+test("planned Kokoro devices survive live engine and pause wrappers into scoped control status", async () => {
+  const kokoro = kokoroEngine({ python: "fake", script: "fake", modelPath: "fake", voicesPath: "fake",
+    voices: { es: "em_alex", en: "af_heart" }, speed: 1, tmpDir: "R", unlink() {},
+    run: cmd => ({ exited: Promise.resolve(0), kill() {}, devices: () => cmd === "fake" ? { lid: "cpu", kokoro: "gpu" } : undefined }) });
+  let wanted = "kokoro";
+  const engine = liveEngine(() => wanted, { kokoro: () => kokoro, piper: () => undefined },
+    () => ({ exited: Promise.resolve(0), kill() {} }));
+  const raw = createSpeechSink({ engine, deviceIdentity: () => wanted });
+  const sink = withPause(raw, () => false);
+  await sink({ sessionID: "ses_a", messageID: "a", text: "Fake narration" });
+  const replies: any[] = [];
+  const hooks = createOpenVox(client, "local", sink, undefined,
+    { instance: "devices", publish: async command => { replies.push(decodeCommand(command)); } });
+  const hello = (sessionID: string) => hooks.event!({ event: { type: "tui.command.execute", properties: {
+    command: encodeCommand({ kind: "hello", sessionID, challenge: "c", expires: Date.now() + 1500 }),
+  } } } as any);
+  await hello("ses_a"); expect(replies.at(-1)).toMatchObject({ lidDevice: "cpu", kokoroDevice: "gpu" });
+  await hello("ses_b"); expect(replies.at(-1).kokoroDevice).toBeUndefined();
+  wanted = "sapi"; await hello("ses_a"); expect(replies.at(-1).kokoroDevice).toBeUndefined();
+  await sink({ sessionID: "ses_a", messageID: "b", text: "Fallback narration" });
+  await hello("ses_a"); expect(replies.at(-1).kokoroDevice).toBeUndefined();
+  await hooks.dispose?.();
+});
 
 /** Valid SDK responses and fake audio only; no process, synthesis or host transport. */
 function latestResponseHarness(injected = false, nonce = "latest", capable = true) {
@@ -71,7 +98,260 @@ function latestResponseHarness(injected = false, nonce = "latest", capable = tru
     failNarration: () => { failNarration = true; } };
 }
 
+describe("persisted manual recovery", () => {
+  function recovery() {
+    const a = fixture("ses_a", "u", "a"), b = fixture("ses_a", "v", "b");
+    b.parent.info.time.created = 4;
+    b.response.info.time = { created: 5, completed: 6 };
+    let history = [a.parent, a.response], reads = 0, gets = 0;
+    let beforeRead = async () => {}, beforeSpeak = async () => {};
+    const sdk: Client = { session: {
+      get: async () => { gets++; return { data: a.session }; },
+      message: async ({ path }) => ({ data: history.find(m => m.info.id === path.messageID) }),
+      messages: async (input: any) => {
+        reads++; expect(input.query.limit).toBe(100);
+        await beforeRead(); return { data: history };
+      },
+    } };
+    const f = fakeSink(), replies: any[] = [];
+    const sink = (async selection => { await beforeSpeak(); await f.sink(selection); }) as SpeechSink;
+    Object.assign(sink, { stop: f.sink.stop, pause: f.sink.pause, resume: f.sink.resume,
+      status: () => f.sink.status?.(), repeat: async (...args: Parameters<NonNullable<SpeechSink["repeat"]>>) => f.sink.repeat?.(...args) });
+    const hooks = createOpenVox(sdk, "local", sink, undefined,
+      { instance: "recovery", publish: async command => { replies.push(decodeCommand(command)); } });
+    let sequence = 0;
+    const send = (kind = "hello", extra: any = {}) => hooks.event!({ event: { type: "tui.command.execute", properties: {
+      command: encodeCommand({ kind, instance: "recovery", sessionID: "ses_a", challenge: `c-${++sequence}`,
+        requestID: `r-${sequence}`, expires: Date.now() + 1500, ...extra }),
+    } } } as any);
+    const update = (info: any) => hooks.event!({ event: { type: "message.updated", properties: { info } } } as any);
+    return { ...f, a, b, sdk, hooks, send, update, replies, reads: () => reads, gets: () => gets,
+      history: (value: typeof history) => { history = value; }, delay: (fn: typeof beforeRead) => { beforeRead = fn; },
+      delivery: (fn: typeof beforeSpeak) => { beforeSpeak = fn; } };
+  }
+
+  test("restart discovery advertises Speak without audio and explicit clicks coalesce", async () => {
+    const h = recovery();
+    try {
+      await h.send();
+      expect(h.replies.at(-1)).toMatchObject({ messageID: "a", revision: 0 });
+      expect(h.spoken).toEqual([]);
+      for (let i = 0; i < 20; i++) await h.send();
+      expect(h.reads()).toBe(1);
+      let release!: () => void;
+      h.delay(() => new Promise<void>(resolve => { release = resolve; }));
+      const click = h.send("speak", { messageID: "a", revision: 0 });
+      await Promise.resolve(); await Promise.resolve();
+      await h.send("speak", { messageID: "a", revision: 0 });
+      release(); await click;
+      expect(h.reads()).toBe(2);
+      expect(h.spoken).toEqual(["Answer"]);
+    } finally { await h.hooks.dispose!(); }
+  });
+
+  test("Off-era completion is recovered only after On and explicit Speak", async () => {
+    const h = recovery();
+    try {
+      await h.send("control", { action: "disable" });
+      await h.update(h.a.parent.info); await h.update(h.a.response.info);
+      await h.send(); expect(h.reads()).toBe(0);
+      await h.send("control", { action: "enable" }); await h.send();
+      expect(h.replies.at(-1)?.messageID).toBe("a"); expect(h.spoken).toEqual([]);
+      await h.send("speak", { messageID: "a", revision: 0 });
+      expect(h.spoken).toEqual(["Answer"]);
+    } finally { await h.hooks.dispose!(); }
+  });
+
+  test.each(["user", "streaming", "error", "summary", "child", "revert", "mismatch", "empty", "session-mismatch"])(
+    "latest %s cannot fall back to older A", async kind => {
+      const h = recovery();
+      try {
+        if (kind === "streaming") h.b.response.info.time = { created: 5 };
+        if (kind === "error") Object.assign(h.b.response.info, { error: {} });
+        if (kind === "summary") Object.assign(h.b.response.info, { summary: true });
+        if (kind === "child") h.a.session.parentID = "root";
+        if (kind === "revert") h.a.session.revert = { messageID: "v" };
+        if (kind === "mismatch") h.b.response.info.sessionID = "other";
+        if (kind === "session-mismatch") h.a.session.id = "other";
+        if (kind === "empty") h.b.response.parts = [];
+        h.history([h.a.parent, h.a.response, h.b.parent, ...(kind === "user" ? [] : [h.b.response])]);
+        await h.send(); expect(h.replies.at(-1)?.messageID).toBeUndefined();
+        await h.send("speak", { messageID: "a", revision: 0 }); expect(h.spoken).toEqual([]);
+      } finally { await h.hooks.dispose!(); }
+    });
+
+  test.each(["disable", "pause", "turn", "removed", "error", "switch", "dispose", "off-on", "pause-resume",
+    "deleted", "assistant-error", "part-removed", "compacted", "reverted"])(
+    "%s invalidates delayed click recovery", async kind => {
+      const h = recovery();
+      try {
+        await h.send();
+        expect(h.replies.at(-1)?.messageID).toBe("a");
+        let release!: () => void, started!: () => void;
+        const ready = new Promise<void>(resolve => { started = resolve; });
+        h.delay(async () => { started(); await new Promise<void>(resolve => { release = resolve; }); });
+        const click = h.send("speak", { messageID: "a", revision: 0 }); await ready;
+        let switched: Promise<void> | undefined;
+        if (kind === "disable" || kind === "pause") await h.send("control", { action: kind });
+        if (kind === "off-on" || kind === "pause-resume") {
+          await h.send("control", { action: kind === "off-on" ? "disable" : "pause" });
+          await h.send("control", { action: kind === "off-on" ? "enable" : "resume" });
+        }
+        if (kind === "turn") await h.update(h.b.parent.info);
+        if (kind === "switch") switched = h.send("hello", { sessionID: "ses_b" }) as Promise<void>;
+        if (kind === "dispose") await h.hooks.dispose!();
+        if (kind === "assistant-error") await h.update({ ...h.a.response.info, error: {} });
+        if (kind === "deleted" || kind === "reverted") await h.hooks.event!({ event: {
+          type: kind === "deleted" ? "session.deleted" : "session.updated",
+          properties: { info: { ...h.a.session, ...(kind === "reverted" ? { revert: { messageID: "u" } } : {}) } },
+        } } as any);
+        if (kind === "part-removed" || kind === "compacted") await h.hooks.event!({ event: {
+          type: kind === "part-removed" ? "message.part.removed" : "session.compacted",
+          properties: { sessionID: "ses_a", messageID: "a", partID: "ap" },
+        } } as any);
+        if (kind === "removed" || kind === "error") await h.hooks.event!({ event: kind === "removed"
+          ? { type: "message.removed", properties: { sessionID: "ses_a", messageID: "a" } }
+          : { type: "session.error", properties: { sessionID: "ses_a" } } } as any);
+        release(); await click; await switched; expect(h.spoken).toEqual([]);
+        if (["deleted", "assistant-error", "removed", "error", "reverted", "part-removed", "compacted"].includes(kind)) {
+          const reads = h.reads(); await h.send();
+          expect(h.replies.at(-1)?.messageID).toBeUndefined(); expect(h.reads()).toBe(reads);
+        }
+      } finally { await h.hooks.dispose!(); }
+    });
+
+  test("click rechecks latest turn and never repeats A audio for B", async () => {
+    const h = recovery(); let repeats = 0;
+    h.sink.status = () => ({ sessionID: "ses_a", messageID: "a", revision: 1 });
+    h.sink.repeat = async () => { repeats++; };
+    try {
+      await h.send();
+      await h.send("repeat", { messageID: "a", revision: 1 }); expect(repeats).toBe(1);
+      h.history([h.a.parent, h.a.response, h.b.parent]);
+      await h.send("speak", { messageID: "a", revision: 0 });
+      await h.send("repeat", { messageID: "a", revision: 1 });
+      expect(h.spoken).toEqual([]); expect(repeats).toBe(1);
+      h.history([h.a.parent, h.a.response, h.b.parent, h.b.response]);
+      await h.update(h.b.parent.info); // Explicitly invalidate the negative discovery cache.
+      await h.send(); expect(h.replies.at(-1)).toMatchObject({ messageID: "b", revision: 0 });
+      expect(h.spoken).toEqual([]);
+    } finally { await h.hooks.dispose!(); }
+  });
+
+  test("failed reads cool down, explicit retries recover and generation failures stay retryable", async () => {
+    let time = Date.now();
+    const clock = spyOn(Date, "now").mockImplementation(() => time);
+    const h = recovery();
+    try {
+      h.delay(async () => { throw Error("unavailable"); });
+      await h.send(); for (let i = 0; i < 20; i++) await h.send();
+      expect(h.reads()).toBe(1); expect(h.replies.at(-1)?.messageID).toBeUndefined();
+      h.delay(async () => {}); time += 5001; await h.send();
+      expect(h.reads()).toBe(2); expect(h.spoken).toEqual([]);
+      h.delivery(async () => { throw Error("fake generation failed"); });
+      await h.send("speak", { messageID: "a", revision: 0 }); await h.send();
+      expect(h.replies.at(-1)).toMatchObject({ messageID: "a", revision: 0, busy: false });
+      h.delivery(async () => {}); await h.send("speak", { messageID: "a", revision: 0 });
+      expect(h.spoken).toEqual(["Answer"]);
+    } finally { clock.mockRestore(); await h.hooks.dispose!(); }
+  });
+
+  test("polling during generation preserves busy ownership and Pause never consumes recovery", async () => {
+    const h = recovery();
+    try {
+      await h.send(); await h.send("control", { action: "pause" });
+      await h.send("control", { action: "resume" }); expect(h.spoken).toEqual([]);
+      await h.send();
+      let release!: () => void, started!: () => void;
+      const ready = new Promise<void>(resolve => { started = resolve; });
+      h.delivery(async () => { started(); await new Promise<void>(resolve => { release = resolve; }); });
+      const click = h.send("speak", { messageID: "a", revision: 0 }); await ready;
+      await h.send(); expect(h.replies.at(-1)?.busy).toBe(true);
+      const reads = h.reads(); await h.send("speak", { messageID: "a", revision: 0 });
+      expect(h.reads()).toBe(reads); release(); await click;
+      expect(h.spoken).toEqual(["Answer"]);
+    } finally { await h.hooks.dispose!(); }
+  });
+
+  test("SDK history is never read at startup, idle or completion-only autoplay", async () => {
+    const h = recovery();
+    try {
+      await h.hooks.event!({ event: { type: "session.idle", properties: { sessionID: "ses_a" } } });
+      await h.update(h.a.response.info);
+      expect(h.reads()).toBe(0); expect(h.spoken).toEqual([]);
+      await h.send(); expect(h.spoken).toEqual([]);
+    } finally { await h.hooks.dispose!(); }
+  });
+
+  test("ordinary observed-turn autoplay does not enumerate SDK history", async () => {
+    const h = recovery();
+    try {
+      await h.update(h.a.parent.info); await h.update(h.a.response.info);
+      expect(h.spoken).toEqual(["Answer"]); expect(h.reads()).toBe(0);
+    } finally { await h.hooks.dispose!(); }
+  });
+
+  test("overlapping status polls coalesce and late timed-out history cannot restore a target", async () => {
+    const h = recovery(); let release!: () => void, signal: AbortSignal | undefined;
+    const messages = h.sdk.session.messages!;
+    h.sdk.session.messages = async input => { signal = input.signal; return messages(input); };
+    h.delay(() => new Promise<void>(resolve => { release = resolve; }));
+    try {
+      const first = h.send("hello", { expires: Date.now() + 1900 });
+      await Promise.all(Array.from({ length: 20 }, () => h.send()));
+      expect(h.reads()).toBe(1); expect(h.spoken).toEqual([]);
+      await first; expect(signal?.aborted).toBe(true);
+      expect(h.replies.at(-1)?.messageID).toBeUndefined();
+      release(); await Promise.resolve(); await h.send();
+      expect(h.reads()).toBe(1); expect(h.replies.at(-1)?.messageID).toBeUndefined();
+      expect(h.spoken).toEqual([]);
+    } finally { release?.(); await h.hooks.dispose!(); }
+  });
+});
+
 describe("latest completed response during Pause", () => {
+  test("Speak targets B rather than cached A, retries failures and Repeat never synthesizes", async () => {
+    const h = latestResponseHarness();
+    const replies: any[] = [];
+    let audio: any = { sessionID: "ses_a", messageID: "a", revision: 1 };
+    let attempts = 0, repeats = 0, release!: () => void;
+    const sink = (async () => { attempts++; if (attempts === 1) throw Error("failed autoplay");
+      await new Promise<void>(resolve => { release = resolve; });
+      audio = { sessionID: "ses_a", messageID: "b", revision: 2 };
+    }) as unknown as SpeechSink;
+    sink.stop = () => {}; sink.status = () => audio;
+    sink.repeat = async () => { repeats++; };
+    const hooks = createOpenVox(h.sdk, "local", sink, undefined,
+      { instance: "bound", publish: async command => { replies.push(decodeCommand(command)); } });
+    const send = (kind: string, extra = {}) => hooks.event!({ event: { type: "tui.command.execute", properties: {
+      command: encodeCommand({ kind, instance: "bound", sessionID: "ses_a", expires: Date.now() + 1500,
+        requestID: `request-${++sequence}`, ...extra } as any),
+    } } } as any);
+    let sequence = 0;
+    try {
+      await hooks.event!({ event: { type: "message.updated", properties: { info: h.fixtures[0]!.parent.info } } });
+      await hooks.event!({ event: { type: "message.updated", properties: { info: h.fixtures[1]!.response.info } } });
+      await send("hello", { challenge: "first" });
+      expect(replies.at(-1)).toMatchObject({ messageID: "b", revision: 0, busy: false });
+      await send("repeat", { messageID: "a", revision: 1 });
+      await send("speak", { messageID: "a", revision: 0 });
+      expect([attempts, repeats]).toEqual([1, 0]);
+      const speaking = send("speak", { messageID: "b", revision: 0 });
+      await send("speak", { messageID: "b", revision: 0 });
+      await send("hello", { challenge: "busy" });
+      expect(replies.at(-1)?.busy).toBe(true);
+      expect(attempts).toBe(2);
+      release(); await speaking;
+      await send("hello", { challenge: "ready" });
+      expect(replies.at(-1)).toMatchObject({ messageID: "b", revision: 2, busy: false });
+      await send("repeat", { messageID: "b", revision: 2 });
+      expect([attempts, repeats]).toEqual([2, 1]);
+      await send("control", { action: "disable" }); await send("control", { action: "enable" });
+      await send("repeat", { messageID: "b", revision: 2 });
+      await send("speak", { messageID: "b", revision: 0 });
+      expect([attempts, repeats]).toEqual([2, 1]);
+    } finally { release?.(); await hooks.dispose!(); await h.hooks.dispose!(); }
+  });
   test.each([false, true])("Resume consumes only B once without thawing A (injected state=%s)", async injected => {
     const h = latestResponseHarness(injected);
     await h.observe(); await h.control("pause");
@@ -407,7 +687,7 @@ describe("open-vox wiring", () => {
     expect(decodeCommand(replies[0])?.instance).toBe("instance-a");
     expect(f.stops()).toBe(0);
     await hooks.event!(event({ kind: "repeat", instance: "instance-a", sessionID: "ses_a", revision: 1, requestID: "one", expires: Date.now() + 1500 }));
-    expect(repeats).toBe(1);
+    expect(repeats).toBe(0); // Cache alone is not an observed latest response.
     await hooks.event!({ event: { type: "session.deleted", properties: { info: { id: "ses_a" } } } } as any);
     expect(removals).toEqual(["ses_a"]);
     await hooks.dispose!(); await hooks.dispose!();
@@ -518,6 +798,58 @@ describe("live sink player wiring", () => {
 });
 
 describe("chooseEngine", () => {
+  test("live engine forwards release/disposal only to instantiated owners and never restarts after disposal", async () => {
+    const calls: string[] = [];
+    const make = (name: string) => Object.assign(() => ({ exited: Promise.resolve(0), kill() {} }), {
+      release: () => { calls.push(`release:${name}`); }, dispose: async () => { calls.push(`dispose:${name}`); },
+    });
+    let wanted = "kokoro";
+    const a = make("a"), b = make("b");
+    const engine = liveEngine(() => wanted, { kokoro: () => a, piper: () => b });
+    await engine("first", "es").exited; wanted = "piper"; await engine("second", "es").exited;
+    expect(calls).toEqual(["release:a"]);
+    engine.release!(); await engine.dispose!();
+    expect(calls).toEqual(["release:a", "release:a", "release:b", "dispose:a", "dispose:b"]);
+    expect(() => engine("late", "es")).toThrow("disposed");
+  });
+  test("default Kokoro wiring reads persisted tone changes on each new plan without changing the live profile", async () => {
+    let stored = "{}";
+    const fs = { read: () => stored, writeAtomic: (_path: string, data: string) => { stored = data; } };
+    const calls: string[][] = [];
+    const requests: any[] = [];
+    let engine: Engine | undefined;
+    const exists = spyOn(nodeFs, "existsSync").mockReturnValue(true);
+    const spawn = spyOn(childProcess, "spawn").mockImplementation(((_cmd: string, args: string[]) => {
+      calls.push(args);
+      const child = new EventEmitter() as any;
+      child.stdout = new EventEmitter();
+      child.stdin = new EventEmitter();
+      const identity = { v: 1, owner: args[args.indexOf("--owner") + 1], generation: args[args.indexOf("--generation") + 1] };
+      child.stdin.write = (raw: string) => {
+        const r = JSON.parse(raw); requests.push(r);
+        queueMicrotask(() => child.stdout.emit("data", Buffer.from(JSON.stringify({ ...identity,
+          type: "result", request: r.request, code: 0, diagnostics: [] }) + "\n")));
+        return true;
+      };
+      child.kill = () => { queueMicrotask(() => child.emit("close", 0)); return true; };
+      queueMicrotask(() => child.stdout.emit("data", Buffer.from(JSON.stringify({ ...identity, type: "ready" }) + "\n")));
+      return child;
+    }) as any);
+    try {
+      engine = defaultKokoroEngine({ OPEN_VOX_HOME: "C:\\synthetic-tone-home" }, () => readConfig("memory", fs))!;
+      const plan = createNarrationPlan("Synthetic narration", "es");
+      await engine.synthesizePlan!(plan, "fake.wav").exited;
+      expect(requests[0].toneVoice).toBe("");
+      writeConfig({ toneVoice: { es: "am_onyx" }, toneWeight: { es: 0.75 } }, "memory", fs);
+      await engine.synthesizePlan!(plan, "fake.wav").exited;
+      expect(requests[1]).toMatchObject({ toneVoice: "am_onyx", toneWeight: 0.75, lang: "es" });
+      writeConfig({ toneVoice: { es: "" }, toneWeight: { es: 0 } }, "memory", fs);
+      await engine.synthesizePlan!(plan, "fake.wav").exited;
+      expect(requests[2].toneVoice).toBe("");
+      expect(calls).toHaveLength(1);
+      expect(new Set(requests.map(r => r.generation)).size).toBe(1);
+    } finally { await engine?.dispose?.(); spawn.mockRestore(); exists.mockRestore(); }
+  });
   test("plan dispatch selects the actual engine at execution and text fallback never receives JSON", async () => {
     const seen: string[] = [], diagnostics: string[] = [];
     const done = { exited: Promise.resolve(0), kill() {} };
@@ -817,7 +1149,7 @@ describe("pause", () => {
     expect([f.pauses(), f.resumes(), f.stops()]).toEqual([1, 1, 0]);
   });
 
-  test("while paused new narrations and Repeat are blocked; resume allows them again", async () => {
+  test("Pause gates narration; unobserved cached audio never authorizes host Repeat", async () => {
     const a = instance("instance-a");
     const revision = (await a.status())!.revision!;
     const repeat = (id: string) => a.hooks.event!(a.command({ kind: "repeat", instance: "instance-a", sessionID: "ses_a", revision, requestID: id, expires: Date.now() + 1500 }));
@@ -831,7 +1163,7 @@ describe("pause", () => {
     await a.sink({ sessionID: "ses_a", messageID: "m", text: "hola" });
     await repeat("rep-ok");
     expect(a.f.spoken).toEqual(["hola"]);
-    expect(a.repeats()).toBe(1);
+    expect(a.repeats()).toBe(0);
     await a.hooks.dispose!();
   });
 
@@ -1046,7 +1378,9 @@ function pnService(root: string, playback?: Player, planEngine?: Engine) {
     properties: { command: encodeCommand({ sessionID: "s", expires: Date.now() + 1500, ...message } as any) } } } as any);
   const control = (action: string, target = cache.instance) => send({ kind: "control", instance: target, action, requestID: `r-${++request}` });
   const status = async () => { await send({ kind: "hello", challenge: `c-${++request}` }); return decodeCommand(replies.at(-1))!; };
-  const repeat = (revision: number) => send({ kind: "repeat", instance: cache.instance, revision, requestID: `r-${++request}` });
+  // These PN fixtures call the sink directly, without an observed host response.
+  // Exercise its cached playback path; response-bound host authorization is covered above.
+  const repeat = (revision: number) => wrapped.repeat!("s", revision);
   const say = (text = "**API** Open editor.") => wrapped({ sessionID: "s", messageID: `m-${++request}`, text });
   return { cache, state, sink, wrapped, hooks, counts, mode, processes, plans, played, say, control, status, repeat, send,
     prepared: () => prepared(), close: () => hooks.dispose!() };

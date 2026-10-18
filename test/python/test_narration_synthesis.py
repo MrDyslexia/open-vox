@@ -5,11 +5,41 @@ import json
 from pathlib import Path
 import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from test_narration_plan import plan_for
 from narration_resolver import resolve_plan
-from narration_synthesis import BLOCK_PAUSE_SECONDS, load_plan, local_lid_directory, prepare_chunks, synthesize_envelope
+from narration_synthesis import (BLOCK_PAUSE_SECONDS, STYLE_PROSODY_OFFSET, blend_tone_style, load_plan,
+                                 local_lid_directory, prepare_chunks, synthesize_envelope)
 from narration_lid import REVISION
+
+# Measured runtime rank of a Kokoro style tensor; the docs imply 2D and are wrong for this build.
+STYLE_SHAPE = (510, 1, 256)
+
+
+def style_array(start, shape=STYLE_SHAPE):
+    """Deterministic float32 style tensor with distinct values per element."""
+    import numpy as np
+    size = int(np.prod(shape))
+    return (np.arange(start, start + size, dtype=np.float32) / 1000.0).reshape(shape)
+
+
+class StyleModel:
+    """Records every style read and the exact array handed to `create`."""
+    tokenizer = type('Tokenizer', (), {'vocab': {'a': 1, ' ': 2}})()
+
+    def __init__(self, styles):
+        self.styles = styles
+        self.reads = []
+        self.styles_used = []
+
+    def get_voice_style(self, voice):
+        self.reads.append(voice)
+        return self.styles[voice]
+
+    def create(self, text, **kwargs):
+        import numpy as np
+        self.styles_used.append(kwargs['voice'])
+        return np.ones(10, dtype=np.float32), 24000
 
 
 class SynthesisTests(unittest.TestCase):
@@ -282,6 +312,21 @@ class SynthesisTests(unittest.TestCase):
         self.assertEqual(chunks[0]['phonemes'], raw)
         self.assertEqual(chunks[0]['mappings'], [])
 
+    def test_unsupported_symbols_become_a_traced_pause_instead_of_failing(self):
+        stderr = io.StringIO()
+        with patch.object(sys, 'stderr', stderr):
+            chunks = prepare_chunks(resolve_plan(plan_for('local')), lambda t, l: 'a[b}c', {'a': 1, 'b': 2, 'c': 3, ',': 4})
+        self.assertEqual(chunks[0]['rawPhonemes'], 'a[b}c')
+        self.assertEqual(chunks[0]['phonemes'], 'a,b,c')
+        self.assertEqual([(m['rawIndex'], m['codepoint'], m['to']) for m in chunks[0]['mappings']],
+                         [(1, 'U+005B', ','), (3, 'U+007D', ',')])
+        self.assertEqual(stderr.getvalue(), 'unsupported-symbol-as-pause: U+005B\nunsupported-symbol-as-pause: U+007D\n')
+
+    def test_adjacent_unsupported_symbols_collapse_into_one_pause(self):
+        chunks = prepare_chunks(resolve_plan(plan_for('local')), lambda t, l: 'a[]b', {'a': 1, 'b': 2, ',': 3})
+        self.assertEqual(chunks[0]['phonemes'], 'a,b')
+        self.assertEqual([m['to'] for m in chunks[0]['mappings']], [',', ''])
+
     def test_unmeasured_or_unsafe_symbols_still_fail_with_generic_codepoint_line(self):
         for symbol, codepoint in [('[', 'U+005B'), ('}', 'U+007D'), ('☃', 'U+2603')]:
             with self.subTest(symbol=symbol):
@@ -313,6 +358,119 @@ class SynthesisTests(unittest.TestCase):
         envelope['blocks'][0]['units'][0]['source']['end'] = 100
         with self.assertRaises(ValueError):
             prepare_chunks(envelope, lambda t, l: 'a', {'a': 1})
+
+
+class ToneBlendTests(unittest.TestCase):
+    """JT-01/JT-11: only `[..., 128:]` is interpolated; `[..., :128]` keeps the configured timbre."""
+
+    INVALID_WEIGHTS = (-0.1, 1.1, float('nan'), float('inf'), -float('inf'),
+                       '0.75', None, [], True, False)
+
+    def test_invalid_weight_fails_before_chunks_styles_inference_or_write(self):
+        envelope = resolve_plan(plan_for('local'))
+        for donor in ('am_onyx', ''):
+            for weight in self.INVALID_WEIGHTS:
+                with self.subTest(donor=donor, weight=weight):
+                    model = StyleModel({'em_alex': style_array(0), 'am_onyx': style_array(50000)})
+                    phonemize = MagicMock(return_value='a')
+                    with patch('narration_synthesis.prepare_chunks', wraps=prepare_chunks) as prepare, \
+                            patch('soundfile.write') as write:
+                        with self.assertRaisesRegex(ValueError, '^invalid-tone-weight$'):
+                            synthesize_envelope(envelope, model, 'em_alex', 1, 'mock-only.wav',
+                                                phonemize, tone_voice=donor, tone_weight=weight)
+                        prepare.assert_not_called()
+                        phonemize.assert_not_called()
+                        self.assertEqual(model.reads, [])
+                        self.assertEqual(model.styles_used, [])
+                        write.assert_not_called()
+
+    def test_blend_helper_rejects_invalid_weight_before_inspecting_styles(self):
+        for weight in self.INVALID_WEIGHTS:
+            with self.subTest(weight=weight), self.assertRaisesRegex(ValueError, '^invalid-tone-weight$'):
+                blend_tone_style(object(), object(), weight)
+
+    def synthesize(self, model, **tone):
+        with patch('soundfile.write'):
+            return synthesize_envelope(resolve_plan(plan_for('local')), model, 'em_alex', 1,
+                                       'mock-only.wav', lambda t, l: 'a', **tone)
+
+    def test_prosody_offset_splits_the_style_vector_in_half(self):
+        self.assertEqual(STYLE_PROSODY_OFFSET, 128)
+
+    def test_blend_disabled_hands_the_unblended_style_to_the_model(self):
+        base = style_array(0)
+        for tone in [{}, {'tone_voice': '', 'tone_weight': 0.0}, {'tone_voice': '', 'tone_weight': 0.75},
+                     {'tone_voice': 'am_onyx', 'tone_weight': 0.0}]:
+            with self.subTest(tone=tone):
+                model = StyleModel({'em_alex': base, 'am_onyx': style_array(50000)})
+                self.synthesize(model, **tone)
+                # The donor is never resolved and the base array is passed through without a copy.
+                self.assertEqual(model.reads, ['em_alex'])
+                self.assertIs(model.styles_used[0], base)
+
+    def test_blend_changes_only_the_prosody_half_and_preserves_dtype(self):
+        import numpy as np
+        base, donor = style_array(0), style_array(50000)
+        original = base.copy()
+        model = StyleModel({'em_alex': base, 'am_onyx': donor})
+        self.synthesize(model, tone_voice='am_onyx', tone_weight=0.75)
+        self.assertEqual(model.reads, ['em_alex', 'am_onyx'])
+        blended = model.styles_used[0]
+        self.assertIsNot(blended, base)
+        self.assertEqual((blended.shape, blended.dtype), (base.shape, base.dtype))
+        np.testing.assert_array_equal(blended[..., :128], original[..., :128])
+        expected = (0.25 * original[..., 128:] + 0.75 * donor[..., 128:]).astype(np.float32)
+        np.testing.assert_array_equal(blended[..., 128:], expected)
+        self.assertFalse(np.array_equal(blended[..., 128:], original[..., 128:]))
+        # A cached library array must never be mutated in place.
+        np.testing.assert_array_equal(base, original)
+        np.testing.assert_array_equal(donor, style_array(50000))
+
+    def test_full_weight_takes_the_donor_prosody_half_verbatim(self):
+        import numpy as np
+        base, donor = style_array(0), style_array(50000)
+        model = StyleModel({'em_alex': base, 'am_onyx': donor})
+        self.synthesize(model, tone_voice='am_onyx', tone_weight=1.0)
+        blended = model.styles_used[0]
+        np.testing.assert_array_equal(blended[..., 128:], donor[..., 128:])
+        np.testing.assert_array_equal(blended[..., :128], base[..., :128])
+
+    def test_zero_weight_through_the_blend_helper_reproduces_the_base(self):
+        import numpy as np
+        base, donor = style_array(0), style_array(50000)
+        np.testing.assert_array_equal(blend_tone_style(base, donor, 0.0), base)
+
+    def test_a_donor_with_a_mismatched_shape_is_rejected(self):
+        base = style_array(0)
+        for shape in [(509, 1, 256), (510, 1, 255), (510, 256), (510, 1, 512)]:
+            with self.subTest(shape=shape), self.assertRaises(ValueError) as caught:
+                blend_tone_style(base, style_array(1, shape), 0.75)
+            self.assertEqual(str(caught.exception), 'tone-shape-mismatch')
+
+    def test_a_mismatched_donor_fails_synthesis_without_writing_audio(self):
+        model = StyleModel({'em_alex': style_array(0), 'am_onyx': style_array(1, (510, 1, 255))})
+        with patch('soundfile.write') as write, self.assertRaises(ValueError) as caught:
+            synthesize_envelope(resolve_plan(plan_for('local')), model, 'em_alex', 1, 'mock-only.wav',
+                                lambda t, l: 'a', tone_voice='am_onyx', tone_weight=0.75)
+        self.assertEqual(str(caught.exception), 'tone-shape-mismatch')
+        write.assert_not_called()
+
+    def test_blend_is_rank_agnostic_for_the_documented_two_dimensional_shape(self):
+        import numpy as np
+        base, donor = style_array(0, (1, 256)), style_array(9000, (1, 256))
+        blended = blend_tone_style(base, donor, 1.0)
+        self.assertEqual((blended.shape, blended.dtype), (base.shape, base.dtype))
+        np.testing.assert_array_equal(blended[..., :128], base[..., :128])
+        np.testing.assert_array_equal(blended[..., 128:], donor[..., 128:])
+
+    def test_speed_validation_still_precedes_any_style_resolution(self):
+        base, donor = style_array(0), style_array(50000)
+        model = StyleModel({'em_alex': base, 'am_onyx': donor})
+        with patch('soundfile.write'), self.assertRaises(ValueError) as caught:
+            synthesize_envelope(resolve_plan(plan_for('local')), model, 'em_alex', 3, 'mock-only.wav',
+                                lambda t, l: 'a', tone_voice='am_onyx', tone_weight=0.75)
+        self.assertEqual(str(caught.exception), 'invalid-speed')
+        self.assertEqual(model.reads, [])
 
 
 if __name__ == '__main__':

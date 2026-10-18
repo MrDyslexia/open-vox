@@ -1,2 +1,4 @@
 node_modules/
 /.atl/
+/.engram/
+__pycache__/

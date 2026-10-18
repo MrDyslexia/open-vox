@@ -3,7 +3,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSy
 import { dirname, join, resolve, basename } from "node:path";
 import { tmpdir } from "node:os";
 
-export type CachedAudio = { file: string; sessionID: string; revision: number };
+export type CachedAudio = { file: string; sessionID: string; revision: number; messageID?: string };
 export type AudioStore = Pick<AudioCache, "candidate" | "current" | "promote" | "discard" | "hold" | "forget" | "clear" | "dispose">;
 export const audioCacheRoot = () => join(tmpdir(), "open-vox-audio-v1");
 type Liveness = "live" | "dead" | "unknown";
@@ -116,11 +116,11 @@ export class AudioCache {
     return this.files.has(file) && dirname(file) === this.directory && wavPattern.test(basename(file)) && safeDirectory(this.directory) && regularFile(file);
   }
 
-  promote(file: string, sessionID: string): boolean {
+  promote(file: string, sessionID: string, messageID?: string): boolean {
     // Retired candidates must not return after cancellation, even while still held.
     if (this.disposed || this.retired.has(file) || !this.owns(file) || !validWav(file)) { this.discard(file); return false; }
     const previous = this.last;
-    this.last = { file, sessionID, revision: ++this.revision };
+    this.last = { file, sessionID, revision: ++this.revision, ...(messageID === undefined ? {} : { messageID }) };
     if (previous && previous.file !== file) this.discard(previous.file);
     return true;
   }

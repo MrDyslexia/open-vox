@@ -21,6 +21,42 @@ function renewalHarness() {
     async accept() { ui.refresh("s"); await Promise.resolve(); reply(); now = 1250; expect(ui.available("s")).toBe(true); } };
 }
 
+test("per-model device labels follow correlated renewal, replacement, session and TTL", async () => {
+  const h = renewalHarness(); await h.accept();
+  expect(repeatUi.deviceLabel(h.ui.view("s"))).toBe("LID: Pending · Kokoro: Pending");
+  h.time(2750); h.ui.refresh("s"); await Promise.resolve();
+  h.reply(undefined, { lidDevice: "cpu", kokoroDevice: "gpu" });
+  expect(repeatUi.deviceLabel(h.ui.view("s"))).toBe("LID: CPU · Kokoro: GPU");
+  expect(sameView(h.ui.view("s"), { ...h.ui.view("s"), lidDevice: "gpu" })).toBe(false);
+  h.reply(undefined, { kokoroDevice: "cpu" });
+  expect(repeatUi.deviceLabel(h.ui.view("s"))).toBe("LID: Pending · Kokoro: CPU");
+  expect(repeatUi.deviceLabel(h.ui.view("other"))).toBe("LID: Pending · Kokoro: Pending");
+  h.time(4750);
+  expect(repeatUi.deviceLabel(h.ui.view("s"))).toBe("LID: Pending · Kokoro: Pending");
+  h.ui.dispose();
+});
+
+test("device status ignores malformed and uncorrelated replies; Off and conflicts stay pending", async () => {
+  const h = renewalHarness(); await h.accept();
+  h.time(2750); h.ui.refresh("s"); await Promise.resolve();
+  for (const extra of [{ challenge: "wrong" }, { sessionID: "other" }, { expires: 9999 }, { lidDevice: "cuda" }])
+    h.reply(undefined, { kokoroDevice: "gpu", ...extra } as any);
+  expect(repeatUi.deviceLabel(h.ui.view("s"))).toBe("LID: Pending · Kokoro: Pending");
+  h.reply(undefined, { lidDevice: "gpu", kokoroDevice: "cpu", enabled: false });
+  expect(repeatUi.deviceLabel(h.ui.view("s"))).toBe("LID: Pending · Kokoro: Pending");
+  h.reply(undefined, { lidDevice: "gpu", kokoroDevice: "cpu", instance: "other" });
+  expect(repeatUi.deviceLabel(h.ui.view("s"))).toBe("LID: Pending · Kokoro: Pending");
+  h.ui.dispose();
+});
+
+test("sidebar device row is muted below the title and before buttons, and TSX transpiles", () => {
+  const source = readFileSync(new URL("../tui/open-vox.tsx", import.meta.url), "utf8");
+  const row = '<text fg={theme().textMuted} wrapMode="word">{deviceLabel(view())}</text>';
+  expect(source.indexOf(row)).toBeGreaterThan(source.indexOf("<b>Open-Vox</b>"));
+  expect(source.indexOf(row)).toBeLessThan(source.indexOf('{button(() => (paused()'));
+  expect(new Bun.Transpiler({ loader: "tsx" }).transformSync(source)).toContain("deviceLabel(view())");
+});
+
 test("healthy renewal stays available through unresolved hello publication and settlement", async () => {
   const h = renewalHarness(); await h.accept();
   let resolve!: () => void;
@@ -36,6 +72,26 @@ test("healthy renewal stays available through unresolved hello publication and s
   h.transport(async () => {});
   h.time(4500); h.ui.refresh("s"); await Promise.resolve(); h.reply();
   h.time(4750); expect(h.ui.available("s")).toBe(true);
+  h.ui.dispose();
+});
+
+test("response-bound renewal switches Speak to Repeat and blocks busy generation", async () => {
+  const h = renewalHarness(); await h.accept();
+  h.time(2750); h.ui.refresh("s"); await Promise.resolve();
+  h.reply(undefined, { messageID: "b", revision: 0, busy: false });
+  expect(h.ui.view("s")).toMatchObject({ canSpeak: true, canRepeat: false });
+  await h.ui.speak("other"); await h.ui.speak("s");
+  expect(h.sent.filter(m => m.kind === "speak")).toHaveLength(1);
+  expect(h.sent.find(m => m.kind === "speak")).toMatchObject({ messageID: "b", revision: 0 });
+  h.reply(undefined, { messageID: "b", revision: 0, busy: true });
+  expect(h.ui.view("s")).toMatchObject({ canSpeak: false, canRepeat: false });
+  await h.ui.speak("s");
+  expect(h.sent.filter(m => m.kind === "speak")).toHaveLength(1);
+  h.reply(undefined, { messageID: "b", revision: 2, busy: false });
+  expect(h.ui.view("s")).toMatchObject({ canSpeak: false, canRepeat: true });
+  await h.ui.repeat("s");
+  expect(h.sent.find(m => m.kind === "repeat")).toMatchObject({ messageID: "b", revision: 2 });
+  expect(sameView(h.ui.view("s"), { ...h.ui.view("s"), canSpeak: true })).toBe(false);
   h.ui.dispose();
 });
 
@@ -111,10 +167,10 @@ test("confirmed pause and explicit backend unavailability override renewal eligi
 test("a paused or audio-less instance still accepts control and shows the confirmed state", async () => {
   for (const [state, paused] of [[{ paused: true }, true], [{ revision: 0 }, false]] as const) {
     const h = renewalHarness(); await h.accept();
-    expect(h.ui.view("s")).toEqual({ paused: false, enabled: true, canControl: true, canRepeat: true, playbackSpeed: 1 });
+    expect(h.ui.view("s")).toEqual({ paused: false, enabled: true, canControl: true, canRepeat: true, canSpeak: false, playbackSpeed: 1 });
     h.time(2750); h.ui.refresh("s"); await Promise.resolve();
     h.reply(undefined, state);
-    expect(h.ui.view("s")).toEqual({ paused, enabled: true, canControl: true, canRepeat: false, playbackSpeed: 1 });
+    expect(h.ui.view("s")).toEqual({ paused, enabled: true, canControl: true, canRepeat: false, canSpeak: false, playbackSpeed: 1 });
     h.time(3000); expect(h.ui.view("s").canControl).toBe(true);
     h.ui.dispose();
   }
@@ -122,7 +178,7 @@ test("a paused or audio-less instance still accepts control and shows the confir
 
 test("control needs a validated unexpired status for the displayed session; there is no optimistic state", async () => {
   const none = renewalHarness();
-  expect(none.ui.view("s")).toEqual({ paused: undefined, enabled: undefined, canControl: false, canRepeat: false, playbackSpeed: undefined });
+  expect(none.ui.view("s")).toEqual({ paused: undefined, enabled: undefined, canControl: false, canRepeat: false, canSpeak: false, playbackSpeed: undefined });
   await none.ui.togglePause("s");
   expect(none.sent).toHaveLength(0);
   none.ui.refresh("s"); await Promise.resolve(); // hello sent, no reply yet
@@ -133,7 +189,7 @@ test("control needs a validated unexpired status for the displayed session; ther
   const h = renewalHarness(); await h.accept();
   await h.ui.togglePause("other"); await h.ui.togglePause("");
   expect(h.sent.filter((m) => m.kind === "control")).toHaveLength(0);
-  h.time(3000); expect(h.ui.view("s")).toEqual({ paused: undefined, enabled: undefined, canControl: false, canRepeat: false, playbackSpeed: undefined });
+  h.time(3000); expect(h.ui.view("s")).toEqual({ paused: undefined, enabled: undefined, canControl: false, canRepeat: false, canSpeak: false, playbackSpeed: undefined });
   await h.ui.togglePause("s");
   expect(h.sent.filter((m) => m.kind === "control")).toHaveLength(0);
   h.ui.dispose();
@@ -157,7 +213,7 @@ test("togglePause publishes an explicit action for the confirmed state and asks 
   expect(h.ui.view("s").paused).toBe(false);
   // The confirmed reply to the fresh challenge drives the display and the next explicit action.
   h.reply(hellos()[1], { paused: true });
-  expect(h.ui.view("s")).toEqual({ paused: true, enabled: true, canControl: true, canRepeat: false, playbackSpeed: 1 });
+  expect(h.ui.view("s")).toEqual({ paused: true, enabled: true, canControl: true, canRepeat: false, canSpeak: false, playbackSpeed: 1 });
   await h.ui.togglePause("s");
   expect(h.sent.filter((m) => m.kind === "control").at(-1)).toMatchObject({ action: "resume" });
   expect(new Set(h.sent.filter((m) => m.kind === "control").map((m) => m.requestID)).size).toBe(2);
@@ -170,7 +226,7 @@ test("only one control publication is in flight and repeat is unavailable while 
   h.transport(() => new Promise<void>((done) => { resolve = done; }));
   const first = h.ui.togglePause("s"), second = h.ui.togglePause("s");
   expect(h.sent.filter((m) => m.kind === "control")).toHaveLength(1);
-  expect(h.ui.view("s")).toEqual({ paused: false, enabled: true, canControl: false, canRepeat: false, playbackSpeed: 1 });
+  expect(h.ui.view("s")).toEqual({ paused: false, enabled: true, canControl: false, canRepeat: false, canSpeak: false, playbackSpeed: 1 });
   await h.ui.repeat("s");
   expect(h.sent.filter((m) => m.kind === "repeat")).toHaveLength(0);
   h.transport(async () => {});
@@ -183,7 +239,7 @@ test("a control transport failure invalidates the status and leaves no optimisti
   const h = renewalHarness(); await h.accept();
   h.transport(async (m) => { if (m.kind === "control") throw new Error("transport failed"); });
   await h.ui.togglePause("s");
-  expect(h.ui.view("s")).toEqual({ paused: undefined, enabled: undefined, canControl: false, canRepeat: false, playbackSpeed: undefined });
+  expect(h.ui.view("s")).toEqual({ paused: undefined, enabled: undefined, canControl: false, canRepeat: false, canSpeak: false, playbackSpeed: undefined });
   expect(h.sent.filter((m) => m.kind === "hello")).toHaveLength(1);
   h.ui.dispose();
 });
@@ -192,7 +248,7 @@ test("session changes and replies from a second instance drop the displayed stat
   const h = renewalHarness(); await h.accept();
   h.time(2750); h.ui.refresh("s"); await Promise.resolve();
   h.reply(undefined, { instance: "b" });
-  expect(h.ui.view("s")).toEqual({ paused: undefined, enabled: undefined, canControl: false, canRepeat: false, playbackSpeed: undefined });
+  expect(h.ui.view("s")).toEqual({ paused: undefined, enabled: undefined, canControl: false, canRepeat: false, canSpeak: false, playbackSpeed: undefined });
   await h.ui.togglePause("s");
   expect(h.sent.filter((m) => m.kind === "control")).toHaveLength(0);
   h.ui.dispose();
@@ -365,7 +421,7 @@ test("On/Off sends nonce-targeted explicit requests and waits for confirmed repl
   expect(h.ui.view("s").enabled).toBe(true);
   h.reply(firstHello, { enabled: false }); expect(h.ui.view("s").enabled).toBe(true);
   h.reply(undefined, { enabled: false, revision: 3 });
-  expect(h.ui.view("s")).toEqual({ paused: false, enabled: false, canControl: true, canRepeat: false, playbackSpeed: 1 });
+  expect(h.ui.view("s")).toEqual({ paused: false, enabled: false, canControl: true, canRepeat: false, canSpeak: false, playbackSpeed: 1 });
   expect(repeatUi.canPause(h.ui.view("s"))).toBe(false);
   await h.ui.togglePause("s"); await h.ui.repeat("s");
   expect(h.sent.filter(m => m.kind === "control")).toHaveLength(1);
@@ -528,7 +584,7 @@ test("rate button shares one row with the other three buttons, confirmed fresh g
   expect(source).toContain("!canSetSpeed(view()) || !canSetSpeed(repeat.view(session()))");
   // No empty spacer slots: all four buttons are real buttons in one row, in this order.
   expect(source.match(/<box flexGrow=\{1\} flexBasis=\{0\} minWidth=\{8\} \/>/g)).toBeNull();
-  const order = ['(paused() ? "Resume" : "Pause")', 'button(() => "Voice"', 'button(() => "Repeat"', "speedLabel(view()"]
+  const order = ['(paused() ? "Resume" : "Pause")', 'button(() => "Voice"', 'button(() => view().canRepeat ? "Repeat" : "Speak"', "speedLabel(view()"]
     .map((marker) => source.indexOf(marker, source.indexOf("return (")));
   expect(order.every((i) => i > 0)).toBe(true);
   expect([...order].sort((a, b) => a - b)).toEqual(order);

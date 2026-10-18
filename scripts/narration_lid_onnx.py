@@ -20,6 +20,7 @@ import re
 
 from narration_lid import CHECKPOINT, LABELS, REVISION, TOKEN_LIMIT, sanitize_evidence, token_windows
 from narration_plan import utf16_length
+from runtime_device import create_onnx_session, probe_runtime
 
 MANIFEST_PATH = Path(__file__).resolve().parents[1] / 'resources' / 'lid-model-onnx-fp32.json'
 FILES = ('model.onnx', 'tokenizer/config.json', 'tokenizer/special_tokens_map.json',
@@ -121,12 +122,14 @@ def softmax(row):
 
 
 class OnnxDetector:
-    def __init__(self, model_directory, manifest_path=None):
+    def __init__(self, model_directory, manifest_path=None, *, runtime_device=None):
         self.model_directory = model_directory
         self.manifest_path = manifest_path
         self._runtime = None
         self._failure = None
         self._verified = False
+        self._device_candidate = runtime_device
+        self.device_diagnostics = []
 
     def _load(self):
         if self._runtime is not None or self._failure is not None:
@@ -166,22 +169,21 @@ class OnnxDetector:
             self._failure = 'missing-detector-dependencies'
             return
         try:
+            candidate = self._device_candidate or probe_runtime(ort=onnxruntime)
             tokenizer = TokenizerAdapter(Tokenizer.from_file(str((directory / 'tokenizer' / 'tokenizer.json').resolve())))
             options = onnxruntime.SessionOptions()
             options.intra_op_num_threads = 2
             options.inter_op_num_threads = 1
-            session = onnxruntime.InferenceSession(str((directory / 'model.onnx').resolve()), sess_options=options,
-                                                   providers=['CPUExecutionProvider'])
-            session.disable_fallback()
+            session, device = create_onnx_session(onnxruntime, (directory / 'model.onnx').resolve(), candidate, options)
             if (tokenizer.backend.token_to_id('[PAD]') != 0
                     or tuple(i.name for i in session.get_inputs()) != INPUT_NAMES
                     or any(i.type != 'tensor(int64)' for i in session.get_inputs())
-                    or [o.name for o in session.get_outputs()] != [OUTPUT_NAME]
-                    or list(session.get_providers()) != ['CPUExecutionProvider']):
+                    or [o.name for o in session.get_outputs()] != [OUTPUT_NAME]):
                 self._failure = 'invalid-loaded-model'
                 return
             self._runtime = (numpy, tokenizer, session)
             self._verified = True
+            self.device_diagnostics = ['lid-onnx-provider-' + device]
         except Exception:
             # Never emit exception strings: a third-party exception may contain prose.
             self._failure = 'local-model-load-failed'
