@@ -520,7 +520,8 @@ export async function speakOnce(text: string, env: Record<string, string | undef
 /** The player watches each playback by its own duration; this is only a last-resort ceiling for the sink. */
 const PLAYBACK_BACKSTOP_MS = 30 * 60_000;
 
-export const OpenVoxPlugin: Plugin = async ({ client, directory }) => {
+/** Transport-neutral plugin body shared by the V1 plugin and the OpenCode V2 adapter. */
+export function createPluginHooks(client: Client, directory: string, publish: (command: string) => Promise<void>): Hooks {
   const log = debugLog(envValue(process.env, "LOG"));
   let enabled = envValue(process.env, "DISABLED") !== "1" && process.platform === "win32";
   const config = createConfigReader();
@@ -565,21 +566,24 @@ export const OpenVoxPlugin: Plugin = async ({ client, directory }) => {
         catch (error) { log(`session.message threw ${String(error)}`); throw error; }
       },
       messages: async (input) => {
-        const result = await client.session.messages(input);
+        const result = await client.session.messages!(input);
         log(`session.messages ${result.error ? "error" : "ok"}`);
         return result as Result<MessageData[]>;
       },
     },
-  } : (client as unknown as Client);
+  } : client;
   const hooks = createOpenVox(traced, directory, withPause(logged, isPaused, pause.isEnabled), pause, {
     instance: cache?.instance,
-    publish: async (command) => {
-      const result = await client.tui.publish({ query: { directory },
-        body: { type: "tui.command.execute", properties: { command } }, signal: AbortSignal.timeout(2000) });
-      if (result.error || !result.data) throw new Error("Repeat status transport failed");
-    },
+    publish,
   });
   return { ...hooks, dispose: async () => {
     try { await hooks.dispose?.(); } finally { await player?.dispose(); }
   } };
-};
+}
+
+export const OpenVoxPlugin: Plugin = async ({ client, directory }) =>
+  createPluginHooks(client as unknown as Client, directory, async (command) => {
+    const result = await client.tui.publish({ query: { directory },
+      body: { type: "tui.command.execute", properties: { command } }, signal: AbortSignal.timeout(2000) });
+    if (result.error || !result.data) throw new Error("Repeat status transport failed");
+  });
