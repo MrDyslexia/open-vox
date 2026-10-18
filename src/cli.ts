@@ -270,7 +270,7 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
         deps.err(`Warning: could not move the old data folder: ${error instanceof Error ? error.message : String(error)}`);
       }
       const result = install({ fs: deps.installFs, configDir, repoRoot: deps.repoRoot, tuiTemplate: template, tui: wantTui });
-      if (result.removedLegacy) deps.out("Removed the old agentvoz plugin files.");
+      if (result.removedLegacy) deps.out("Removed old plugin files (agentvoz or the OpenCode 1.x sidebar layout).");
       deps.out(`Installed plugin: ${result.plugin}`);
       if (wantTui) deps.out(result.tui ? `Installed sidebar block: ${result.tuiFile}` : "Sidebar block NOT installed.");
       for (const warning of result.warnings) deps.err(`Warning: ${warning}`);

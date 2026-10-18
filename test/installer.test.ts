@@ -17,8 +17,12 @@ const ROOT = "C:\\repo\\agentVoz";
 const TEMPLATE = 'import { x } from "../src/config";\nexport default {};\n';
 const base = { configDir: CFG, repoRoot: ROOT, tuiTemplate: TEMPLATE };
 const PLUGIN = `${CFG}\\plugins\\open-vox.js`;
-const TUI_FILE = `${CFG}\\tui-plugins\\open-vox.tsx`;
+const TUI_FILE = `${CFG}\\tui-plugins\\open-vox\\tui.tsx`;
+const V1_TUI_FILE = `${CFG}\\tui-plugins\\open-vox.tsx`;
 const TUI_JSON = `${CFG}\\tui.json`;
+const CLI_JSON = `${CFG}\\cli.json`;
+const TUI_ENTRY = "file:///C:/u/.config/opencode/tui-plugins/open-vox";
+const registered = (fs: { files: Map<string, string> }) => JSON.parse(fs.files.get(CLI_JSON)!).plugins;
 
 describe("updateTuiConfig", () => {
   test("creates a config with the entry when none exists", () => {
@@ -44,13 +48,14 @@ describe("updateTuiConfig", () => {
 });
 
 describe("install", () => {
-  test("actual sidebar template copies the device formatter using the existing two import rewrites", () => {
+  test("actual sidebar template copies the device formatter rewriting every repository import", () => {
     const fs = memoryFs();
     const template = readFileSync(new URL("../tui/open-vox.tsx", import.meta.url), "utf8");
     install({ ...base, fs, tui: true, tuiTemplate: template });
     const copied = fs.files.get(TUI_FILE)!;
     expect(copied).toContain('from "file:///C:/repo/agentVoz/src/config.ts"');
     expect(copied).toContain('from "file:///C:/repo/agentVoz/src/repeat-ui.ts"');
+    expect(copied).toContain('from "file:///C:/repo/agentVoz/src/rpc.ts"');
     expect(copied).toContain("{deviceLabel(view())}");
     expect(copied).not.toContain('from "../src/');
   });
@@ -60,20 +65,35 @@ describe("install", () => {
     expect(fs.files.get(TUI_FILE)).toContain('from "file:///C:/repo/agentVoz/src/repeat-ui.ts"');
     expect(fs.files.get(TUI_FILE)).not.toContain('"../src/repeat-ui"');
   });
-  test("writes the server loader pointing at the repository", () => {
+  test("writes the V2 server loader pointing at the repository", () => {
     const fs = memoryFs();
     install({ ...base, fs, tui: false });
-    expect(fs.files.get(PLUGIN)).toBe('export { OpenVoxPlugin } from "file:///C:/repo/agentVoz/src/index.ts";\n');
+    expect(fs.files.get(PLUGIN)).toBe('export { default } from "file:///C:/repo/agentVoz/src/opencode-v2.ts";\n');
     expect(fs.files.has(TUI_FILE)).toBe(false);
-    expect(fs.files.has(TUI_JSON)).toBe(false);
+    expect(fs.files.has(CLI_JSON)).toBe(false);
   });
-  test("with tui, writes the generated TUI plugin with an absolute config import and registers it", () => {
-    const fs = memoryFs({ [TUI_JSON]: JSON.stringify({ plugin: ["other"] }) });
+  test("with tui, writes the TUI plugin directory and registers it in cli.json, keeping other entries and keys", () => {
+    const fs = memoryFs({ [CLI_JSON]: JSON.stringify({ plugins: ["other"], animations: true }) });
     const result = install({ ...base, fs, tui: true });
     expect(fs.files.get(TUI_FILE)).toContain('from "file:///C:/repo/agentVoz/src/config.ts"');
     expect(fs.files.get(TUI_FILE)).not.toContain('"../src/config"');
-    expect(JSON.parse(fs.files.get(TUI_JSON)!).plugin).toEqual(["other", TUI_FILE]);
-    expect(result.tui).toBe(true);
+    expect(registered(fs)).toEqual(["other", TUI_ENTRY]);
+    expect(JSON.parse(fs.files.get(CLI_JSON)!).animations).toBe(true);
+    expect(fs.files.has(TUI_JSON)).toBe(false);
+    expect(result).toMatchObject({ tui: true, tuiFile: TUI_FILE });
+  });
+  test("migrates the V1 single-file TUI and its tui.json entry, keeping other entries", () => {
+    const fs = memoryFs({ [V1_TUI_FILE]: "old", [TUI_JSON]: JSON.stringify({ plugin: ["other", V1_TUI_FILE] }) });
+    const result = install({ ...base, fs, tui: true });
+    expect(fs.files.has(V1_TUI_FILE)).toBe(false);
+    expect(JSON.parse(fs.files.get(TUI_JSON)!).plugin).toEqual(["other"]);
+    expect(registered(fs)).toEqual([TUI_ENTRY]);
+    expect(result.removedLegacy).toBe(true);
+  });
+  test("drops the V1 file entry OpenCode copied from tui.json into cli.json", () => {
+    const fs = memoryFs({ [CLI_JSON]: JSON.stringify({ plugins: ["other", V1_TUI_FILE] }) });
+    install({ ...base, fs, tui: true });
+    expect(registered(fs)).toEqual(["other", TUI_ENTRY]);
   });
   test("is idempotent", () => {
     const fs = memoryFs();
@@ -82,27 +102,28 @@ describe("install", () => {
     install({ ...base, fs, tui: true });
     expect(fs.files).toEqual(snapshot);
   });
-  test("a malformed tui.json fails the TUI step but keeps the server plugin installed", () => {
-    const fs = memoryFs({ [TUI_JSON]: "{ nope" });
+  test("a malformed cli.json fails the TUI step but keeps the server plugin installed", () => {
+    const fs = memoryFs({ [CLI_JSON]: "{ nope" });
     const result = install({ ...base, fs, tui: true });
     expect(fs.files.has(PLUGIN)).toBe(true);
+    expect(fs.files.has(TUI_FILE)).toBe(false);
     expect(result.tui).toBe(false);
-    expect(result.warnings.join(" ")).toMatch(/tui\.json/);
-    expect(fs.files.get(TUI_JSON)).toBe("{ nope");
+    expect(result.warnings.join(" ")).toMatch(/cli\.json/);
+    expect(fs.files.get(CLI_JSON)).toBe("{ nope");
   });
 });
 
 describe("uninstall and inspect", () => {
-  test("removes both loaders and the tui entry, leaving other entries", () => {
+  test("removes both loaders and the cli.json entry, leaving other entries", () => {
     const fs = memoryFs();
     install({ ...base, fs, tui: true });
-    const raw = JSON.parse(fs.files.get(TUI_JSON)!);
-    raw.plugin.push("other");
-    fs.files.set(TUI_JSON, JSON.stringify(raw));
+    const raw = JSON.parse(fs.files.get(CLI_JSON)!);
+    raw.plugins.push("other");
+    fs.files.set(CLI_JSON, JSON.stringify(raw));
     uninstall({ ...base, fs });
     expect(fs.files.has(PLUGIN)).toBe(false);
     expect(fs.files.has(TUI_FILE)).toBe(false);
-    expect(JSON.parse(fs.files.get(TUI_JSON)!).plugin).toEqual(["other"]);
+    expect(registered(fs)).toEqual(["other"]);
   });
   test("uninstalling when nothing is installed is a no-op", () => {
     expect(() => uninstall({ ...base, fs: memoryFs() })).not.toThrow();
@@ -126,7 +147,8 @@ describe("legacy cleanup", () => {
     const result = install({ ...base, fs, tui: true });
     expect(fs.files.has(OLD_PLUGIN)).toBe(false);
     expect(fs.files.has(OLD_TUI)).toBe(false);
-    expect(JSON.parse(fs.files.get(TUI_JSON)!).plugin).toEqual(["other", TUI_FILE]);
+    expect(JSON.parse(fs.files.get(TUI_JSON)!).plugin).toEqual(["other"]);
+    expect(registered(fs)).toEqual([TUI_ENTRY]);
     expect(result.removedLegacy).toBe(true);
   });
   test("uninstall also removes the pre-rename files", () => {

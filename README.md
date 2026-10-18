@@ -470,8 +470,15 @@ Cached audio is local sensitive content, not an encrypted archive or history.
 
 For the voice, the block and the CLI share the same settings file, so a change in
 one shows up in the other within a second. The block is a separate TUI plugin
-(`tui/open-vox.tsx`) that `install` copies into `~/.config/opencode/tui-plugins`
-and registers in `tui.json`; existing entries are preserved.
+(`tui/open-vox.tsx`). OpenCode 2.x loads TUI plugins only as directories, so `install`
+copies it to `~/.config/opencode/tui-plugins/open-vox/tui.tsx` and registers that
+directory in `cli.json` `plugins`; existing entries are preserved. It also removes a
+previous single-file install (`tui-plugins/open-vox.tsx` and its `tui.json` entry).
+
+On OpenCode 2.x the server loader in `plugins/open-vox.js` re-exports the V2 entrypoint
+`src/opencode-v2.ts`. The sidebar and the server plugin talk through the `open-vox` plugin
+RPC (`src/rpc.ts`), which replaces the V1 `tui.command.execute` channel; the encoded
+commands are unchanged.
 
 ## How it works
 

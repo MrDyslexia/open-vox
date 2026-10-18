@@ -332,24 +332,34 @@ test("sameView compares every rendered field", () => {
     expect(sameView(base, { ...base, ...change })).toBe(false);
 });
 
-test("sidebar renderer binds the session from the second public slot argument", async () => {
+test("V2 sidebar claim binds the session from the slot input and exports { id, setup }", async () => {
   const source = readFileSync(new URL("../tui/open-vox.tsx", import.meta.url), "utf8");
   // Execute the actual registration callback without mounting a renderer or reading settings.
-  const registration = source.slice(source.indexOf("const tui: TuiPlugin"))
+  const registration = source.slice(source.indexOf("const setup = "))
     .replace("export default plugin", "return plugin");
   const output = new Bun.Transpiler({ loader: "tsx", tsconfig: {
     compilerOptions: { jsx: "react", jsxFactory: "captureBlock" },
   } }).transformSync(registration);
   const plugin = new Function("Block", "captureBlock", "id", output)(
-    () => {}, (_component: unknown, props: { sessionID: string }) => props, "open-vox");
-  let renderer!: (context: { theme: object }, props: { session_id: string }) => { sessionID: string };
-  const api = { slots: { register(input: { slots: { sidebar_content: typeof renderer } }) {
-    renderer = input.slots.sidebar_content;
-  } } };
-  await plugin.tui(api);
-  // OpenTUI's public renderer calls entry.renderer(registry.context, slotProps).
-  expect(renderer({ theme: {} }, { session_id: "owner-session" }).sessionID).toBe("owner-session");
-  expect(renderer({ theme: {} }, { session_id: "other-session" }).sessionID).toBe("other-session");
+    () => {}, (_component: unknown, props: { ctx: unknown; sessionID: string }) => props, "open-vox");
+  expect(plugin.id).toBe("open-vox");
+  let claim!: { append: string; render: (input: { sessionID: string }) => { ctx: unknown; sessionID: string } };
+  const release = () => {};
+  const ctx = { ui: { slot(input: typeof claim) { claim = input; return release; } } };
+  // The returned cleanup releases the claim when the host disposes the plugin.
+  expect(await plugin.setup(ctx)).toBe(release);
+  expect(claim.append).toBe("sidebar.content");
+  expect(claim.render({ sessionID: "owner-session" })).toEqual({ ctx, sessionID: "owner-session" });
+  expect(claim.render({ sessionID: "other-session" }).sessionID).toBe("other-session");
+});
+
+test("V2 TUI talks to the server only through the open-vox RPC definition", () => {
+  const source = readFileSync(new URL("../tui/open-vox.tsx", import.meta.url), "utf8");
+  expect(source).toContain('import { OPEN_VOX_RPC } from "../src/rpc"');
+  expect(source).toContain('rpc.events.on("command"');
+  expect(source).toContain("rpc.command({ command }");
+  expect(source).not.toContain("tui.command.execute");
+  expect(source).not.toContain("@opencode-ai/plugin/tui");
 });
 
 test("subscribe precedes challenge; unknown, timeout, conflicting and other-session replies disable replay", async () => {

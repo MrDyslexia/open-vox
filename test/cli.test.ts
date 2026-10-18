@@ -195,12 +195,12 @@ describe("install / uninstall", () => {
     const { code, h } = await run(["install"]);
     expect(code).toBe(0);
     expect(h.files.has("C:\\cfg\\plugins\\open-vox.js")).toBe(true);
-    expect(h.files.has("C:\\cfg\\tui-plugins\\open-vox.tsx")).toBe(true);
+    expect(h.files.has("C:\\cfg\\tui-plugins\\open-vox\\tui.tsx")).toBe(true);
     expect(h.out.join("\n")).toMatch(/Restart OpenCode/i);
   });
   test("--no-tui skips the sidebar plugin", async () => {
     const { h } = await run(["install", "--no-tui"]);
-    expect(h.files.has("C:\\cfg\\tui-plugins\\open-vox.tsx")).toBe(false);
+    expect(h.files.has("C:\\cfg\\tui-plugins\\open-vox\\tui.tsx")).toBe(false);
   });
   test("uninstall removes them", async () => {
     const h = harness();
@@ -355,7 +355,14 @@ describe("data folder migration", () => {
     const h = harness();
     h.files.set("C:\\cfg\\plugins\\agentvoz.js", "old");
     await runCli(["install"], h.deps);
-    expect(h.out.join("\n")).toMatch(/Removed the old agentvoz/);
+    expect(h.out.join("\n")).toMatch(/Removed old plugin files/);
+  });
+  test("install reports the migrated OpenCode 1.x sidebar file", async () => {
+    const h = harness();
+    h.files.set("C:\\cfg\\tui-plugins\\open-vox.tsx", "old");
+    await runCli(["install"], h.deps);
+    expect(h.files.has("C:\\cfg\\tui-plugins\\open-vox.tsx")).toBe(false);
+    expect(h.out.join("\n")).toMatch(/OpenCode 1\.x sidebar layout/);
   });
 });
 

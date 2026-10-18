@@ -1,20 +1,21 @@
 // @ts-nocheck
 /** @jsxImportSource @opentui/solid */
-// OpenCode TUI plugin: confirmed instance controls in the sidebar.
-// `open-vox install` copies this file into the OpenCode config directory and rewrites
-// the "../src/config" import below to an absolute URL, so it resolves solid and opentui
-// from OpenCode's own dependencies (a second copy would break reactivity).
-import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
+// OpenCode V2 TUI plugin: confirmed instance controls in the sidebar.
+// `open-vox install` copies this file to `tui-plugins/open-vox/tui.tsx` in the OpenCode config
+// directory and rewrites the "../src/*" imports below to absolute URLs, so it resolves solid and
+// opentui from OpenCode's own dependencies (a second copy would break reactivity).
+import type { Context } from "@opencode/plugin/tui"
 import { For, createMemo, createSignal, onCleanup } from "solid-js"
 import { KOKORO_VOICES, readConfig, writeConfig } from "../src/config"
-import { createRepeatUi, buttonHandlers, canPause, canSetSpeed, deviceLabel, publishAttached, sameView, serviceIcon, speedLabel } from "../src/repeat-ui"
+import { createRepeatUi, buttonHandlers, canPause, canSetSpeed, deviceLabel, sameView, serviceIcon, speedLabel } from "../src/repeat-ui"
+import { OPEN_VOX_RPC } from "../src/rpc"
 
 const id = "open-vox"
 
 const label = (voiceId: string) => KOKORO_VOICES.find((v) => v.id === voiceId)?.label ?? voiceId
 
-function Block(props: { api: TuiPluginApi; sessionID: string }) {
-  const theme = () => props.api.theme.current
+function Block(props: { ctx: Context; sessionID: string }) {
+  const theme = () => props.ctx.theme
   const [config, setConfig] = createSignal(readConfig())
   // The CLI and other sessions can change the shared voice settings, so keep the block in sync.
   // Pause is not a shared setting: it is per plugin instance and shown from the confirmed status reply.
@@ -22,14 +23,17 @@ function Block(props: { api: TuiPluginApi; sessionID: string }) {
   onCleanup(() => clearInterval(timer))
 
   const session = () => {
-    const route = props.api.route.current
-    return route.name === "session" && route.params?.sessionID === props.sessionID ? props.sessionID : ""
+    const route = props.ctx.ui.router.current()
+    return route.type === "session" && route.sessionID === props.sessionID ? props.sessionID : ""
   }
   // Pause, service and playback preference remain neutral until confirmed by this instance.
   const [view, setView] = createSignal({ paused: undefined, enabled: undefined, canControl: false, canRepeat: false, canSpeak: false, playbackSpeed: undefined }, { equals: sameView })
+  // V2 replaces the V1 TUI command bus with plugin RPC: requests are method calls to the
+  // server plugin of this TUI's location, replies arrive as RPC events.
+  const rpc = props.ctx.client.rpc(OPEN_VOX_RPC)
   const repeat = createRepeatUi({
-    subscribe: (receive) => props.api.event.on("tui.command.execute", (event) => receive(event.properties.command)),
-    publish: (command) => publishAttached(props.api.client, props.api.state.path.directory, command),
+    subscribe: (receive) => rpc.events.on("command", (event) => receive(event.data.command)),
+    publish: async (command) => { await rpc.command({ command }, props.ctx.location ? { location: props.ctx.location } : undefined) },
     onChange: () => setView(repeat.view(session())),
   })
   const paused = () => view().paused === true
@@ -46,27 +50,23 @@ function Block(props: { api: TuiPluginApi; sessionID: string }) {
   onCleanup(() => { clearInterval(repeatTimer); repeat.dispose() })
 
   const chooseVoice = () => {
-    props.api.ui.dialog.replace(() => (
-      <props.api.ui.DialogSelect
-        title="open-vox voice"
-        options={KOKORO_VOICES.map((v) => ({
-          title: `${v.label}`,
-          value: v.id,
-          description: `${v.gender}, ${v.accent}`,
-          category: v.language === "es" ? "Spanish" : "English",
-        }))}
-        onSelect={(option) => {
-          const voice = KOKORO_VOICES.find((v) => v.id === option.value)
-          if (!voice) return
-          setConfig(writeConfig({ voices: { [voice.language]: voice.id } }))
-          props.api.ui.dialog.clear()
-          props.api.ui.toast({
-            variant: "success",
-            message: `${voice.language === "es" ? "Spanish" : "English"} voice: ${voice.label}`,
-          })
-        }}
-      />
-    ))
+    void props.ctx.ui.dialog.select({
+      title: "open-vox voice",
+      options: KOKORO_VOICES.map((v) => ({
+        title: `${v.label}`,
+        value: v.id,
+        description: `${v.gender}, ${v.accent}`,
+        category: v.language === "es" ? "Spanish" : "English",
+      })),
+    }).then((value) => {
+      const voice = KOKORO_VOICES.find((v) => v.id === value)
+      if (!voice) return
+      setConfig(writeConfig({ voices: { [voice.language]: voice.id } }))
+      props.ctx.ui.toast.show({
+        variant: "success",
+        message: `${voice.language === "es" ? "Spanish" : "English"} voice: ${voice.label}`,
+      })
+    }, () => {})
   }
 
   // `onRelease` buttons act on mouse-up. A button that opens a dialog must do this: the host
@@ -126,17 +126,12 @@ function Block(props: { api: TuiPluginApi; sessionID: string }) {
   )
 }
 
-const tui: TuiPlugin = async (api) => {
-  api.slots.register({
-    order: 150,
-    slots: {
-      sidebar_content(_context, props) {
-        return <Block api={api} sessionID={props.session_id} />
-      },
-    },
+const setup = (ctx: Context) =>
+  ctx.ui.slot({
+    append: "sidebar.content",
+    render: (input) => <Block ctx={ctx} sessionID={input.sessionID} />,
   })
-}
 
-const plugin = { id, tui }
+const plugin = { id, setup }
 
 export default plugin
