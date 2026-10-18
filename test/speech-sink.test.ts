@@ -28,6 +28,110 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 const item = (id: string, text: string) => ({ sessionID: "s", messageID: id, text });
 
 describe("speech sink", () => {
+  test("settings invalidate devices without releasing idle models; Off and disposal release them", async () => {
+    let identity = "settings-a", on = true, releases = 0, disposals = 0;
+    const engine = Object.assign(() => ({ exited: Promise.resolve(0), kill() {}, devices: () => ({ kokoro: "cpu" as const }) }), {
+      release() { releases++; }, async dispose() { disposals++; },
+    });
+    const sink = createSpeechSink({ engine, deviceIdentity: () => identity, isEnabled: () => on });
+    await sink(item("a", "Narration")); expect(sink.devices!("s")).toEqual({ kokoro: "cpu" });
+    identity = "settings-b"; expect(sink.devices!("s")).toBeUndefined(); expect(releases).toBe(0);
+    on = false; sink.status!(); expect(releases).toBe(1);
+    await sink.dispose!(); expect(disposals).toBe(1); expect(releases).toBe(2);
+  });
+  test("deleting active session A preserves queued session B", async () => {
+    const h = harness(); const sink = createSpeechSink({ spawn: h.spawn });
+    const a = sink({ sessionID: "A", messageID: "a", text: "First" });
+    const b = sink({ sessionID: "B", messageID: "b", text: "Second" });
+    sink.removeSession!("A"); await tick();
+    expect(h.procs).toHaveLength(2);
+    h.procs[1]!.finish(); await Promise.all([a, b]); await sink.dispose!();
+  });
+  test.each(["failure", "rejection", "timeout", "pause", "session", "remove", "off", "dispose"])("%s cannot publish a late successful device snapshot", async action => {
+    let finish!: (code: number) => void, reject!: (error: Error) => void, on = true;
+    const sink = createSpeechSink({ timeoutMs: 10, isEnabled: () => on, engine: () => ({
+      exited: new Promise<number>((resolve, fail) => { finish = resolve; reject = fail; }),
+      devices: () => ({ lid: "gpu", kokoro: "cpu" }),
+      kill() { if (action === "timeout") finish(0); },
+    }) });
+    const pending = sink(item("a", "Fake narration"));
+    let disposal: Promise<void> | undefined;
+    if (action === "failure") finish(2);
+    else if (action === "rejection") reject(new Error("fake failure"));
+    else if (action === "timeout") await new Promise(resolve => setTimeout(resolve, 25));
+    else {
+      if (action === "pause") { sink.pause!(); sink.resume!(); }
+      if (action === "session") sink.stopSession!("s");
+      if (action === "remove") sink.removeSession!("s");
+      if (action === "off") { on = false; sink.devices!("s"); on = true; }
+      if (action === "dispose") disposal = sink.dispose!();
+      finish(0);
+    }
+    await pending; await disposal;
+    expect(sink.devices!("s")).toBeUndefined();
+    await sink.dispose!();
+  });
+
+  test("cached success captures its exact synthesis snapshot; Repeat never reads another process", async () => {
+    let snapshot: any = { lid: "gpu", kokoro: "cpu" }, finish!: (code: number) => void, syntheses = 0;
+    const cache = { candidate: () => "wav", current: () => ({ file: "wav", sessionID: "s", revision: 1 }),
+      promote: () => true, discard() {}, hold: () => () => {}, forget() {}, clear() {}, dispose() {} };
+    const engine = Object.assign(() => { throw Error("uncached path"); }, {
+      synthesizePlan: () => { syntheses++; return { exited: Promise.resolve(0), kill() {}, devices: () => snapshot }; },
+    });
+    const sink = createSpeechSink({ cache, engine,
+      player: () => ({ exited: new Promise<number>(resolve => { finish = resolve; }), kill() {} }) });
+    const pending = sink(item("a", "Fake cached narration")); await tick();
+    snapshot.lid = "cpu";
+    expect(sink.devices!("s")).toBeUndefined();
+    finish(0); await pending;
+    expect(sink.devices!("s")).toEqual({ lid: "gpu", kokoro: "cpu" });
+    const replay = sink.repeat!("s", 1); finish(0); await replay;
+    expect(syntheses).toBe(1); expect(sink.devices!("s")).toEqual({ lid: "gpu", kokoro: "cpu" });
+    const failed = sink(item("b", "Failed player")); await tick(); finish(1); await failed;
+    expect(sink.devices!("s")).toBeUndefined();
+    await sink.dispose!();
+  });
+
+  test("runtime enum validation and legacy engines leave unknown models pending", async () => {
+    for (const value of [undefined, null, "cpu", { lid: "cuda", kokoro: "gpu" }, { lid: "cpu", kokoro: false }]) {
+      const sink = createSpeechSink({ engine: () => ({ exited: Promise.resolve(0), kill() {}, devices: () => value as any }) });
+      await sink(item("a", "Fake narration"));
+      expect(sink.devices!("s")).toEqual(value && typeof value === "object"
+        ? (value.lid === "cpu" ? { lid: "cpu" } : { kokoro: "gpu" }) : {});
+      await sink.dispose!();
+    }
+  });
+
+  test("a snapshot reader that invalidates its own generation cannot publish", async () => {
+    const sink = createSpeechSink({ engine: () => ({ exited: Promise.resolve(0), kill() {},
+      devices: () => { sink.stop(); return { kokoro: "gpu" }; } }) });
+    await sink(item("a", "Cancelled by snapshot reader"));
+    expect(sink.devices!("s")).toBeUndefined(); await sink.dispose!();
+  });
+  test("device snapshots replace each run and cannot survive cancellation or config changes", async () => {
+    let identity = "onnx", finish!: (code: number) => void;
+    let devices: unknown = { lid: "cpu", kokoro: "gpu" };
+    const sink = createSpeechSink({ deviceIdentity: () => identity, engine: () => ({
+      exited: new Promise<number>(resolve => { finish = resolve; }), kill() {}, devices: () => devices as any,
+    }) });
+    expect(sink.devices?.("s")).toBeUndefined();
+    const first = sink(item("a", "First")); finish(0); await first;
+    expect(sink.devices?.("s")).toEqual({ lid: "cpu", kokoro: "gpu" });
+    expect(sink.devices?.("other")).toBeUndefined();
+    devices = { kokoro: "cpu" };
+    const second = sink(item("b", "Second"));
+    expect(sink.devices?.("s")).toBeUndefined();
+    finish(0); await second;
+    expect(sink.devices?.("s")).toEqual({ kokoro: "cpu" });
+    identity = "torch";
+    expect(sink.devices?.("s")).toBeUndefined();
+    const stale = sink(item("c", "Stale")); identity = "onnx"; finish(0); await stale;
+    expect(sink.devices?.("s")).toBeUndefined();
+    const cancelled = sink(item("d", "Cancelled")); sink.stop(); finish(0); await cancelled;
+    expect(sink.devices?.("s")).toBeUndefined();
+    await sink.dispose!();
+  });
   test.each(["stopSession", "removeSession", "pause"] as const)("%s invalidates asynchronous preparation before it can be retried", async action => {
     let finish!: (plan: ReturnType<typeof createNarrationPlan>) => void;
     const h = harness();

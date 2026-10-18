@@ -21,6 +21,42 @@ function renewalHarness() {
     async accept() { ui.refresh("s"); await Promise.resolve(); reply(); now = 1250; expect(ui.available("s")).toBe(true); } };
 }
 
+test("per-model device labels follow correlated renewal, replacement, session and TTL", async () => {
+  const h = renewalHarness(); await h.accept();
+  expect(repeatUi.deviceLabel(h.ui.view("s"))).toBe("LID: Pending · Kokoro: Pending");
+  h.time(2750); h.ui.refresh("s"); await Promise.resolve();
+  h.reply(undefined, { lidDevice: "cpu", kokoroDevice: "gpu" });
+  expect(repeatUi.deviceLabel(h.ui.view("s"))).toBe("LID: CPU · Kokoro: GPU");
+  expect(sameView(h.ui.view("s"), { ...h.ui.view("s"), lidDevice: "gpu" })).toBe(false);
+  h.reply(undefined, { kokoroDevice: "cpu" });
+  expect(repeatUi.deviceLabel(h.ui.view("s"))).toBe("LID: Pending · Kokoro: CPU");
+  expect(repeatUi.deviceLabel(h.ui.view("other"))).toBe("LID: Pending · Kokoro: Pending");
+  h.time(4750);
+  expect(repeatUi.deviceLabel(h.ui.view("s"))).toBe("LID: Pending · Kokoro: Pending");
+  h.ui.dispose();
+});
+
+test("device status ignores malformed and uncorrelated replies; Off and conflicts stay pending", async () => {
+  const h = renewalHarness(); await h.accept();
+  h.time(2750); h.ui.refresh("s"); await Promise.resolve();
+  for (const extra of [{ challenge: "wrong" }, { sessionID: "other" }, { expires: 9999 }, { lidDevice: "cuda" }])
+    h.reply(undefined, { kokoroDevice: "gpu", ...extra } as any);
+  expect(repeatUi.deviceLabel(h.ui.view("s"))).toBe("LID: Pending · Kokoro: Pending");
+  h.reply(undefined, { lidDevice: "gpu", kokoroDevice: "cpu", enabled: false });
+  expect(repeatUi.deviceLabel(h.ui.view("s"))).toBe("LID: Pending · Kokoro: Pending");
+  h.reply(undefined, { lidDevice: "gpu", kokoroDevice: "cpu", instance: "other" });
+  expect(repeatUi.deviceLabel(h.ui.view("s"))).toBe("LID: Pending · Kokoro: Pending");
+  h.ui.dispose();
+});
+
+test("sidebar device row is muted below the title and before buttons, and TSX transpiles", () => {
+  const source = readFileSync(new URL("../tui/open-vox.tsx", import.meta.url), "utf8");
+  const row = '<text fg={theme().textMuted} wrapMode="word">{deviceLabel(view())}</text>';
+  expect(source.indexOf(row)).toBeGreaterThan(source.indexOf("<b>Open-Vox</b>"));
+  expect(source.indexOf(row)).toBeLessThan(source.indexOf('{button(() => (paused()'));
+  expect(new Bun.Transpiler({ loader: "tsx" }).transformSync(source)).toContain("deviceLabel(view())");
+});
+
 test("healthy renewal stays available through unresolved hello publication and settlement", async () => {
   const h = renewalHarness(); await h.accept();
   let resolve!: () => void;

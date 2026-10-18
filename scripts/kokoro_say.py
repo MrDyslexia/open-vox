@@ -8,6 +8,7 @@ from pathlib import Path
 
 import soundfile as sf
 from kokoro_onnx import Kokoro
+from runtime_device import create_onnx_session, probe_runtime
 
 LID_BACKENDS = ('torch', 'onnx')
 TONE_WEIGHT_MIN = 0.0
@@ -76,16 +77,23 @@ def validate_tone_voice(kokoro, tone_voice) -> None:
         raise ValueError('unknown-tone-voice')
 
 
-def build_detector(backend, lid_dir, app_home, manifest):
-    """Imports only the selected backend's module; torch behavior is exactly the pre-existing one."""
+def build_detector(backend, lid_dir, app_home, manifest, runtime_device=None):
+    """Imports only the selected backend; construction remains lazy."""
     if backend == 'onnx':
         from narration_lid_onnx import OnnxDetector
-        return OnnxDetector(Path(lid_dir), manifest)
+        return OnnxDetector(Path(lid_dir), manifest, runtime_device=runtime_device)
     if not app_home:
         return None
     from narration_lid import LocalDetector
     from narration_synthesis import local_lid_directory
-    return LocalDetector(local_lid_directory(app_home), manifest)
+    return LocalDetector(local_lid_directory(app_home), manifest, runtime_device=runtime_device)
+
+
+def load_kokoro(model, voices, candidate):
+    """Inject an explicit file-backed session; ignore library provider defaults."""
+    import onnxruntime
+    session, device = create_onnx_session(onnxruntime, model, candidate)
+    return Kokoro.from_session(session, voices), 'kokoro-onnx-provider-' + device
 
 
 def main(argv=None) -> int:
@@ -109,15 +117,17 @@ def main(argv=None) -> int:
             from narration_resolver import resolve_plan
             from narration_synthesis import load_plan, raw_phonemizer, synthesize_envelope
             plan = load_plan(sys.stdin)
-            detector = build_detector(args.lid_backend, args.lid_dir, args.app_home, args.lid_manifest)
+            candidate = probe_runtime(include_torch=args.lid_backend == 'torch' and bool(args.app_home))
+            detector = build_detector(args.lid_backend, args.lid_dir, args.app_home, args.lid_manifest, candidate)
             resolved = resolve_plan(plan, detector)
-            kokoro = Kokoro(args.model, args.voices)
+            kokoro, kokoro_device = load_kokoro(args.model, args.voices, candidate)
             if args.tone_weight > 0:
                 validate_tone_voice(kokoro, args.tone_voice)
             english = args.lang if args.lang in ('en-us', 'en-gb') else 'en-us'
             synthesize_envelope(resolved, kokoro, args.voice, args.speed, args.out, raw_phonemizer(kokoro, english),
                                 tone_voice=args.tone_voice, tone_weight=args.tone_weight)
-            codes = sorted({d['code'] for d in resolved['diagnostics']})
+            codes = sorted({d['code'] for d in resolved['diagnostics']} | {kokoro_device}
+                           | set(detector.device_diagnostics if detector else []))
             if plan['outcome'] != 'complete':
                 codes.append('narration-truncated')
             json.dump({'diagnostics': codes}, sys.stdout)
@@ -128,9 +138,15 @@ def main(argv=None) -> int:
     text = sys.stdin.buffer.read().decode("utf-8", errors="replace").strip()
     if not text:
         return 2
-    kokoro = Kokoro(args.model, args.voices)
-    samples, rate = kokoro.create(text, voice=args.voice, speed=args.speed, lang=args.lang)
-    sf.write(args.out, samples, rate)
+    try:
+        candidate = probe_runtime()
+        kokoro, kokoro_device = load_kokoro(args.model, args.voices, candidate)
+        samples, rate = kokoro.create(text, voice=args.voice, speed=args.speed, lang=args.lang)
+        sf.write(args.out, samples, rate)
+        json.dump({'diagnostics': [kokoro_device]}, sys.stdout)
+    except Exception:
+        sys.stderr.write('Narration synthesis failed\n')
+        return 2
     return 0
 
 

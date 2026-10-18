@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 
 from narration_plan import utf16_length
+from runtime_device import acceleration_error, probe_runtime
 
 LABELS = ('O', 'ambiguous', 'en', 'fw', 'mixed', 'ne', 'other', 'spa', 'unk')
 CHECKPOINT = 'sagorsarker/codeswitch-spaeng-lid-lince'
@@ -123,11 +124,14 @@ def token_windows(text, tokenizer, maximum=TOKEN_LIMIT):
 
 
 class LocalDetector:
-    def __init__(self, model_directory, manifest_path=None):
+    def __init__(self, model_directory, manifest_path=None, *, runtime_device=None):
         self.model_directory = model_directory
         self.manifest_path = manifest_path
         self._runtime = None
         self._failure = None
+        self._device_candidate = runtime_device
+        self._device = 'cpu'
+        self.device_diagnostics = []
 
     def _load(self):
         if self._runtime is not None or self._failure is not None:
@@ -168,18 +172,37 @@ class LocalDetector:
             return
         try:
             # Absolute existing filesystem path only: never pass a hub identifier.
+            candidate = self._device_candidate or probe_runtime(include_torch=True, torch=torch)
             path = str(directory.resolve())
             tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True,
                                                        trust_remote_code=False, use_fast=True)
             model = AutoModelForTokenClassification.from_pretrained(
-                path, local_files_only=True, trust_remote_code=False, use_safetensors=True)
+                path, local_files_only=True, trust_remote_code=False, use_safetensors=True,
+                torch_dtype=torch.float32)
             if (not tokenizer.is_fast or model.config.num_labels != len(LABELS)
                     or model.config.id2label != {i: label for i, label in enumerate(LABELS)}):
                 self._failure = 'invalid-loaded-model'
                 return
-            model.to('cpu')
+            self._device = 'cuda' if candidate.torch_cuda else 'cpu'
+            try:
+                model.to(self._device)
+            except Exception as error:
+                if self._device != 'cuda' or not acceleration_error(error):
+                    raise
+                # A partially moved model is not reused. Loading/validation
+                # failures above never enter this accelerator-only fallback.
+                model = AutoModelForTokenClassification.from_pretrained(
+                    path, local_files_only=True, trust_remote_code=False, use_safetensors=True,
+                    torch_dtype=torch.float32)
+                if (model.config.num_labels != len(LABELS)
+                        or model.config.id2label != {i: label for i, label in enumerate(LABELS)}):
+                    self._failure = 'invalid-loaded-model'
+                    return
+                self._device = 'cpu'
+                model.to(self._device)
             model.eval()
             self._runtime = (torch, tokenizer, model)
+            self.device_diagnostics = ['lid-torch-device-' + self._device]
         except Exception:
             # Dependency/version/asset failures are operational negatives, not detection.
             # Never emit exception strings: a third-party exception may contain prose.
@@ -215,7 +238,7 @@ class LocalDetector:
                 if size > TOKEN_LIMIT or len(offsets) != size:
                     raise ValueError('token budget or mapping')
                 with torch.no_grad():
-                    logits = model(**{key: value.to('cpu') for key, value in encoded.items()}).logits
+                    logits = model(**{key: value.to(self._device) for key, value in encoded.items()}).logits
                     if tuple(logits.shape) != (1, size, len(LABELS)) or not torch.isfinite(logits).all():
                         raise ValueError('invalid logits')
                     scores = torch.softmax(logits, dim=-1)[0].tolist()

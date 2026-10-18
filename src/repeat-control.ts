@@ -3,6 +3,16 @@ import { randomUUID } from "node:crypto";
 export const REPEAT_PREFIX = "open-vox.repeat.v1:";
 export const CONTROL_TTL = 2000;
 export type AudioStatus = { sessionID: string; revision: number; messageID?: string };
+export type ModelDevice = "cpu" | "gpu";
+export type ModelDevices = { lid?: ModelDevice; kokoro?: ModelDevice };
+export const isModelDevice = (value: unknown): value is ModelDevice => value === "cpu" || value === "gpu";
+/** Copy only confirmed enum values, never references owned by a process or caller. */
+export function modelDevices(value: unknown): ModelDevices {
+  if (!value || typeof value !== "object") return {};
+  const { lid, kokoro } = value as ModelDevices;
+  return { ...(isModelDevice(lid) ? { lid } : {}),
+    ...(isModelDevice(kokoro) ? { kokoro } : {}) };
+}
 /** Runtime actions a TUI may request. New actions are added here and nowhere else in the wire format. */
 export const CONTROL_ACTIONS = ["pause", "resume", "disable", "enable", "speed:1", "speed:1.5", "speed:2"] as const;
 export type ControlAction = (typeof CONTROL_ACTIONS)[number];
@@ -35,6 +45,8 @@ export type ControlMessage = {
   enabled?: boolean;
   /** An older status without this field decodes as 1x. */
   playbackSpeed?: PlaybackSpeed;
+  lidDevice?: ModelDevice;
+  kokoroDevice?: ModelDevice;
   requestID?: string;
   action?: ControlAction;
 };
@@ -57,6 +69,8 @@ export function decodeCommand(command: unknown): ControlMessage | undefined {
     if (m.kind === "status" && id(m.challenge) && typeof m.paused === "boolean") {
       if (m.enabled !== undefined && typeof m.enabled !== "boolean") return;
       if (m.playbackSpeed !== undefined && !isPlaybackSpeed(m.playbackSpeed)) return;
+      if (m.lidDevice !== undefined && !isModelDevice(m.lidDevice)) return;
+      if (m.kokoroDevice !== undefined && !isModelDevice(m.kokoroDevice)) return;
       return { ...m, enabled: m.enabled ?? true, playbackSpeed: m.playbackSpeed ?? 1 };
     }
     if (m.kind === "repeat" && id(m.requestID)) return m;
@@ -77,6 +91,7 @@ export function createRepeatControl(options: {
   isEnabled?: () => boolean;
   /** Hosts without a runtime rate reader report the compatible 1x default. */
   getPlaybackSpeed?: () => PlaybackSpeed;
+  devices?: (sessionID: string) => ModelDevices | undefined;
   /** Applies a validated control action to the instance state; failures stay inside the host hook. */
   control?: (action: ControlAction) => void | Promise<void>;
   repeat: (sessionID: string, revision: number, expires: number) => Promise<void>;
@@ -112,10 +127,12 @@ export function createRepeatControl(options: {
             const matches = status?.sessionID === m.sessionID && (!options.latest ||
               (!!target && target.messageID === status.messageID));
             const speed: unknown = options.getPlaybackSpeed?.();
+            const devices = modelDevices((options.isEnabled?.() ?? true) ? options.devices?.(m.sessionID) : undefined);
             await options.publish(encodeCommand({ kind: "status", challenge: m.challenge, instance,
               sessionID: m.sessionID, revision: matches ? status!.revision : 0,
               messageID: target?.messageID, busy: target?.busy,
               paused: options.isPaused(), enabled: options.isEnabled?.() ?? true,
+              lidDevice: devices.lid, kokoroDevice: devices.kokoro,
               // An invalid host reader must never publish an undecodable rate.
               playbackSpeed: isPlaybackSpeed(speed) ? speed : 1, expires: m.expires }));
           } finally { publishing = false; }

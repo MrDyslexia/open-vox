@@ -2,6 +2,28 @@ import { expect, test } from "bun:test";
 import { createRepeatControl, encodeCommand, decodeCommand } from "../src/repeat-control";
 import * as rateControl from "../src/repeat-control";
 
+test("device status uses validated optional enums, correlated session reads and Off gating", async () => {
+  let reads = 0;
+  expect(rateControl.modelDevices({ get lid() { return ++reads === 1 ? "cpu" : "invalid"; } })).toEqual({ lid: "cpu" });
+  expect(reads).toBe(1);
+  let enabled = true;
+  const replies: string[] = [], sessions: string[] = [];
+  const control = createRepeatControl({ now: () => 1000, status: () => undefined, isPaused: () => false,
+    isEnabled: () => enabled, devices: session => { sessions.push(session); return { lid: "cpu", kokoro: "gpu" }; },
+    repeat: async () => {}, publish: async command => { replies.push(command); } });
+  const hello = () => control.handle(encodeCommand({ kind: "hello", sessionID: "s", challenge: "c", expires: 2000 }));
+  await hello();
+  const status = decodeCommand(replies[0])!;
+  expect(status).toMatchObject({ lidDevice: "cpu", kokoroDevice: "gpu", challenge: "c", sessionID: "s" });
+  for (const value of ["cuda", "GPU", "", null, 0, {}]) {
+    expect(decodeCommand(encodeCommand({ ...status, lidDevice: value } as any))).toBeUndefined();
+    expect(decodeCommand(encodeCommand({ ...status, kokoroDevice: value } as any))).toBeUndefined();
+  }
+  enabled = false; await hello();
+  expect(decodeCommand(replies[1])?.kokoroDevice).toBeUndefined(); expect(sessions).toEqual(["s"]);
+  control.dispose();
+});
+
 test("Speak validates latest ownership, busy state, service gates, expiry and shared deduplication", async () => {
   let busy = true, enabled = true, paused = false, target = "b", requests = 0;
   const replies: string[] = [];

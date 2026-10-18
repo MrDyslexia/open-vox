@@ -6,6 +6,7 @@ import type { Language } from "./speech-text";
 export type EngineName = "auto" | "kokoro" | "piper" | "sapi";
 /** Contextual language-detector backend. `torch` is the default; `onnx` is explicit opt-in. */
 export type NarrationBackend = "torch" | "onnx";
+export type RuntimeProfile = "cpu" | "cuda13";
 /** Shared persisted defaults only. Runtime controls such as pause live in memory, per plugin instance. */
 export type Config = {
   narrationLanguage: Language;
@@ -15,6 +16,7 @@ export type Config = {
   speed: number;
   engine: EngineName;
   narrationBackend: NarrationBackend;
+  runtimeProfile: RuntimeProfile;
 };
 export type ConfigPatch = {
   narrationLanguage?: Language;
@@ -24,6 +26,7 @@ export type ConfigPatch = {
   speed?: number;
   engine?: EngineName;
   narrationBackend?: NarrationBackend;
+  runtimeProfile?: RuntimeProfile;
 };
 export type ConfigFs = {
   read: (path: string) => string;
@@ -60,6 +63,7 @@ export const DEFAULT_CONFIG: Config = {
   speed: 1,
   engine: "auto",
   narrationBackend: "torch",
+  runtimeProfile: "cpu",
 };
 
 const ENGINES: readonly EngineName[] = ["auto", "kokoro", "piper", "sapi"];
@@ -102,6 +106,7 @@ export function parseConfig(raw: unknown): Config {
     speed: validSpeed(input.speed) ? input.speed : DEFAULT_CONFIG.speed,
     engine: ENGINES.includes(input.engine as EngineName) ? (input.engine as EngineName) : DEFAULT_CONFIG.engine,
     narrationBackend: input.narrationBackend === "onnx" ? "onnx" : "torch",
+    runtimeProfile: input.runtimeProfile === "cuda13" ? "cuda13" : "cpu",
   };
 }
 
@@ -142,6 +147,19 @@ export function writeConfig(patch: ConfigPatch, path: string = configPath(), fs:
   });
   fs.writeAtomic(path, JSON.stringify(next, null, 2) + "\n");
   return next;
+}
+
+/** Profile activation changes precisely one raw JSON field, preserving unknown
+ * settings as well as voices/tone/backend. Invalid existing files are not repaired.
+ * Qualification is the caller's gate; this function never provisions anything.
+ */
+export function writeRuntimeProfile(profile: RuntimeProfile, path: string = configPath(), fs: ConfigFs = nodeConfigFs): Config {
+  if (profile !== "cpu" && profile !== "cuda13") throw Error("Invalid runtime profile");
+  const current: unknown = JSON.parse(fs.read(path));
+  if (!current || typeof current !== "object" || Array.isArray(current)) throw Error("Invalid existing configuration; preserved");
+  const next = { ...current, runtimeProfile: profile };
+  fs.writeAtomic(path, JSON.stringify(next, null, 2) + "\n");
+  return parseConfig(next);
 }
 
 export type ConfigReader = (() => Config) & { invalidate(): void };

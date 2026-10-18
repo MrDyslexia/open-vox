@@ -4,9 +4,11 @@ import { type Language } from "./speech-text";
 import { createNarrationPlan } from "./markdown-narration";
 import { defaultNarrationPolicies, flattenNarrationPlan, type NarrationPlan } from "./narration-plan";
 import type { AudioStore } from "./audio-cache";
-import type { AudioStatus } from "./repeat-control";
+import { modelDevices, type ModelDevices, type AudioStatus } from "./repeat-control";
 
 export type SpeechProcess = {
+  /** One whole per-worker snapshot, available only after successful synthesis. */
+  devices?: () => ModelDevices | undefined;
   exited: Promise<number>;
   kill(): void;
   /**
@@ -21,6 +23,10 @@ export type SpeechProcess = {
 };
 export type Spawn = (args: string[], stdin: string) => SpeechProcess;
 export type Engine = ((text: string, language: Language) => SpeechProcess) & {
+  workerSnapshot?: () => import("./narration-worker").WorkerSnapshot;
+  /** Retire owned model processes without permanently disabling the engine. */
+  release?: () => void;
+  dispose?: () => Promise<void>;
   synthesize?: (text: string, language: Language, wav: string) => SpeechProcess;
   synthesizePlan?: (plan: NarrationPlan, wav: string) => SpeechProcess;
   speakPlan?: (plan: NarrationPlan) => SpeechProcess;
@@ -41,6 +47,7 @@ export type SpeechSink = ((selection: Selection) => Promise<void>) & {
   resume?: () => void;
   repeat?: (sessionID: string, revision: number, expires?: number) => Promise<void>;
   status?: () => AudioStatus | undefined;
+  devices?: (sessionID: string) => ModelDevices | undefined;
   removeSession?: (sessionID: string) => void;
   dispose?: () => Promise<void>;
 };
@@ -69,6 +76,8 @@ export type SpeechSinkOptions = {
   isPaused?: () => boolean;
   isEnabled?: () => boolean;
   now?: () => number;
+  /** Relevant engine/backend/settings identity, observed on admission, completion and status reads. */
+  deviceIdentity?: () => string;
 };
 
 // Text arrives on stdin (UTF-8) so it is never parsed as PowerShell code.
@@ -149,12 +158,16 @@ export function createSpeechSink(options: SpeechSinkOptions = {}): SpeechSink {
   let running = false;
   let generation = 0;
   let disposed = false;
+  let deviceStatus: { sessionID: string; snapshot: ModelDevices } | undefined;
+  let deviceIdentity = options.deviceIdentity?.();
   let activeSession: string | undefined;
   let idle = Promise.resolve();
   const cache = options.cache;
   const paused = () => options.isPaused?.() ?? false;
   // Observing Off permanently invalidates pending work; On never revives that generation.
   const enabled = () => {
+    const identity = options.deviceIdentity?.();
+    if (identity !== deviceIdentity) { deviceIdentity = identity; invalidate(false); }
     const on = options.enabled !== false && (options.isEnabled?.() ?? true);
     if (!on) sink.stop();
     return on;
@@ -174,7 +187,7 @@ export function createSpeechSink(options: SpeechSinkOptions = {}): SpeechSink {
     current = active;
     arm();
     // A predicate has no notification channel. Observe it even while playback is frozen.
-    const gate = options.isEnabled ? setInterval(() => {
+    const gate = options.isEnabled || options.deviceIdentity ? setInterval(() => {
       try { enabled(); } catch (error) { report(error); sink.stop(); }
     }, 20) : undefined;
     try {
@@ -245,10 +258,12 @@ export function createSpeechSink(options: SpeechSinkOptions = {}): SpeechSink {
         const mine = generation;
         let candidate: string | undefined;
         let release: (() => void) | undefined;
+        let snapshot: ModelDevices | undefined;
         activeSession = job.sessionID;
         const valid = () => enabled() && !disposed && mine === generation && !paused() && (job.expires === undefined || job.expires > now());
         try {
           if (!valid()) continue;
+          if (job.plan !== undefined) deviceStatus = undefined;
           if (cache) {
             if (job.plan !== undefined) {
               if (!engine.synthesizePlan && !engine.synthesize) throw new Error("Engine cannot produce cached audio");
@@ -261,6 +276,8 @@ export function createSpeechSink(options: SpeechSinkOptions = {}): SpeechSink {
               const code = await run(proc);
               if (code !== 0) throw new Error(`synthesis process exited with code ${code}`);
               if (!valid()) continue;
+              snapshot = modelDevices(proc.devices?.());
+              if (!valid()) continue;
               if (!cache.promote(candidate, job.sessionID, job.messageID)) throw new Error("Invalid generated audio");
               candidate = undefined;
               release(); release = undefined;
@@ -270,12 +287,18 @@ export function createSpeechSink(options: SpeechSinkOptions = {}): SpeechSink {
                 (job.revision !== undefined && audio.revision !== job.revision)) continue;
             release = cache.hold(audio.file);
             const code = await run((options.player ?? playWav)(audio.file), options.playbackTimeoutMs ?? timeoutMs, true);
+            if (code === 0 && valid() && snapshot) deviceStatus = { sessionID: job.sessionID, snapshot };
             if (code !== 0 && valid()) report(new Error(`player exited with code ${code}`));
           } else if (job.plan !== undefined) {
             if (!engine.speakPlan) reduced();
             if (!valid()) continue;
-            const code = await run(engine.speakPlan ? engine.speakPlan(job.plan)
-              : engine(flattenNarrationPlan(job.plan), job.plan.defaultLanguage));
+            const proc = engine.speakPlan ? engine.speakPlan(job.plan)
+              : engine(flattenNarrationPlan(job.plan), job.plan.defaultLanguage);
+            const code = await run(proc);
+            if (code === 0 && valid()) {
+              snapshot = modelDevices(proc.devices?.());
+              if (valid()) deviceStatus = { sessionID: job.sessionID, snapshot };
+            }
             if (code !== 0 && valid()) report(new Error(`speech process exited with code ${code}`));
           }
         } catch (error) {
@@ -328,12 +351,18 @@ export function createSpeechSink(options: SpeechSinkOptions = {}): SpeechSink {
     f?.abort?.();
     try { current?.proc.kill(); } catch {}
   };
-  sink.stop = () => {
+  const invalidate = (releaseWorker: boolean) => {
+    deviceStatus = undefined;
     while (queue.length > 0) queue.shift()!.done();
     cancelActive();
+    // Settings changes invalidate outcomes, not idle models. The engine separately compares immutable
+    // runtime/asset identities on the next admission; voice/rate/tone alone must not trigger a reload.
+    if (releaseWorker) { try { engine.release?.(); } catch (error) { report(error); } }
   };
+  sink.stop = () => invalidate(true);
   // Jobs read the generation when they start, so queued jobs of other sessions are not invalidated by the bump.
   sink.stopSession = (sessionID) => {
+    if (deviceStatus?.sessionID === sessionID) deviceStatus = undefined;
     for (const preparation of preparations) if (preparation.sessionID === sessionID) preparation.cancelled = true;
     for (let i = queue.length - 1; i >= 0; i--) if (queue[i]!.sessionID === sessionID) queue.splice(i, 1)[0]!.done();
     if (activeSession === sessionID) cancelActive();
@@ -372,25 +401,29 @@ export function createSpeechSink(options: SpeechSinkOptions = {}): SpeechSink {
     return !disposed && options.enabled !== false && audio ? { sessionID: audio.sessionID, revision: audio.revision,
       ...(audio.messageID === undefined ? {} : { messageID: audio.messageID }) } : undefined;
   };
+  sink.devices = (sessionID) => {
+    if (!enabled() || disposed || deviceStatus?.sessionID !== sessionID) return;
+    return modelDevices(deviceStatus.snapshot);
+  };
   sink.repeat = (sessionID, revision, expires) => {
     const audio = sink.status?.();
     if (disposed || paused() || (expires !== undefined && expires <= now()) || !audio || audio.sessionID !== sessionID || audio.revision !== revision) return Promise.resolve();
-    sink.stop();
+    while (queue.length > 0) queue.shift()!.done();
+    cancelActive(); // Replaying retained audio does not produce a new model outcome.
     return new Promise<void>((resolve) => {
       queue.push({ sessionID, revision, expires, done: resolve });
       if (!running) idle = pump();
     });
   };
   sink.removeSession = (sessionID) => {
-    for (const preparation of preparations) if (preparation.sessionID === sessionID) preparation.cancelled = true;
-    if (activeSession === sessionID) sink.stop();
-    for (let i = queue.length - 1; i >= 0; i--) if (queue[i]!.sessionID === sessionID) queue.splice(i, 1)[0]!.done();
+    sink.stopSession!(sessionID);
     cache?.forget(sessionID);
   };
   sink.dispose = async () => {
     disposed = true;
     sink.stop();
     cache?.dispose();
+    await engine.dispose?.();
     await idle;
     cache?.dispose();
   };

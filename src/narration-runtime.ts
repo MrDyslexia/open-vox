@@ -3,6 +3,7 @@ import { win32 } from "node:path";
 import type { NarrationBackend } from "./config";
 import { LID_MANIFEST_PATH, resolveNarrationPython } from "./narration-assets";
 import { ONNX_MANIFEST, ONNX_MANIFEST_PATH, narrationOnnxPaths, resolveNarrationOnnxPython } from "./narration-onnx-assets";
+import { selectGpuPython, type RuntimeProfile, type GpuReadDeps } from "./gpu-runtime";
 
 /**
  * One coherent runtime for a planned narration run: interpreter, LID manifest and (ONNX only)
@@ -43,10 +44,20 @@ export function resolveNarrationRuntime(options: {
   backend: NarrationBackend;
   /** Interpreter used today when the managed torch environment is not ready (the Kokoro venv). */
   fallbackPython: string;
+  profile?: RuntimeProfile;
+  gpuDeps?: GpuReadDeps;
   onDiagnostic?: (code: string) => void;
 } & Partial<RuntimeDeps>): NarrationRuntime {
   const deps: RuntimeDeps = { exists: options.exists ?? nodeDeps.exists, read: options.read ?? nodeDeps.read, assertPath: options.assertPath };
+  if (options.profile === "cuda13" && options.backend !== "onnx") {
+    try { options.onDiagnostic?.("gpu-profile-requires-onnx"); } catch {}
+  }
   if (options.backend === "onnx") {
+    if (options.profile === "cuda13") {
+      const python = selectGpuPython(options.root, "lid", options.profile, options.gpuDeps);
+      if (python) return { backend: "onnx", python, lidManifest: ONNX_MANIFEST_PATH, lidDirectory: narrationOnnxPaths(options.root).model };
+      try { options.onDiagnostic?.("gpu-profile-unavailable"); } catch {}
+    }
     const tuple = onnxTuple(options.root, deps);
     if (tuple) return tuple;
     try { options.onDiagnostic?.(ONNX_FALLBACK_DIAGNOSTIC); } catch {}
@@ -65,6 +76,7 @@ export function resolveNarrationRuntime(options: {
 export function createNarrationRuntimeSource(options: {
   root: string;
   backend: () => NarrationBackend;
+  profile?: () => RuntimeProfile;
   fallbackPython: string;
   onDiagnostic?: (code: string) => void;
   deps?: RuntimeDeps;
@@ -74,7 +86,7 @@ export function createNarrationRuntimeSource(options: {
     const backend = options.backend();
     let fellBack = false;
     const runtime = resolveNarrationRuntime({
-      root: options.root, backend, fallbackPython: options.fallbackPython, ...options.deps,
+      root: options.root, backend, profile: options.profile?.(), fallbackPython: options.fallbackPython, ...options.deps,
       onDiagnostic: code => { fellBack = true; if (!reported) { reported = true; options.onDiagnostic?.(code); } },
     });
     if (!fellBack) reported = false;

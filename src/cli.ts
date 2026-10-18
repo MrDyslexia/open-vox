@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  DEFAULT_CONFIG, KOKORO_VOICES, MAX_SPEED, MIN_SPEED, appHome, configPath, readConfig, writeConfig, validToneVoice, validToneWeight,
+  DEFAULT_CONFIG, KOKORO_VOICES, MAX_SPEED, MIN_SPEED, appHome, configPath, readConfig, writeConfig, writeRuntimeProfile, validToneVoice, validToneWeight,
   type Config, type ConfigPatch, type EngineName,
 } from "./config";
 import { envValue, legacyHomeMigration } from "./brand";
@@ -15,6 +15,8 @@ import { nodeDownload, nodeRun, nodeNarrationDownload, nodeNarrationFs, nodeNarr
 import { assertLidDirectory, fileFingerprint, inspectNarration, type NarrationReadiness } from "./narration-assets";
 import { assertOnnxLidStructure, inspectNarrationOnnx } from "./narration-onnx-assets";
 import { nodeNarrationOnnxFs, onnxProbeArgs, setupNarrationOnnx } from "./setup-onnx";
+import { inspectGpuProfile } from "./gpu-runtime";
+import { nodeSetupGpu } from "./setup-gpu";
 
 export type CliDeps = {
   out: (line: string) => void;
@@ -32,7 +34,8 @@ export type CliDeps = {
   say: (text: string) => Promise<void>;
   /** Moves the pre-rename data folder to its new location, when applicable. Throws on failure. */
   migrateHome: () => { from: string; to: string } | undefined;
-  setup: (what: "kokoro" | "piper" | "narration" | "narration-onnx", options?: { lidSource: string }) => Promise<void>;
+  setup: (what: "kokoro" | "piper" | "narration" | "narration-onnx" | "gpu", options?: { lidSource: string }) => Promise<void>;
+  gpuStatus?: (home: string) => { ready: boolean; qualified: boolean; code: string };
   narrationStatus?: (home: string) => Promise<NarrationReadiness>;
   /** Optional ONNX readiness; when absent the doctor prints no ONNX line at all. */
   narrationOnnxStatus?: (home: string) => Promise<NarrationReadiness>;
@@ -48,6 +51,7 @@ Setup
   setup kokoro|piper                        Download a local neural voice engine
   setup narration                           Explicit pinned local LID + isolated CPU environment (~2 GB estimate)
   setup narration-onnx --lid-source <dir>   Explicit ONNX FP32 LID (~709 MB, local source, no torch); does not activate it
+  setup gpu                                Create NEW hash-locked CUDA13 envs (12 GiB free required); no activation
   doctor                                    Check the installation
   status                                    Show current settings
 
@@ -60,6 +64,7 @@ Controls (apply immediately, no restart)
   engine auto|kokoro|piper|sapi             Speech engine
   language es|en                           Narration base language (one voice per utterance)
   narration-backend [torch|onnx]           Show or select the contextual LID backend (default torch; onnx needs setup narration-onnx)
+  runtime-profile [cpu|cuda13]             Select cuda13 only after both offline qualifications (requires onnx backend)
   say <text>                                Speak a test sentence
   config path|show|reset                    Inspect or reset the settings file
 
@@ -116,6 +121,10 @@ async function doctor(deps: CliDeps): Promise<number> {
           : check(label, "WARN", `degraded: ${onnx.code}; inactive backend only; run: open-vox setup narration-onnx --lid-source <dir>`));
   }
   for (const r of results) deps.out(`${r.level.padEnd(4)} ${r.label}: ${r.detail}`);
+  if (deps.gpuStatus) {
+    const gpu = deps.gpuStatus(home);
+    deps.out(`${gpu.qualified ? "OK  " : "INFO"} CUDA13 profile: ${gpu.code}; dependencies ${gpu.ready ? "ready" : "unavailable"}; inference ${gpu.qualified ? "qualified" : "unqualified"}; requested ${deps.readConfig().runtimeProfile}`);
+  }
   return results.some((r) => r.level === "FAIL") ? 1 : 0;
 }
 
@@ -128,6 +137,7 @@ function status(deps: CliDeps): void {
   deps.out(`engine: ${config.engine}`);
   deps.out(`narration language: ${config.narrationLanguage}`);
   deps.out(`narration backend: ${config.narrationBackend}`);
+  deps.out(`runtime profile: ${config.runtimeProfile}`);
   deps.out(`plugin: ${state.plugin ? "installed" : "not installed"}`);
   deps.out(`sidebar block: ${state.tuiFile && state.tuiRegistered ? "installed" : "not installed"}`);
   deps.out(`config file: ${deps.configPath}`);
@@ -205,6 +215,18 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
       deps.out(`Narration language set to ${language}.`);
       return 0;
     }
+    case "runtime-profile": {
+      const profile = args[0];
+      if (!args.length) { deps.out(`Runtime profile: ${deps.readConfig().runtimeProfile}.`); return 0; }
+      if (args.length !== 1 || (profile !== "cpu" && profile !== "cuda13")) return usage(deps, "Usage: open-vox runtime-profile [cpu|cuda13]");
+      if (profile === "cuda13" && (deps.readConfig().narrationBackend !== "onnx" || !deps.gpuStatus?.(appHome(deps.env)).qualified)) {
+        deps.err("CUDA13 requires the ONNX backend and successful offline qualification in BOTH GPU environments; settings were preserved.");
+        return 1;
+      }
+      deps.writeConfig({ runtimeProfile: profile });
+      deps.out(`Runtime profile set to ${profile}.`);
+      return 0;
+    }
     case "narration-backend": {
       const backend = args[0];
       const USAGE = "Usage: open-vox narration-backend [torch|onnx]";
@@ -273,7 +295,7 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
         await deps.setup(what, { lidSource: source });
         return 0;
       }
-      if (args.length !== 1 || (what !== "kokoro" && what !== "piper" && what !== "narration")) return usage(deps, "Usage: open-vox setup kokoro|piper|narration");
+      if (args.length !== 1 || (what !== "kokoro" && what !== "piper" && what !== "narration" && what !== "gpu")) return usage(deps, "Usage: open-vox setup kokoro|piper|narration|gpu");
       await deps.setup(what);
       return 0;
     }
@@ -315,7 +337,8 @@ export async function main(argv: string[]): Promise<number> {
     out: (line) => console.log(line),
     err: (line) => console.error(line),
     readConfig: () => readConfig(),
-    writeConfig: (patch) => writeConfig(patch),
+    writeConfig: (patch) => Object.keys(patch).join() === "runtimeProfile" && patch.runtimeProfile
+      ? writeRuntimeProfile(patch.runtimeProfile) : writeConfig(patch),
     configPath: configPath(env),
     installFs: nodeInstallFs,
     configDir: env.OPENCODE_CONFIG_DIR?.trim() || win32.join(homedir(), ".config", "opencode"),
@@ -323,6 +346,7 @@ export async function main(argv: string[]): Promise<number> {
     tuiTemplate: () => readFileSync(win32.join(repoRoot, "tui", "open-vox.tsx"), "utf8"),
     exists: (path) => existsSync(path),
     env,
+    gpuStatus: inspectGpuProfile,
     narrationStatus: home => inspectNarration(home, {
       exists: existsSync, read: path => readFileSync(path, "utf8"), fingerprint: fileFingerprint,
       validateDirectory: assertLidDirectory,
@@ -348,7 +372,9 @@ export async function main(argv: string[]): Promise<number> {
         exists: (path: string) => existsSync(path), run: nodeRun, download: nodeDownload,
         log: (line: string) => console.log(line),
       };
-      if (what === "narration-onnx") {
+      if (what === "gpu") {
+        await nodeSetupGpu(setupDeps.home, setupDeps.systemPython, setupDeps.log);
+      } else if (what === "narration-onnx") {
         await setupNarrationOnnx({ ...setupDeps, ...nodeNarrationOnnxFs, run: nodeNarrationRun, lidSource: options?.lidSource });
       } else if (what === "narration") await setupNarration({ ...setupDeps, ...nodeNarrationFs, run: nodeNarrationRun, download: nodeNarrationDownload });
       else await (what === "kokoro" ? setupKokoro(setupDeps) : setupPiper(setupDeps));

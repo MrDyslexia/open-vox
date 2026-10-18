@@ -5,6 +5,7 @@ import { win32 } from "node:path";
 import { envValue, homeFor } from "./brand";
 import type { Engine, SpeechProcess } from "./speech-sink";
 import type { Language } from "./speech-text";
+import { modelDevices, type ModelDevices } from "./repeat-control";
 
 export type Runner = (cmd: string, args: string[], stdin?: string) => SpeechProcess;
 export type PiperPaths = { exe: string; models: Record<Language, string> };
@@ -59,6 +60,7 @@ export function wavEngine(config: WavConfig): Engine {
     const wav = win32.join(config.tmpDir, `open-vox-${process.pid}-${Date.now()}-${counter++}.wav`);
     let killed = false;
     let active: SpeechProcess | undefined;
+    let devices: ModelDevices | undefined;
     const exited = (async () => {
       try {
         const command = config.commandFor(language, wav);
@@ -66,6 +68,8 @@ export function wavEngine(config: WavConfig): Engine {
         const code = await active.exited;
         if (killed) return 1;
         if (code !== 0) return code;
+        devices = active.devices ? modelDevices(active.devices()) : undefined;
+        if (killed) return 1;
         const play = `(New-Object System.Media.SoundPlayer '${quote(wav)}').PlaySync()`;
         active = config.run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", play]);
         return await active.exited;
@@ -73,7 +77,8 @@ export function wavEngine(config: WavConfig): Engine {
         try { config.unlink(wav); } catch {}
       }
     })();
-    return { exited, kill: () => { killed = true; try { active?.kill(); } catch {} } };
+    return { exited, devices: () => !killed && devices ? { ...devices } : undefined,
+      kill: () => { killed = true; devices = undefined; try { active?.kill(); } catch {} } };
   };
   engine.synthesize = (text, language, wav) => {
     const command = config.commandFor(language, wav);

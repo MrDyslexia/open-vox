@@ -35,6 +35,32 @@ function harness(overrides: Partial<CliDeps> = {}) {
 }
 const run = (argv: string[], h = harness()) => runCli(argv, h.deps).then((code) => ({ code, h }));
 
+describe("explicit GPU setup and activation", () => {
+  test("setup gpu does not migrate, install the plugin, synthesize or write config", async () => {
+    const h = harness({ migrateHome: () => { throw Error("no migration"); }, writeConfig: () => { throw Error("no activation"); } });
+    expect(await runCli(["setup", "gpu"], h.deps)).toBe(0);
+    expect(h.out).toEqual(["setup gpu"]); expect(h.spoken).toEqual([]); expect(h.files.size).toBe(0);
+  });
+  test("unqualified, partially ready, unsupported and Torch-profile activation preserve config", async () => {
+    for (const gpu of [{ ready: false, qualified: false }, { ready: true, qualified: false }, { ready: true, qualified: true }]) {
+      const h = harness({ gpuStatus: () => ({ ...gpu, code: "mock" }) });
+      if (!gpu.qualified) h.deps.writeConfig({ narrationBackend: "onnx", speed: 1.2 });
+      const before = structuredClone(h.config());
+      expect(await runCli(["runtime-profile", "cuda13"], h.deps)).toBe(1);
+      expect(h.config()).toEqual(before);
+      expect(await runCli(["runtime-profile", "C:\\foreign\\python.exe"], h.deps)).toBe(2);
+    }
+  });
+  test("qualification permits only an explicit profile patch, and CPU rollback stays explicit", async () => {
+    const h = harness({ gpuStatus: () => ({ ready: true, qualified: true, code: "qualified-cuda13" }) });
+    h.deps.writeConfig({ narrationBackend: "onnx", speed: 1.2, voices: { en: "bm_george" } });
+    expect(await runCli(["runtime-profile", "cuda13"], h.deps)).toBe(0);
+    expect(h.config()).toMatchObject({ runtimeProfile: "cuda13", speed: 1.2, voices: { en: "bm_george" } });
+    expect(await runCli(["runtime-profile", "cpu"], h.deps)).toBe(0);
+    expect(h.config().runtimeProfile).toBe("cpu");
+  });
+});
+
 describe("removed pause / resume / toggle", () => {
   test("they are unknown commands that change nothing and never write the config", async () => {
     for (const command of ["pause", "resume", "toggle"]) {

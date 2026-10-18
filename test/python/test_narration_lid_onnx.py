@@ -16,6 +16,7 @@ import narration_lid_onnx as backend
 from narration_lid_onnx import (BACKEND, CHECKPOINT, FILES, LABELS, REVISION, OnnxDetector,
                                 validate_manifest, verify_local_assets)
 from narration_resolver import detector_result
+from runtime_device import RuntimeDevice
 
 REFERENCE = Path(os.environ.get('OPEN_VOX_TEST_ONNX_ASSETS', str(Path(tempfile.gettempdir()) / 'open-vox-reference-assets' / 'assets')))
 TEST_PYTHON = os.environ.get('OPEN_VOX_TEST_PYTHON') or sys.executable
@@ -129,7 +130,8 @@ def stub_modules(session=None, tokenizer_error=None, session_error=None):
             raise session_error
         return session
 
-    ort = SimpleNamespace(SessionOptions=lambda: SimpleNamespace(), InferenceSession=create)
+    ort = SimpleNamespace(SessionOptions=lambda: SimpleNamespace(), InferenceSession=create,
+                          get_available_providers=lambda: ['CPUExecutionProvider'])
     def encode(text, add_special_tokens=True):
         data = FakeTokenizer()(text, return_offsets_mapping=True)
         return SimpleNamespace(ids=data['input_ids'], type_ids=data['token_type_ids'],
@@ -242,6 +244,34 @@ class IntegrityTests(unittest.TestCase):
 
 
 class LoadTests(unittest.TestCase):
+    def test_cuda_candidate_is_shared_and_actual_provider_reported_separately(self):
+        session = FakeSession()
+        session.get_providers = lambda: ['CUDAExecutionProvider', 'CPUExecutionProvider']
+        with assets() as (directory, manifest), patch.dict(sys.modules, stub_modules(session)), \
+                patch('narration_lid_onnx.probe_runtime', side_effect=AssertionError('already probed')):
+            detector = OnnxDetector(directory, manifest, runtime_device=RuntimeDevice(ort_cuda=True))
+            self.assertEqual(detector.detect('word')['status'], 'available')
+            self.assertEqual(detector.device_diagnostics, ['lid-onnx-provider-cuda'])
+
+    def test_corruption_with_cuda_candidate_never_constructs_a_session(self):
+        with assets() as (directory, manifest), patch.dict(sys.modules, stub_modules()), \
+                patch('narration_lid_onnx.create_onnx_session') as create:
+            (directory / 'model.onnx').write_bytes(b'corrupt')
+            detector = OnnxDetector(directory, manifest, runtime_device=RuntimeDevice(ort_cuda=True))
+            self.assertEqual(detector.detect('word')['diagnostics'], ['local-model-integrity-failed'])
+            self.assertEqual(detector.device_diagnostics, [])
+            create.assert_not_called()
+
+    def test_standalone_probe_precedes_session_load(self):
+        events = []
+        modules = stub_modules()
+        create = modules['onnxruntime'].InferenceSession
+        modules['onnxruntime'].InferenceSession = lambda *a, **k: (events.append('session'), create(*a, **k))[1]
+        with assets() as (directory, manifest), patch.dict(sys.modules, modules), \
+                patch('narration_lid_onnx.probe_runtime', side_effect=lambda **k: (events.append('probe'), RuntimeDevice())[1]):
+            self.assertEqual(OnnxDetector(directory, manifest).detect('word')['status'], 'available')
+        self.assertEqual(events, ['probe', 'session'])
+
     def test_missing_dependencies(self):
         for missing in ('numpy', 'onnxruntime', 'tokenizers'):
             with self.subTest(missing=missing), assets() as (directory, manifest):
@@ -291,7 +321,7 @@ class LoadTests(unittest.TestCase):
                 'assert r["diagnostics"] == ["missing-local-assets"]; '
                 'bad = [n for n in ("torch", "transformers", "onnxruntime", "numpy", "tokenizers") if n in sys.modules]; '
                 'print(bad)' % str(SCRIPTS))
-        out = subprocess.run([TEST_PYTHON, '-c', code], capture_output=True, text=True, timeout=60)
+        out = subprocess.run([TEST_PYTHON, '-B', '-c', code], capture_output=True, text=True, timeout=60)
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(out.stdout.strip(), '[]')
 

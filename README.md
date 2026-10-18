@@ -44,6 +44,27 @@ no restart, even while OpenCode is running.
 Defaults: Spanish `em_alex`, English `af_heart`. Voices whose id starts with `b`
 (for example `bm_george`) are British and use British phonemes automatically.
 
+### Model runtime status
+
+Below the sidebar title, `LID: CPU · Kokoro: GPU` shows each model's last confirmed
+selected runtime for the displayed session. CUDA is labeled **GPU**; absent,
+unused or legacy diagnostics show **Pending**, never an assumed CPU. Direct
+Kokoro synthesis does not use LID, so its LID field stays Pending.
+
+The row confirms a successful narration job's registered provider/device, not GPU
+utilization, all-node GPU execution, or successful LID inference. A detector can
+select a runtime and still fall back after an inference failure. Workers run per
+utterance: these labels do not mean models remain loaded. No models or probes run
+just to populate the row.
+
+A new synthesis attempt clears the previous snapshot; success replaces both
+fields together, including missing values. Failed, cancelled or timed-out work
+stays Pending. Stop, session invalidation/deletion, Off, disposal and observed
+engine/backend/settings changes clear confirmation and reject stale completion.
+Pause never confirms cancelled synthesis; a genuinely frozen cached playback
+does not create a new outcome. Repeat preserves confirmation without rerunning
+models. Unconfirmed, conflicting or expired sidebar connections show Pending.
+
 ### Experimental Kokoro tone blend
 
 Tone is **off by default** for both languages (`toneVoice` is empty and `toneWeight`
@@ -147,12 +168,186 @@ speech falls back to the Torch set without failing and a single
 `onnx-backend-unavailable` diagnostic is logged. Existing config files without the
 setting keep using Torch.
 
+### Pre-load runtime device selection
+
+Each Python worker probes capabilities before loading the decision model or
+Kokoro. ONNX uses CUDA only when the worker's runtime advertises CUDA and a
+bounded, model-free driver probe finds a CUDA device. Otherwise it explicitly
+requests CPU. Torch checks `torch.cuda.is_available()` before loading FP32
+weights and places the model and input tensors on the same selected device.
+Direct and planned Kokoro calls both receive an explicit file-backed ONNX session;
+the library's `ONNX_PROVIDER` environment override does not control selection.
+
+Each model has an independent outcome. A recognized CUDA initialization failure
+allows at most one fresh CPU initialization; a session that silently registers
+only CPU is reported as CPU without loading it again. Invalid assets/graphs are
+not treated as accelerator failures. Inference-time session fallback is disabled:
+there is no automatic inference retry or duplicate synthesis.
+
+Planned narration keeps the existing JSON diagnostics envelope and adds only
+`kokoro-onnx-provider-cpu|cuda`, `lid-onnx-provider-cpu|cuda`, or
+`lid-torch-device-cpu|cuda` codes for successfully initialized models. Provider
+codes describe registered providers, **not proof that every graph node runs on
+GPU**. Direct calls report only Kokoro's bounded diagnostic envelope. No exception text, model
+paths or source prose is added to these diagnostics.
+
+**Existing managed environments remain on CPU by default.** `runtimeProfile` is
+`cpu` unless explicitly changed; the source LID backend default remains `torch`.
+Optional CUDA13 provisioning is separate from ordinary setup and never changes
+CPU Torch/ORT requirements. Workers still start per utterance, not persistently.
+GPU latency, numerical parity and listening quality are not promised by setup.
+
+### Optional managed CUDA13 profile (Windows CPython 3.13 AMD64)
+
+Use this only after reviewing the source and approving package downloads and
+offline inference. **Setup, qualification and activation are separate steps.**
+No command below plays audio, reinstalls the plugin, migrates app data, downloads
+models or rewrites the voice pack. Existing local ONNX LID/Kokoro assets and a
+working NVIDIA CUDA13-compatible driver are prerequisites.
+
+The sealed [wheel lock](resources/runtime-cuda13-windows.json) selects 38 wheels
+for planned narration and 23 for direct Kokoro. Public PyPI metadata totals
+2,637,405,298 compressed wheel bytes across both environments (~2.64 GB); installed
+space and scratch usage are larger. Setup requires **at least 12 GiB free** and
+refuses existing destinations, including partial/stale environments. It never
+deletes or repairs them automatically. Review a failed destination manually;
+do not move/rename venvs, copy readiness markers or remove CPU environments.
+
+Run from the repository root in PowerShell. These are explicit provisioning
+commands, **not part of the default test suite**:
+
+```powershell
+$voxHome = Join-Path $env:LOCALAPPDATA "open-vox"
+$scratch = Join-Path $env:LOCALAPPDATA "Temp\opencode"
+$env:OPEN_VOX_HOME = $voxHome
+$env:OPEN_VOX_PYTHON = "C:\Users\pc\AppData\Local\Programs\Python\Python313\python.exe"
+if (-not (Test-Path -LiteralPath $scratch -PathType Container)) { throw "Missing approved scratch directory" }
+if ([IO.DriveInfo]::new([IO.Path]::GetPathRoot($voxHome)).AvailableFreeSpace -lt 12GB) { throw "Need 12 GiB free" }
+foreach ($name in @("pn-onnx-gpu-venv", "kokoro-gpu-venv")) {
+    if (Test-Path -LiteralPath (Join-Path $voxHome $name)) { throw "GPU destination exists; preserve and inspect it" }
+}
+bun .\src\cli.ts setup gpu
+if ($LASTEXITCODE -ne 0) { throw "Provisioning failed; do not qualify or activate" }
+
+# The harness scopes child TEMP/TMP and cached tempfile defaults to each --out.
+# Do not change the parent PowerShell TEMP/TMP settings.
+$stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+& "$voxHome\pn-onnx-gpu-venv\Scripts\python.exe" -I -B .\tools\qualify_gpu.py --home $voxHome --out "$scratch\open-vox-cuda13-lid-$stamp"
+if ($LASTEXITCODE -ne 0) { throw "Planned GPU qualification failed; remain on CPU" }
+& "$voxHome\kokoro-gpu-venv\Scripts\python.exe" -I -B .\tools\qualify_gpu.py --home $voxHome --out "$scratch\open-vox-cuda13-kokoro-$stamp"
+if ($LASTEXITCODE -ne 0) { throw "Direct GPU qualification failed; remain on CPU" }
+bun .\src\cli.ts doctor
+
+# Activation is explicit and requires the existing ONNX backend plus BOTH reports.
+$settings = bun .\src\cli.ts config show | ConvertFrom-Json
+if ($settings.narrationBackend -ne "onnx") { throw "ONNX backend must be selected separately; no settings changed" }
+bun .\src\cli.ts runtime-profile cuda13
+if ($LASTEXITCODE -ne 0) { throw "Activation rejected; settings preserved" }
+```
+
+`setup gpu` creates only `pn-onnx-gpu-venv` and `kokoro-gpu-venv` under app home.
+Downloads use anonymous HTTPS PyPI/file hosts, isolated pip, explicit hash-checked
+URLs, no dependency resolver/cache, and child-only scratch under `Temp/opencode`.
+It never co-installs CPU `onnxruntime` and `onnxruntime-gpu`: only Kokoro 0.6.1's
+CPU ORT requirement is satisfied by the exact locked GPU distribution/import.
+All other missing or incompatible dependencies fail readiness.
+The Windows probe does not eagerly execute `dlinfo`'s glibc initializer, matching
+phonemizer's Windows policy; its exact package/version/closure/origin checks remain.
+
+Qualification uses synthetic Spanish/English input and existing local-only model
+files. It checks valid nonempty LID evidence, finite nonempty Kokoro audio and CPU
+sanity comparisons, then requires **per-model profiled CUDA compute node events**.
+Provider advertisement/registration alone and memory-copy events are insufficient.
+Legitimate CPU nodes are counted separately, not treated as all-node GPU failure.
+WAV files, raw ORT profiles and a bounded report stay in the new scratch output;
+there is no playback. The environment receives identity/asset-bound qualification
+and filtered, hashed CUDA evidence only after successful checks. Failure returns
+nonzero, preserves partial output and never activates settings.
+Before any third-party dependency/model/phonemizer imports, the harness validates
+and exclusively creates `--out` beneath local `Temp/opencode`, rejects traversal
+and redirected paths, then scopes the child process's TEMP/TMP and Python's cached
+`tempfile.tempdir` to that output. This includes phonemizer's default `mkdtemp()`
+DLL-copy scratch. Prior environment values and the cache are restored on success
+or failure; the calling shell's TEMP/TMP is never changed. A failed dependency
+preflight may therefore leave a new empty output directory for inspection.
+
+Doctor separates dependency readiness from inference qualification and requested
+profile. Both planned/direct GPU environments must be coherent and qualified;
+otherwise dispatch retains existing CPU paths with a bounded diagnostic. Torch
+does not acquire a GPU installation. Managed native DLL files are checked against
+distribution records before `preload_dlls(directory="")` and provider enumeration;
+DLL directory handles remain alive without changing global PATH. Loaded NVIDIA
+DLL provenance is checked, not described as hermetic Windows loader isolation.
+Changed package/model file stamps invalidate the profile; the Python worker also
+rechecks distribution/native hashes and interpreter identity before loading.
+These local records are not signatures against a hostile local administrator.
+
+Activation changes only the raw `runtimeProfile` JSON field, preserving other
+settings, including unknown keys. Roll back explicitly with
+`bun .\src\cli.ts runtime-profile cpu`; keep all environments/assets for inspection.
+Mock tests do not certify real GPU compatibility, performance or audio quality.
+
 Doctor hashes local files and probes pinned imports/versions without loading model
 weights. An `OK` contextual line means those checks passed, not listening or LID
 accuracy acceptance. `WARN` means explicit degraded dictionary/base fallback.
 Known names/expressions and acronym policies still work without LID, but they do
 **not** satisfy automatic contextual pronunciation of previously unknown terms.
 Piper/SAPI retain bounded text-only speech with reduced pronunciation capability.
+
+### Persistent transport acceptance (no playback)
+
+The separate harness exercises the default Kokoro engine, private Python transport,
+Markdown planning, speech queue and real owned-cache promotion. Only the WAV player
+is replaced with a no-op. It injects CPU/ONNX or CUDA13/ONNX settings in memory;
+it never writes configuration, provisions assets or bypasses GPU readiness checks.
+
+Run only after explicitly approving local inference, from the repository root.
+Each output must be a **fresh direct child** of the existing approved
+`C:\Users\pc\AppData\Local\Temp\opencode` directory:
+
+```powershell
+bun tools/bench_persistent.ts --profile cpu --requests 3 --no-playback --out C:\Users\pc\AppData\Local\Temp\opencode\persistent-cpu-20261017-run1
+bun tools/bench_persistent.ts --profile cuda13 --requests 3 --no-playback --out C:\Users\pc\AppData\Local\Temp\opencode\persistent-cuda13-20261017-run1
+```
+
+Use a new suffix if a destination exists. Forecast: **1–3 minutes per profile**,
+hardware/readiness dependent, not a measurement. Two independently owned model sets
+can coexist; cancellation/restart constructs a third generation over the run. RAM
+and VRAM costs multiply per concurrent instance; the harness does not measure an
+exact memory peak. This is not the historical 34-minute benchmark.
+
+`summary.json` contains bounded synthetic-input character/word counts, complete
+integer PCM frame/duration/byte metrics, elapsed time, actual device codes, worker
+owner/PID/generation/request IDs and counters. First timing begins before engine
+construction; later timings include normal admission, transport, validation and
+cache promotion. No source text, raw plans, model paths or exception prose are
+recorded. WAVs use cache-owned UUID names beneath the output and are disposed after
+verification. Failed acceptance writes a partial summary and returns nonzero;
+owned cleanup is attempted on every path.
+
+Acceptance checks distinct sequential requests and sessions, one warm generation,
+Repeat without inference, interleaved independent instances, owned active
+cancellation, deletion preserving another queued session, restart without replay,
+Off and idle-worker disposal. `--idle-ms 1000` optionally tests expiry with an
+explicit test override (1000–60000 ms); without it the production five-minute
+timeout is covered only by mocked tests, not a five-minute benchmark wait.
+
+Counter semantics: `kokoroLoads` counts a successful returned Kokoro/session load;
+`detectorBuilds` counts detector objects, **not** lazy LID loads. `lidLoads` and
+`tokenizerLoads` count the successful lazy `_runtime` transition. `kokoroCreates`,
+`kokoroRuns` and `lidRuns` count actual delegated instance-method entries, including
+calls that subsequently fail. These are not accepted-request counts or native
+constructor-attempt counts (including failed accelerator fallback attempts).
+Unsupported instrumentation is `null` and fails real load-reuse acceptance, never
+silently becoming proof. Counters reset with each generation; snapshots contain
+detached read-only values, not mutable process/controller handles.
+
+The harness and telemetry are mocked-test verified only until a separate runtime
+executor runs these commands. Synthetic child pipe EOF is tested without models;
+forced host death during GPU bootstrap or a GIL-holding native hang remains unproved.
+The older benchmark's TypeScript engine leg uses unsupported non-UUID outputs and
+omits engine disposal; do not use it as persistent-worker acceptance evidence.
+Existing benchmark files and historical results are unchanged.
 
 ### Derived text, limits and privacy
 
@@ -172,7 +367,8 @@ Piper/SAPI retain bounded text-only speech with reduced pronunciation capability
   are uncalibrated, and naturalness is not guaranteed.
 - Settings changes apply to **new utterances**, including changes made while idle.
   Repeat replays the exact old cached WAV and does not reparse or run inference.
-- Inference is local-only, existing-files-only, CPU, safetensors-only, with remote
+- Inference is local-only, existing-files-only, CUDA when usable or CPU otherwise,
+  FP32 and safetensors-only for Torch, with remote
   code disabled. It verifies the bundled model hashes once before loading per
   synthesis, not per word. No private prose is sent to external inference services
   or written as a full persistent source trace by default; cached audio remains
@@ -286,8 +482,8 @@ and registers in `tui.json`; existing entries are preserved.
    Markdown; deterministic policies and optional pinned local token classification
    resolve pronunciation. Piper/SAPI use a reduced flattened text representation.
 4. Engines, re-chosen on every utterance (`auto` order below):
-   - `src/kokoro-engine.ts` + `scripts/kokoro_say.py`: [Kokoro](https://github.com/thewh1teagle/kokoro-onnx)
-     (82M ONNX model, CPU).
+   - `src/kokoro-engine.ts` + `src/narration-worker.ts` + `scripts/narration_worker.py`: [Kokoro](https://github.com/thewh1teagle/kokoro-onnx)
+      (82M ONNX model, CUDA when usable or CPU).
    - `src/piper-engine.ts`: [Piper](https://github.com/rhasspy/piper) voices
      (`es_MX-claude-high`, `en_US-lessac-high`).
    - Windows SAPI voices as the last resort.
@@ -303,6 +499,53 @@ and registers in `tui.json`; existing entries are preserved.
    `SoundPlayer` path.
 7. `src/config.ts` is the shared settings file used by the plugin, the CLI and
    the sidebar block.
+
+### Persistent narration model ownership
+
+The default Kokoro engine starts one private Python worker lazily per plugin instance,
+not per chat session. Sequential requests reuse loaded models/tokenizers over bounded
+UTF-8 NDJSON pipes. Plans, text, synthesized results and blended styles are not cached
+between requests. The one-shot `scripts/kokoro_say.py` helper remains available unchanged.
+
+| Event | Worker behavior |
+|-------|-----------------|
+| Voice, speed or tone changes | New request settings; unchanged idle models stay loaded |
+| Interpreter, backend, asset stamps or output-root changes | Retire the old generation before starting another |
+| Queued session cancellation/deletion | Remove that session's queued jobs; preserve other sessions' queue entries |
+| Active synthesis cancellation or Pause | Kill only this instance's worker; the next admitted request reloads |
+| Off, disposal or five minutes idle | Retire the owned worker, including when no request is active |
+| Crash, deadline or protocol fault | Fail without inference replay; wait for child close before releasing output holds |
+
+Other OpenCode instances have independent controllers, pipes and model memory. There
+is no shared daemon, port, registry or cross-instance cancellation. Concurrent instances
+therefore multiply RAM/VRAM use and may still contend for the same hardware. Repeat
+plays the retained WAV without another synthesis request.
+
+Startup and each sent request have 120-second transport bounds. Shutdown attempts a
+second owned-process kill after three seconds; disposal reports failure if close is not
+observed, rather than pretending a partial writer has exited. Startup emits `imports`,
+imports required SDK libraries serially under stdout redirection, starts the stdin EOF
+reader, then probes runtime and constructs/loads models. Preimport constructs no local
+model, tokenizer or session; ONNX/direct Kokoro does not import Torch. Optional LID
+dependency absence retains degraded detection behavior. EOF monitoring covers session
+loading and inference after imports, not the import phase. Explicit cancellation/disposal
+still terminates the owned child. Forced-host-death cleanup during imports/native hangs
+is not guaranteed; GPU preflight also precedes the monitor, and GIL-holding native code
+may delay it. There is **no all-time orphan guarantee**.
+
+The Windows reader-first NumPy import stall is corrected by SDK preimport, not a native
+pipe replacement or moving model loading before monitoring. The real CPU import/ready/EOF
+regression and one production-transport CPU acceptance run passed. Its first three
+different requests took 3010, 784 and 810 ms with one model/tokenizer load per generation;
+two-instance isolation, owned cancellation/restart, Repeat and shutdown also passed.
+These are descriptive timings, not a statistical comparison. GPU acceptance, real
+five-minute idle expiry and memory-release measurements remain pending. Historical failed
+reader/native-pipe evidence is preserved in the [task document](odd/tasks/persistent-narration-worker.md).
+
+Low-level persistent synthesis callers must supply a new UUID-named WAV or an empty
+exclusive UUID placeholder in a caller-owned output directory and dispose the engine
+in `finally`. The older benchmark's TypeScript engine leg does not follow this lifetime
+contract; preserve its reports, but do not use that leg as persistent-worker acceptance.
 
 ## Renamed from agentVoz
 
@@ -340,6 +583,25 @@ An optional smoke test drives the real player host with muted volume
 ```powershell
 $env:OV_PLAYER_SMOKE = "1"; bun test test/player.test.ts
 ```
+
+### CPU vs GPU benchmark (maintainers)
+
+`tools/bench_runtime.py` times each narration step (start-up, LID load and inference, Kokoro load, phonemization,
+inference, WAV write) per profile with explicit interpreters, cold per process and warm in process, using synthetic text
+only. It never changes `runtimeProfile` or any config, and never plays audio. Start with `--preflight` and `--dry-run`,
+then run it with `--out` under `%LOCALAPPDATA%\Temp\opencode`; `tools/bench_report.py` turns the raw JSON into a
+Markdown report and a CSV. Reports contain counts and durations, never text.
+
+The report separates instrumented cold totals, unmodified Python production-worker wall time, and real
+`defaultKokoroEngine.synthesizePlan` synthesis-only timing (inside Bun plus parent wall). Engine settings are injected
+in memory: ONNX, CPU or CUDA13, fixed voices/speed, no config writes or playback. The shared real TypeScript planner
+runs before these measurements; engine timing is not whole-UI latency. `--engine-reps` and `--prod-reps` default to 1
+(preliminary), versus 5 cold repetitions and 10 timed warm iterations. Use fresh output directories for each run.
+Every run, including each warm iteration, must report the requested device for both LID and Kokoro; missing or mismatched
+evidence is retained for audit but excluded from comparisons. CUDA + CPU registered providers do not imply all-node CUDA
+placement. Process peak memory is unavailable because the Windows venv launcher is not the inference process; old numeric
+launcher peaks are ignored. GPU before/after memory is a coarse global delta, not a workload peak. Signed `untimed_worker`
+and `unattributed` residuals reconcile cold exclusive timings with parent wall; per-step medians need not sum to median totals.
 
 ## Known limits
 

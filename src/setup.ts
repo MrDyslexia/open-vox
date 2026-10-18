@@ -239,9 +239,9 @@ export const narrationProcessEnv = (source: NodeJS.ProcessEnv = process.env): No
     HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1", HF_HUB_DISABLE_TELEMETRY: "1", DO_NOT_TRACK: "1" };
 };
 
-export const nodeNarrationRun = (cmd: string, args: string[]): Promise<number> => new Promise((resolve, reject) => {
-  const child = spawn(cmd, args, { stdio: "ignore", windowsHide: true, env: narrationProcessEnv() });
-  const timer = setTimeout(() => { child.kill(); resolve(1); }, args.includes("-c") ? 30000 : 20 * 60 * 1000);
+export const nodeNarrationRun = (cmd: string, args: string[], source: NodeJS.ProcessEnv = process.env): Promise<number> => new Promise((resolve, reject) => {
+  const child = spawn(cmd, args, { stdio: "ignore", windowsHide: true, env: narrationProcessEnv(source) });
+  const timer = setTimeout(() => { child.kill(); resolve(1); }, args.includes("-c") && !args.includes("install") ? 30000 : 20 * 60 * 1000);
   child.once("error", error => { clearTimeout(timer); reject(error); });
   child.once("close", code => { clearTimeout(timer); resolve(code ?? 1); });
 });

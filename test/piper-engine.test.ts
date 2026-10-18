@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { piperEngine, resolvePiper, type Runner } from "../src/piper-engine";
+import { piperEngine, resolvePiper, wavEngine, type Runner } from "../src/piper-engine";
 import type { SpeechProcess } from "../src/speech-sink";
 
 type Call = { cmd: string; args: string[]; stdin?: string; proc: SpeechProcess & { killed: boolean; finish(code?: number): void } };
@@ -26,6 +26,20 @@ function harness() {
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("piper engine", () => {
+  test("WAV wrapper retains synthesis devices rather than player devices and hides killed results", async () => {
+    let finish!: (code: number) => void;
+    const engine = wavEngine({ tmpDir: "R", unlink() {}, commandFor: () => ({ cmd: "synth", args: [] }),
+      run: (cmd) => cmd === "synth"
+        ? { exited: Promise.resolve(0), kill() {}, devices: () => ({ kokoro: "gpu" }) }
+        : { exited: new Promise<number>(resolve => { finish = resolve; }), kill() {}, devices: () => ({ lid: "cpu" }) } });
+    const success = engine("Fake narration", "es"); await tick(); finish(0); await success.exited;
+    expect(success.devices!()).toEqual({ kokoro: "gpu" });
+    const killed = engine("Fake narration", "es"); await tick(); killed.kill(); finish(0); await killed.exited;
+    expect(killed.devices!()).toBeUndefined();
+    const legacy = harness();
+    const proc = legacy.engine("Piper", "es"); legacy.calls[0]!.proc.finish(); await tick(); legacy.calls[1]!.proc.finish();
+    await proc.exited; expect(proc.devices!()).toBeUndefined();
+  });
   test("artifact synthesis uses the caller-owned WAV without playback or unlink", async () => {
     const h = harness();
     const proc = h.engine.synthesize!("Exact text", "en", "C:\\owned\\candidate.wav");

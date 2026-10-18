@@ -32,6 +32,30 @@ function fakeSink() {
 const client = { session: { get: async () => ({ error: "x" }), message: async () => ({ error: "x" }) } } as any;
 const user = (id: string, created: number) => ({ type: "message.updated", properties: { info: { id, sessionID: "ses_a", role: "user", time: { created } } } }) as any;
 
+test("planned Kokoro devices survive live engine and pause wrappers into scoped control status", async () => {
+  const kokoro = kokoroEngine({ python: "fake", script: "fake", modelPath: "fake", voicesPath: "fake",
+    voices: { es: "em_alex", en: "af_heart" }, speed: 1, tmpDir: "R", unlink() {},
+    run: cmd => ({ exited: Promise.resolve(0), kill() {}, devices: () => cmd === "fake" ? { lid: "cpu", kokoro: "gpu" } : undefined }) });
+  let wanted = "kokoro";
+  const engine = liveEngine(() => wanted, { kokoro: () => kokoro, piper: () => undefined },
+    () => ({ exited: Promise.resolve(0), kill() {} }));
+  const raw = createSpeechSink({ engine, deviceIdentity: () => wanted });
+  const sink = withPause(raw, () => false);
+  await sink({ sessionID: "ses_a", messageID: "a", text: "Fake narration" });
+  const replies: any[] = [];
+  const hooks = createOpenVox(client, "local", sink, undefined,
+    { instance: "devices", publish: async command => { replies.push(decodeCommand(command)); } });
+  const hello = (sessionID: string) => hooks.event!({ event: { type: "tui.command.execute", properties: {
+    command: encodeCommand({ kind: "hello", sessionID, challenge: "c", expires: Date.now() + 1500 }),
+  } } } as any);
+  await hello("ses_a"); expect(replies.at(-1)).toMatchObject({ lidDevice: "cpu", kokoroDevice: "gpu" });
+  await hello("ses_b"); expect(replies.at(-1).kokoroDevice).toBeUndefined();
+  wanted = "sapi"; await hello("ses_a"); expect(replies.at(-1).kokoroDevice).toBeUndefined();
+  await sink({ sessionID: "ses_a", messageID: "b", text: "Fallback narration" });
+  await hello("ses_a"); expect(replies.at(-1).kokoroDevice).toBeUndefined();
+  await hooks.dispose?.();
+});
+
 /** Valid SDK responses and fake audio only; no process, synthesis or host transport. */
 function latestResponseHarness(injected = false, nonce = "latest", capable = true) {
   const f = fakeSink();
@@ -774,36 +798,57 @@ describe("live sink player wiring", () => {
 });
 
 describe("chooseEngine", () => {
+  test("live engine forwards release/disposal only to instantiated owners and never restarts after disposal", async () => {
+    const calls: string[] = [];
+    const make = (name: string) => Object.assign(() => ({ exited: Promise.resolve(0), kill() {} }), {
+      release: () => { calls.push(`release:${name}`); }, dispose: async () => { calls.push(`dispose:${name}`); },
+    });
+    let wanted = "kokoro";
+    const a = make("a"), b = make("b");
+    const engine = liveEngine(() => wanted, { kokoro: () => a, piper: () => b });
+    await engine("first", "es").exited; wanted = "piper"; await engine("second", "es").exited;
+    expect(calls).toEqual(["release:a"]);
+    engine.release!(); await engine.dispose!();
+    expect(calls).toEqual(["release:a", "release:a", "release:b", "dispose:a", "dispose:b"]);
+    expect(() => engine("late", "es")).toThrow("disposed");
+  });
   test("default Kokoro wiring reads persisted tone changes on each new plan without changing the live profile", async () => {
     let stored = "{}";
     const fs = { read: () => stored, writeAtomic: (_path: string, data: string) => { stored = data; } };
     const calls: string[][] = [];
+    const requests: any[] = [];
+    let engine: Engine | undefined;
     const exists = spyOn(nodeFs, "existsSync").mockReturnValue(true);
     const spawn = spyOn(childProcess, "spawn").mockImplementation(((_cmd: string, args: string[]) => {
       calls.push(args);
       const child = new EventEmitter() as any;
       child.stdout = new EventEmitter();
       child.stdin = new EventEmitter();
-      child.stdin.end = () => queueMicrotask(() => {
-        child.stdout.emit("data", Buffer.from('{"diagnostics":[]}'));
-        child.emit("close", 0);
-      });
-      child.kill = () => {};
+      const identity = { v: 1, owner: args[args.indexOf("--owner") + 1], generation: args[args.indexOf("--generation") + 1] };
+      child.stdin.write = (raw: string) => {
+        const r = JSON.parse(raw); requests.push(r);
+        queueMicrotask(() => child.stdout.emit("data", Buffer.from(JSON.stringify({ ...identity,
+          type: "result", request: r.request, code: 0, diagnostics: [] }) + "\n")));
+        return true;
+      };
+      child.kill = () => { queueMicrotask(() => child.emit("close", 0)); return true; };
+      queueMicrotask(() => child.stdout.emit("data", Buffer.from(JSON.stringify({ ...identity, type: "ready" }) + "\n")));
       return child;
     }) as any);
     try {
-      const engine = defaultKokoroEngine({ OPEN_VOX_HOME: "C:\\synthetic-tone-home" }, () => readConfig("memory", fs))!;
+      engine = defaultKokoroEngine({ OPEN_VOX_HOME: "C:\\synthetic-tone-home" }, () => readConfig("memory", fs))!;
       const plan = createNarrationPlan("Synthetic narration", "es");
       await engine.synthesizePlan!(plan, "fake.wav").exited;
-      expect(calls[0]).not.toContain("--tone-voice");
+      expect(requests[0].toneVoice).toBe("");
       writeConfig({ toneVoice: { es: "am_onyx" }, toneWeight: { es: 0.75 } }, "memory", fs);
       await engine.synthesizePlan!(plan, "fake.wav").exited;
-      expect(calls[1]).toEqual(expect.arrayContaining(["--tone-voice", "am_onyx", "--tone-weight", "0.75"]));
-      expect(calls[1]![calls[1]!.indexOf("--lang") + 1]).toBe("es");
+      expect(requests[1]).toMatchObject({ toneVoice: "am_onyx", toneWeight: 0.75, lang: "es" });
       writeConfig({ toneVoice: { es: "" }, toneWeight: { es: 0 } }, "memory", fs);
       await engine.synthesizePlan!(plan, "fake.wav").exited;
-      expect(calls[2]).toEqual(calls[0]);
-    } finally { spawn.mockRestore(); exists.mockRestore(); }
+      expect(requests[2].toneVoice).toBe("");
+      expect(calls).toHaveLength(1);
+      expect(new Set(requests.map(r => r.generation)).size).toBe(1);
+    } finally { await engine?.dispose?.(); spawn.mockRestore(); exists.mockRestore(); }
   });
   test("plan dispatch selects the actual engine at execution and text fallback never receives JSON", async () => {
     const seen: string[] = [], diagnostics: string[] = [];

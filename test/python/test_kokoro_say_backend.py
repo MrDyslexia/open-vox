@@ -16,6 +16,7 @@ from test_narration_plan import plan_for
 from test_narration_lid_onnx import (FakeSession, assets, runtime_available, staged_reference, stub_modules,
                                      REFERENCE)
 from narration_resolver import resolve_plan
+from runtime_device import RuntimeDevice
 import narration_lid_onnx
 
 STUBS = {'soundfile': types.ModuleType('soundfile'), 'kokoro_onnx': types.ModuleType('kokoro_onnx')}
@@ -29,7 +30,12 @@ BASE = ['--model', 'm', '--voices', 'v', '--voice', 'em_alex', '--lang', 'es', '
 
 def run_main(argv, stdin=''):
     out, err = io.StringIO(), io.StringIO()
-    with patch.object(sys, 'stdin', io.StringIO(stdin)), patch.object(sys, 'stdout', out), redirect_stderr(err):
+    # Every CLI test is fake-runtime only, even on hosts with native packages.
+    ort = sys.modules.get('onnxruntime')
+    if not isinstance(ort, types.SimpleNamespace):
+        ort = stub_modules()['onnxruntime']
+    with patch.dict(sys.modules, {'onnxruntime': ort, 'torch': None}), \
+            patch.object(sys, 'stdin', io.StringIO(stdin)), patch.object(sys, 'stdout', out), redirect_stderr(err):
         try:
             code = kokoro_say.main(argv)
         except SystemExit as exit_:
@@ -45,7 +51,9 @@ def fake_kokoro(voices=('em_alex', 'am_onyx')):
     """A Kokoro factory whose instance reports a bounded voice pack for donor validation."""
     instance = MagicMock(name='KokoroInstance')
     instance.get_voices.return_value = list(voices)
-    return MagicMock(name='Kokoro', return_value=instance)
+    factory = MagicMock(name='Kokoro', return_value=instance)
+    factory.from_session.return_value = instance
+    return factory
 
 
 class ArgumentTests(unittest.TestCase):
@@ -175,6 +183,111 @@ class LazyImportTests(unittest.TestCase):
 
 
 class EndToEndStubTests(unittest.TestCase):
+    def test_direct_success_reports_only_its_kokoro_runtime_after_writing_audio(self):
+        for device in ('cpu', 'cuda'):
+            with self.subTest(device=device):
+                factory = fake_kokoro()
+                factory.return_value.create.return_value = ([0.0], 24000)
+                out = io.StringIO()
+
+                def write(*args):
+                    self.assertEqual(out.getvalue(), '')
+
+                with patch.object(kokoro_say, 'probe_runtime', return_value=RuntimeDevice()), \
+                        patch.object(kokoro_say, 'load_kokoro', return_value=(factory.return_value, 'kokoro-onnx-provider-' + device)), \
+                        patch.object(kokoro_say.sf, 'write', side_effect=write, create=True), \
+                        patch.object(sys, 'stdin', types.SimpleNamespace(buffer=io.BytesIO(b'fixture text'))), \
+                        patch.object(sys, 'stdout', out):
+                    self.assertEqual(kokoro_say.main([a for a in BASE if a != '--plan-json']), 0)
+                self.assertEqual(json.loads(out.getvalue()), {'diagnostics': ['kokoro-onnx-provider-' + device]})
+                factory.return_value.create.assert_called_once()
+
+    def test_explicit_session_ignores_ambient_provider_override(self):
+        selected = FakeSession()
+        create = MagicMock(return_value=selected)
+        factory = fake_kokoro()
+        with patch.dict(sys.modules, {'onnxruntime': types.SimpleNamespace(InferenceSession=create), 'torch': None}), \
+                patch.dict('os.environ', {'ONNX_PROVIDER': 'untrusted-provider-secret'}), \
+                patch.object(kokoro_say, 'Kokoro', factory):
+            model, code = kokoro_say.load_kokoro('fixture.onnx', 'voices.bin', RuntimeDevice())
+        self.assertIs(model, factory.return_value)
+        self.assertEqual(code, 'kokoro-onnx-provider-cpu')
+        self.assertEqual(create.call_args.kwargs['providers'], ['CPUExecutionProvider'])
+        factory.assert_not_called()
+        factory.from_session.assert_called_once_with(selected, 'voices.bin')
+
+    def test_direct_inference_failure_is_not_retried_or_leaked(self):
+        factory = fake_kokoro()
+        factory.return_value.create.side_effect = RuntimeError('CUDA failure private source prose')
+        err, out = io.StringIO(), io.StringIO()
+        with patch.object(kokoro_say, 'probe_runtime', return_value=RuntimeDevice()), \
+                patch.object(kokoro_say, 'load_kokoro', return_value=(factory.return_value, 'kokoro-onnx-provider-cpu')) as load, \
+                patch.object(kokoro_say.sf, 'write', create=True) as write, \
+                patch.object(sys, 'stdin', types.SimpleNamespace(buffer=io.BytesIO(b'private source prose'))), \
+                patch.object(sys, 'stdout', out), redirect_stderr(err):
+            self.assertEqual(kokoro_say.main([a for a in BASE if a != '--plan-json']), 2)
+        load.assert_called_once()
+        factory.return_value.create.assert_called_once()
+        write.assert_not_called()
+        self.assertEqual(err.getvalue(), 'Narration synthesis failed\n')
+        self.assertEqual(out.getvalue(), '')
+
+    def test_direct_path_probes_once_before_session_and_injects_kokoro(self):
+        events = []
+        factory = fake_kokoro()
+        factory.return_value.create.return_value = ([0.0], 24000)
+        candidate = RuntimeDevice(ort_cuda=True)
+        selected = FakeSession()
+        selected.get_providers = lambda: ['CUDAExecutionProvider', 'CPUExecutionProvider']
+        ort = types.SimpleNamespace(InferenceSession=lambda *a, **k: (events.append('session'), selected)[1])
+        stdin = types.SimpleNamespace(buffer=io.BytesIO(b'fixture text'))
+        out = io.StringIO()
+        with patch.dict(sys.modules, {'onnxruntime': ort, 'torch': None}), \
+                patch.object(kokoro_say, 'probe_runtime', side_effect=lambda **k: (events.append('probe'), candidate)[1]) as probe, \
+                patch.object(kokoro_say, 'Kokoro', factory), \
+                patch.object(kokoro_say.sf, 'write', create=True) as write, \
+                patch.object(sys, 'stdin', stdin), patch.object(sys, 'stdout', out):
+            self.assertEqual(kokoro_say.main([a for a in BASE if a != '--plan-json']), 0)
+        self.assertEqual(events, ['probe', 'session'])
+        probe.assert_called_once_with()
+        factory.assert_not_called()
+        factory.from_session.assert_called_once_with(selected, 'v')
+        factory.return_value.create.assert_called_once()
+        write.assert_called_once()
+        self.assertEqual(json.loads(out.getvalue()), {'diagnostics': ['kokoro-onnx-provider-cuda']})
+
+    def test_plan_shares_one_preload_probe_with_detector_and_kokoro(self):
+        events = []
+        candidate = RuntimeDevice()
+        detector = types.SimpleNamespace(device_diagnostics=['lid-onnx-provider-cpu'])
+        factory = fake_kokoro()
+
+        def build(*args):
+            self.assertIs(args[-1], candidate)
+            events.append('detector')
+            return detector
+
+        def resolve(plan, seen):
+            self.assertIs(seen, detector)
+            events.append('resolve')
+            return {'diagnostics': []}
+
+        def load(model, voices, seen):
+            self.assertIs(seen, candidate)
+            events.append('kokoro')
+            return factory.return_value, 'kokoro-onnx-provider-cpu'
+
+        with patch.object(kokoro_say, 'probe_runtime', side_effect=lambda **k: (events.append('probe'), candidate)[1]) as probe, \
+                patch.object(kokoro_say, 'build_detector', side_effect=build), \
+                patch('narration_resolver.resolve_plan', side_effect=resolve), \
+                patch.object(kokoro_say, 'load_kokoro', side_effect=load), \
+                patch('narration_synthesis.synthesize_envelope'), patch('narration_synthesis.raw_phonemizer'):
+            code, out, err = run_main(BASE, json.dumps(plan_for('Hola local')))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(events, ['probe', 'detector', 'resolve', 'kokoro'])
+        probe.assert_called_once_with(include_torch=False)
+        self.assertEqual(json.loads(out), {'diagnostics': ['kokoro-onnx-provider-cpu', 'lid-onnx-provider-cpu']})
+
     def test_build_detector_selects_backend(self):
         self.assertIsInstance(kokoro_say.build_detector('onnx', ABSOLUTE, None, None), narration_lid_onnx.OnnxDetector)
         self.assertEqual(Path(kokoro_say.build_detector('onnx', ABSOLUTE, 'ignored', None).model_directory), Path(ABSOLUTE))
@@ -210,8 +323,9 @@ class EndToEndStubTests(unittest.TestCase):
             code, out, err = run_main(BASE + ['--app-home', 'IGNORED', '--lid-manifest', str(manifest),
                                               '--lid-backend', 'onnx', '--lid-dir', str(directory)], json.dumps(plan))
         self.assertEqual(code, 0, err)
-        self.assertEqual(json.loads(out), {'diagnostics': []})
+        self.assertEqual(json.loads(out), {'diagnostics': ['kokoro-onnx-provider-cpu', 'lid-onnx-provider-cpu']})
         self.assertTrue(session.runs)
+        # The envelope remains diagnostic-only; evidence/schema are unchanged.
         self.assertEqual(seen['voice'], 'em_alex')
         self.assertEqual(seen['resolved']['resolvedSchemaVersion'], 1)
         self.assertEqual((seen['tone_voice'], seen['tone_weight']), ('', 0.0))
@@ -265,14 +379,14 @@ class EndToEndStubTests(unittest.TestCase):
                                               '--tone-weight', '0'], json.dumps(plan))
         self.assertEqual(code, 0, err)
         self.assertEqual(err, '')
-        self.assertEqual(json.loads(out), {'diagnostics': []})
+        self.assertEqual(json.loads(out), {'diagnostics': ['kokoro-onnx-provider-cpu', 'lid-onnx-provider-cpu']})
         factory.return_value.get_voices.assert_not_called()
         synth.assert_called_once()
         self.assertEqual(synth.call_args.kwargs, {'tone_voice': 'zz_nobody', 'tone_weight': 0.0})
 
     def test_main_failure_stays_generic(self):
         plan = plan_for('Hola local')
-        with patch.object(kokoro_say, 'Kokoro', MagicMock(side_effect=RuntimeError('secret prose'))), \
+        with patch.object(kokoro_say, 'Kokoro', types.SimpleNamespace(from_session=MagicMock(side_effect=RuntimeError('secret prose')))), \
                 patch.dict(sys.modules, stub_modules()):
             code, out, err = run_main(BASE + ['--lid-backend', 'onnx', '--lid-dir', ABSOLUTE], json.dumps(plan))
         self.assertEqual(code, 2)
@@ -287,7 +401,7 @@ class EndToEndStubTests(unittest.TestCase):
             code, out, err = run_main(BASE + ['--lid-backend', 'onnx', '--lid-dir', str(Path(root) / 'absent')],
                                       json.dumps(plan))
         self.assertEqual(code, 0, err)
-        self.assertEqual(json.loads(out), {'diagnostics': ['detector-unavailable', 'missing-local-assets']})
+        self.assertEqual(json.loads(out), {'diagnostics': ['detector-unavailable', 'kokoro-onnx-provider-cpu', 'missing-local-assets']})
 
 
 @unittest.skipUnless((REFERENCE / 'model.onnx').is_file() and (REFERENCE / 'tokenizer' / 'tokenizer.json').is_file()

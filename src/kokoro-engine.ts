@@ -1,15 +1,19 @@
-import { existsSync, unlinkSync } from "node:fs";
+import { existsSync, unlinkSync, readdirSync, statSync } from "node:fs";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
-import { win32 } from "node:path";
+import { dirname, join, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { envValue, homeFor } from "./brand";
 import { DEFAULT_CONFIG, MAX_SPEED, MIN_SPEED, createConfigReader, kokoroLanguageCode, validToneVoice, validToneWeight } from "./config";
 import { wavEngine, type Runner } from "./piper-engine";
-import type { Engine } from "./speech-sink";
+import type { Engine, SpeechProcess } from "./speech-sink";
 import type { Language } from "./speech-text";
-import { LID_MANIFEST_PATH } from "./narration-assets";
+import { LID_MANIFEST_PATH, narrationPaths } from "./narration-assets";
 import { createNarrationRuntimeSource, type NarrationRuntime } from "./narration-runtime";
+import type { ModelDevices } from "./repeat-control";
+import { selectGpuPython } from "./gpu-runtime";
+import { NarrationWorker, type WorkerOptions } from "./narration-worker";
 
 export type KokoroPaths = {
   python: string;
@@ -30,11 +34,18 @@ export type KokoroConfig = KokoroPaths & {
    * When absent the legacy `narrationPython`/`lidManifest` pair is used unchanged.
    */
   narrationRuntime?: () => NarrationRuntime | undefined;
+  directPython?: () => string | undefined;
   /** Read on every utterance so voice, tone and speed changes apply immediately. */
   settings?: () => KokoroSettings;
   run: Runner;
   tmpDir: string;
   unlink: (file: string) => void;
+  /** Production enables private persistent transport. Omit only for legacy one-shot Runner callers. */
+  worker?: WorkerOptions;
+  /** Optional read-only asset identity injection for deterministic tests. */
+  workerIdentity?: (paths: string[]) => string;
+  /** Requested backend/profile, including a selection that currently falls back to the same CPU tuple. */
+  workerRuntimeIdentity?: () => string;
 };
 
 export type KokoroSettings = Pick<KokoroPaths, "voices" | "speed" | "toneVoice" | "toneWeight">;
@@ -62,8 +73,42 @@ export function resolveKokoro(
 }
 
 export function kokoroEngine(config: KokoroConfig): Engine {
+  const worker = config.worker ? new NarrationWorker(config.worker) : undefined;
+  const run: Runner = worker ? (cmd, args, input) => {
+    if (cmd === "powershell.exe") return config.run(cmd, args, input);
+    const value = (name: string) => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
+    const wav = value("--out")!;
+    const root = dirname(resolve(wav));
+    const dynamic = new Set(["--voice", "--lang", "--speed", "--out", "--tone-voice", "--tone-weight"]);
+    const launchArgs: string[] = [];
+    for (let i = 0; i < args.length; i++) {
+      if (dynamic.has(args[i]!)) { i++; continue; }
+      if (args[i] === "--plan-json") continue;
+      launchArgs.push(args[i]!);
+    }
+    launchArgs.push("--output-root", root);
+    const paths = [cmd, config.modelPath, config.voicesPath, config.script,
+      ...relevantWorkerAssets(config.script), ...[value("--lid-manifest"), value("--lid-dir")].filter((p): p is string => !!p)];
+    if (args.includes("--plan-json") && config.appHome && !value("--lid-dir")) {
+      const torch = narrationPaths(config.appHome);
+      paths.push(torch.model, torch.marker);
+    }
+    if (["pn-onnx-gpu-venv", "kokoro-gpu-venv"].includes(win32.basename(win32.dirname(win32.dirname(cmd))))) {
+      const venv = win32.dirname(win32.dirname(cmd));
+      for (const name of ["gpu-dependencies.json", "gpu-qualification.json", "lid-cuda-evidence.json", "kokoro-cuda-evidence.json"])
+        paths.push(win32.join(venv, name));
+    }
+    // Readiness still runs in the existing runtime selectors on EVERY admission. No profile-only cache.
+    const identity = JSON.stringify([cmd, launchArgs, config.workerRuntimeIdentity?.(),
+      (config.workerIdentity ?? workerAssetIdentity)(paths)]);
+    return worker.request({ command: cmd, args: launchArgs, identity }, {
+      mode: args.includes("--plan-json") ? "plan" : "text", input: args.includes("--plan-json") ? JSON.parse(input!) : input,
+      output: resolve(wav), voice: value("--voice")!, lang: value("--lang")!, speed: Number(value("--speed")),
+      toneVoice: value("--tone-voice") ?? "", toneWeight: Number(value("--tone-weight") ?? 0),
+    });
+  } : config.run;
   const make = (plan: boolean) => wavEngine({
-    run: config.run,
+    run,
     tmpDir: config.tmpDir,
     unlink: config.unlink,
     commandFor: (language, wav) => {
@@ -76,9 +121,14 @@ export function kokoroEngine(config: KokoroConfig): Engine {
       const toneArgs = plan && donor && validToneVoice(donor) && validToneWeight(weight) && weight > 0
         ? ["--tone-voice", donor, "--tone-weight", String(weight)] : [];
       const runtime = plan ? config.narrationRuntime?.() : undefined;
+      const python = plan ? runtime?.python ?? config.narrationPython?.() ?? config.python : config.directPython?.() ?? config.python;
+      const managedGpu = ["pn-onnx-gpu-venv", "kokoro-gpu-venv"].includes(win32.basename(win32.dirname(win32.dirname(python))));
       return {
-        cmd: plan ? runtime?.python ?? config.narrationPython?.() ?? config.python : config.python,
+        cmd: python,
         args: [
+          ...(managedGpu ? ["-I", "-B", "-X", "utf8", "-c", worker
+            ? "import sys,runpy,pathlib,os;script=sys.argv[1];sys.argv=sys.argv[1:];sys.path.insert(0,str(pathlib.Path(script).parent));protocol=os.dup(1);os.dup2(2,1);import gpu_runtime_probe as p;p.prepare_worker();p.preload_for_worker(None);sys.stdout.flush();os.dup2(protocol,1);os.close(protocol);runpy.run_path(script,run_name='__main__')"
+            : "import sys,runpy,pathlib;script=sys.argv[1];sys.argv=sys.argv[1:];sys.path.insert(0,str(pathlib.Path(script).parent));import gpu_runtime_probe as p;p.prepare_worker();p.preload_for_worker(None);runpy.run_path(script,run_name='__main__')"] : worker ? ["-B", "-X", "utf8"] : []),
           config.script,
           "--model", config.modelPath,
           "--voices", config.voicesPath,
@@ -95,11 +145,55 @@ export function kokoroEngine(config: KokoroConfig): Engine {
       };
     },
   });
-  const engine = make(false);
+  const direct = make(false);
   const planned = make(true);
+  // AudioCache already supplies exclusive UUID placeholders. The uncached CLI path needs a UUID
+  // candidate too; wavEngine's legacy open-vox-* filename is intentionally not accepted by Python.
+  const speak = (synthesize: (wav: string) => SpeechProcess): SpeechProcess => {
+    const wav = join(config.tmpDir, `${randomUUID()}.wav`);
+    let active: SpeechProcess | undefined, killed = false;
+    let devices: ModelDevices | undefined;
+    const exited = (async () => {
+      try {
+        active = synthesize(wav);
+        const code = await active.exited;
+        if (killed || code !== 0) return code || 1;
+        devices = active.devices?.();
+        const quote = wav.replace(/'/g, "''");
+        active = config.run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+          `(New-Object System.Media.SoundPlayer '${quote}').PlaySync()`]);
+        return await active.exited;
+      } finally { try { config.unlink(wav); } catch {} }
+    })();
+    return { exited, devices: () => !killed && devices ? { ...devices } : undefined,
+      kill() { killed = true; devices = undefined; active?.kill(); } };
+  };
+  const engine: Engine = worker ? Object.assign((text: string, language: Language) =>
+    speak(wav => direct.synthesize!(text, language, wav)), { synthesize: direct.synthesize }) : direct;
   engine.synthesizePlan = (plan, wav) => planned.synthesize!(JSON.stringify(plan), plan.defaultLanguage, wav);
-  engine.speakPlan = (plan) => planned(JSON.stringify(plan), plan.defaultLanguage);
+  engine.speakPlan = (plan) => worker ? speak(wav => engine.synthesizePlan!(plan, wav)) : planned(JSON.stringify(plan), plan.defaultLanguage);
+  if (worker) { engine.release = () => worker.release(); engine.dispose = () => worker.dispose();
+    engine.workerSnapshot = () => worker.snapshot(); }
   return engine;
+}
+
+function relevantWorkerAssets(script: string): string[] {
+  try { return readdirSync(dirname(script)).filter(name => name.endsWith(".py")).map(name => join(dirname(script), name)); }
+  catch { return []; }
+}
+
+/** Lightweight stamps, not a replacement for GPU qualification or Python's pinned LID verification. */
+function workerAssetIdentity(paths: string[]): string {
+  const stamps: unknown[] = [];
+  const visit = (path: string) => {
+    if (stamps.length > 4096) throw Error("Too many narration assets");
+    let s: ReturnType<typeof statSync>;
+    try { s = statSync(path); } catch { stamps.push([path, "unavailable"]); return; }
+    stamps.push([path, s.dev, s.ino, s.size, s.mtimeMs, s.ctimeMs]);
+    if (s.isDirectory()) for (const name of readdirSync(path).sort()) visit(join(path, name));
+  };
+  paths.forEach(visit);
+  return JSON.stringify(stamps);
 }
 
 /** Local inference only. Bound and validate helper diagnostics; never forward third-party stderr/prose. */
@@ -112,6 +206,7 @@ export function narrationRunner(onDiagnostic: (code: string) => void = () => {})
       HF_HUB_DISABLE_IMPLICIT_TOKEN: "1", HF_TOKEN: "", HUGGING_FACE_HUB_TOKEN: "", PYTHONNOUSERSITE: "1",
     } });
     let output = "", oversized = false;
+    let devices: ModelDevices | undefined, killed = false;
     child.stdout.on("data", (data: Buffer) => {
       if (output.length + data.length > 8192) oversized = true;
       if (!oversized) output += data.toString("utf8");
@@ -119,12 +214,20 @@ export function narrationRunner(onDiagnostic: (code: string) => void = () => {})
     const exited = new Promise<number>((resolve, reject) => {
       child.once("error", reject);
       child.once("close", code => {
-        if (args.includes("--plan-json") && code === 0) {
+        if (code === 0 && !killed && (args.includes("--plan-json") || output.trim() || oversized)) {
           try {
             const value = JSON.parse(output);
             if (oversized || Object.keys(value).join() !== "diagnostics" || !Array.isArray(value.diagnostics)
                 || value.diagnostics.length > 32 || !value.diagnostics.every((c: unknown) =>
                   typeof c === "string" && /^[a-z][a-z0-9-]{0,79}$/.test(c))) throw new Error();
+            devices = {};
+            for (const model of ["lid", "kokoro"] as const) {
+              if (model === "lid" && !args.includes("--plan-json")) continue;
+              const codes = value.diagnostics.filter((c: string) =>
+                (model === "lid" ? /^lid-(onnx-provider|torch-device)-(cpu|cuda)$/ : /^kokoro-onnx-provider-(cpu|cuda)$/).test(c));
+              const selected = new Set<string>(codes.map((c: string) => c.endsWith("-cuda") ? "gpu" : "cpu"));
+              if (selected.size === 1 && new Set(codes).size === 1) devices[model] = selected.has("gpu") ? "gpu" : "cpu";
+            }
             for (const c of value.diagnostics) { try { onDiagnostic(c); } catch {} }
           } catch { resolve(2); return; }
         }
@@ -133,7 +236,8 @@ export function narrationRunner(onDiagnostic: (code: string) => void = () => {})
     });
     child.stdin.on("error", () => {});
     child.stdin.end(stdin ?? "", "utf8");
-    return { exited, kill: () => { child.kill(); } };
+    return { exited, devices: () => !killed && devices ? { ...devices } : undefined,
+      kill: () => { killed = true; devices = undefined; child.kill(); } };
   };
 }
 
@@ -141,18 +245,31 @@ export function defaultKokoroEngine(
   env: Record<string, string | undefined> = process.env,
   getConfig: () => import("./config").Config = createConfigReader(),
   onDiagnostic?: (code: string) => void,
+  inspection: { idleMs?: number } = {},
 ): Engine | undefined {
   const root = homeFor(env);
   const paths = resolveKokoro(root, env);
   if (!paths) return undefined;
-  const script = fileURLToPath(new URL("../scripts/kokoro_say.py", import.meta.url));
+  const script = fileURLToPath(new URL("../scripts/narration_worker.py", import.meta.url));
   if (!existsSync(script)) return undefined;
   return kokoroEngine({
-    ...paths, script, appHome: root,
+    ...paths, script, appHome: root, worker: { onDiagnostic, idleMs: inspection.idleMs },
+    workerRuntimeIdentity: () => { const current = getConfig(); return JSON.stringify([current.narrationBackend, current.runtimeProfile]); },
     // One tuple per plan call: interpreter, manifest and model directory always match the backend.
     narrationRuntime: createNarrationRuntimeSource({
-      root, backend: () => getConfig().narrationBackend, fallbackPython: paths.python, onDiagnostic,
+      root, backend: () => getConfig().narrationBackend, profile: () => getConfig().runtimeProfile,
+      fallbackPython: paths.python, onDiagnostic,
     }),
+    directPython: () => {
+      const config = getConfig();
+      if (config.narrationBackend !== "onnx") {
+        if (config.runtimeProfile === "cuda13") { try { onDiagnostic?.("gpu-profile-requires-onnx"); } catch {} }
+        return undefined;
+      }
+      const selected = selectGpuPython(root, "kokoro", config.runtimeProfile);
+      if (config.runtimeProfile === "cuda13" && !selected) { try { onDiagnostic?.("gpu-profile-unavailable"); } catch {} }
+      return selected;
+    },
     // Environment variables stay as explicit overrides on top of the shared config file.
     settings: () => {
       const config = getConfig();

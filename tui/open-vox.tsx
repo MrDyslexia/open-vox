@@ -7,7 +7,7 @@
 import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import { For, createMemo, createSignal, onCleanup } from "solid-js"
 import { KOKORO_VOICES, readConfig, writeConfig } from "../src/config"
-import { createRepeatUi, buttonHandlers, canPause, canSetSpeed, publishAttached, sameView, serviceIcon, speedLabel } from "../src/repeat-ui"
+import { createRepeatUi, buttonHandlers, canPause, canSetSpeed, deviceLabel, publishAttached, sameView, serviceIcon, speedLabel } from "../src/repeat-ui"
 
 const id = "open-vox"
 
@@ -106,6 +106,7 @@ function Block(props: { api: TuiPluginApi; sessionID: string }) {
           </span>
         </text>
       </box>
+      <text fg={theme().textMuted} wrapMode="word">{deviceLabel(view())}</text>
       <box flexDirection="row" gap={1}>
         {button(() => (paused() ? "Resume" : "Pause"), () => { void repeat.togglePause(session()) }, paused, false,
           () => !canPause(view()) || !canPause(repeat.view(session())))}
@@ -139,4 +140,3 @@ const tui: TuiPlugin = async (api) => {
 const plugin = { id, tui }
 
 export default plugin
-

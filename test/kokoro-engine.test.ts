@@ -3,6 +3,12 @@ import { kokoroEngine, narrationRunner, resolveKokoro, type KokoroSettings } fro
 import type { Runner } from "../src/piper-engine";
 import { createNarrationPlan } from "../src/markdown-narration";
 import { LID_MANIFEST_PATH, narrationPaths, PN_READY_RECORD, resolveNarrationPython } from "../src/narration-assets";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
+import { basename, join } from "node:path";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import type { WorkerChild } from "../src/narration-worker";
 
 function harness() {
   const calls: { cmd: string; args: string[]; stdin?: string }[] = [];
@@ -23,6 +29,153 @@ function harness() {
 }
 
 describe("kokoro engine", () => {
+  test("real asset stamps invalidate a persistent slot without hashing or loading models", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opencode", "persistent-stamps-"));
+    const paths = { python: join(root, "python.exe"), script: join(root, "worker.py"),
+      modelPath: join(root, "model.onnx"), voicesPath: join(root, "voices.bin") };
+    Object.values(paths).forEach(path => writeFileSync(path, "fake"));
+    let starts = 0;
+    const engine = kokoroEngine({ ...paths, voices: { es: "em_alex", en: "af_heart" }, speed: 1,
+      tmpDir: root, unlink() {}, run: () => { throw Error("no playback"); }, worker: { spawn: (_cmd, args) => {
+        starts++;
+        const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(),
+          kill(): boolean { queueMicrotask(() => child.emit("close", 0)); return true; } });
+        const identity = { v: 1, owner: args[args.indexOf("--owner") + 1], generation: args[args.indexOf("--generation") + 1] };
+        child.stdin.on("data", raw => { const r = JSON.parse(raw.toString());
+          queueMicrotask(() => child.stdout.write(JSON.stringify({ ...identity, type: "result", request: r.request,
+            code: 0, diagnostics: [] }) + "\n")); });
+        queueMicrotask(() => child.stdout.write(JSON.stringify({ ...identity, type: "ready" }) + "\n")); return child as WorkerChild;
+      } },
+    });
+    try {
+      for (let i = 0; i < 2; i++) expect(await engine.synthesize!("Synthetic", "es", join(root, "out.wav")).exited).toBe(0);
+      expect(starts).toBe(1);
+      for (const path of Object.values(paths)) {
+        writeFileSync(path, "different-sized-fake");
+        expect(await engine.synthesize!("Different", "en", join(root, "next.wav")).exited).toBe(0);
+      }
+      expect(starts).toBe(5);
+    } finally { await engine.dispose!(); rmSync(root, { recursive: true, force: true }); }
+  });
+  test("persistent path reuses settings-only changes, replaces assets/runtime/output root, and disposes", async () => {
+    const children: { args: string[]; requests: any[]; kills: number }[] = [];
+    let stamp = "assets-a", python = "python-a", profile = "cpu";
+    let live: KokoroSettings = { voices: { es: "em_alex", en: "af_heart" }, speed: 1 };
+    const engine = kokoroEngine({ python, script: "worker.py", modelPath: "model", voicesPath: "voices",
+      voices: live.voices, speed: 1, tmpDir: "tmp", unlink() {}, run: () => { throw Error("no playback"); },
+      narrationRuntime: () => ({ backend: "torch", python, lidManifest: "manifest" }),
+      settings: () => live, workerIdentity: () => stamp, workerRuntimeIdentity: () => profile, worker: { spawn: (_cmd, args) => {
+        const record = { args, requests: [] as any[], kills: 0 }; children.push(record);
+        const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(),
+          kill(): boolean { record.kills++; queueMicrotask(() => child.emit("close", 0)); return true; } });
+        const identity = { v: 1, owner: args[args.indexOf("--owner") + 1], generation: args[args.indexOf("--generation") + 1] };
+        child.stdin.on("data", raw => {
+          const request = JSON.parse(raw.toString()); record.requests.push(request);
+          queueMicrotask(() => child.stdout.write(JSON.stringify({ ...identity, type: "result", request: request.request,
+            code: 0, diagnostics: ["kokoro-onnx-provider-cpu"] }) + "\n"));
+        });
+        queueMicrotask(() => child.stdout.write(JSON.stringify({ ...identity, type: "ready" }) + "\n"));
+        return child as WorkerChild;
+      } },
+    });
+    const plan = createNarrationPlan("¡Árbol! **English** 😀", "es");
+    expect(engine.workerSnapshot?.().state).toBe("stopped");
+    expect(await engine.synthesizePlan!(plan, "one.wav").exited).toBe(0);
+    const inspection = engine.workerSnapshot!();
+    expect(inspection.state).toBe("idle");
+    expect(inspection.generation).toBe(children[0]!.args.at(-1));
+    expect(JSON.stringify(inspection)).not.toContain("Árbol");
+    (inspection.counters as any).kokoroLoads = 99;
+    expect(engine.workerSnapshot!().counters.kokoroLoads).toBeNull();
+    live = { voices: { es: "ef_dora", en: "bm_george" }, speed: 1.2,
+      toneVoice: { es: "am_onyx" }, toneWeight: { es: 0.75 } };
+    expect(await engine.synthesizePlan!(plan, "two.wav").exited).toBe(0);
+    expect(children).toHaveLength(1);
+    expect(children[0]!.requests[1]).toMatchObject({ voice: "ef_dora", speed: 1.2, toneVoice: "am_onyx", toneWeight: 0.75, input: plan });
+    expect(children[0]!.args.slice(0, 3)).toEqual(["-B", "-X", "utf8"]);
+    expect(children[0]!.args).not.toContain("--voice"); expect(children[0]!.args).not.toContain("--out");
+    stamp = "assets-b"; await engine.synthesizePlan!(plan, "three.wav").exited;
+    python = "python-b"; await engine.synthesizePlan!(plan, "four.wav").exited;
+    await engine.synthesizePlan!(plan, "different-root/five.wav").exited;
+    profile = "cuda13"; await engine.synthesizePlan!(plan, "different-root/six.wav").exited;
+    expect(children).toHaveLength(5); expect(children.slice(0, 4).map(c => c.kills)).toEqual([1, 1, 1, 1]);
+    await engine.dispose!(); expect(children[4]!.kills).toBe(1);
+    expect(await engine.synthesizePlan!(plan, "seven.wav").exited).toBe(2); expect(children).toHaveLength(5);
+  });
+
+  test("persistent uncached speech uses an exclusive UUID candidate and cleans up after playback", async () => {
+    let output = "", cleaned = ""; const plays: string[][] = [];
+    const engine = kokoroEngine({ python: "python", script: "worker.py", modelPath: "model", voicesPath: "voices",
+      voices: { es: "em_alex", en: "af_heart" }, speed: 1, tmpDir: "C:\\fake-temp", workerIdentity: () => "assets",
+      unlink: file => { cleaned = file; }, run: (_cmd, args) => { plays.push(args); return { exited: Promise.resolve(0), kill() {} }; },
+      worker: { spawn: (_cmd, args) => {
+        const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(),
+          kill(): boolean { queueMicrotask(() => child.emit("close", 0)); return true; } });
+        const identity = { v: 1, owner: args[args.indexOf("--owner") + 1], generation: args[args.indexOf("--generation") + 1] };
+        child.stdin.on("data", raw => { const r = JSON.parse(raw.toString()); output = r.output;
+          queueMicrotask(() => child.stdout.write(JSON.stringify({ ...identity, type: "result", request: r.request,
+            code: 0, diagnostics: [] }) + "\n")); });
+        queueMicrotask(() => child.stdout.write(JSON.stringify({ ...identity, type: "ready" }) + "\n")); return child as WorkerChild;
+      } },
+    });
+    expect(await engine("Synthetic speech", "es").exited).toBe(0);
+    expect(basename(output)).toMatch(/^[0-9a-f-]{36}\.wav$/); expect(cleaned).toBe(output);
+    expect(plays).toHaveLength(1); expect(plays[0]!.join(" ")).toContain(output); await engine.dispose!();
+  });
+  test("GPU profile routes direct and planned calls coherently with isolated preflight before helper imports", async () => {
+    const calls: { cmd: string; args: string[] }[] = [];
+    const engine = kokoroEngine({ python: "C:\\home\\kokoro-venv\\Scripts\\python.exe", script: "C:\\repo\\scripts\\kokoro_say.py",
+      modelPath: "model", voicesPath: "voices", voices: { es: "em_alex", en: "af_heart" }, speed: 1, tmpDir: "tmp", unlink() {},
+      directPython: () => "C:\\home\\kokoro-gpu-venv\\Scripts\\python.exe",
+      narrationRuntime: () => ({ backend: "onnx", python: "C:\\home\\pn-onnx-gpu-venv\\Scripts\\python.exe", lidManifest: "manifest", lidDirectory: "C:\\home\\lid-onnx\\model" }),
+      run: (cmd, args) => { calls.push({ cmd, args }); return { exited: Promise.resolve(0), kill() {} }; } });
+    await engine.synthesize!("synthetic", "en", "out.wav").exited;
+    await engine.synthesizePlan!(createNarrationPlan("synthetic", "es"), "out.wav").exited;
+    expect(calls.map(c => c.cmd)).toEqual(["C:\\home\\kokoro-gpu-venv\\Scripts\\python.exe", "C:\\home\\pn-onnx-gpu-venv\\Scripts\\python.exe"]);
+    for (const c of calls) {
+      // -I ignores PYTHONUTF8/PYTHONIOENCODING, so UTF-8 stdio must be requested with -X utf8.
+      // Without it accented plan text is mis-decoded and planned synthesis exits with code 2.
+      expect(c.args.slice(0, 5)).toEqual(["-I", "-B", "-X", "utf8", "-c"]);
+      expect(c.args[5]).toContain("prepare_worker()"); expect(c.args[5]).toContain("runpy.run_path");
+    }
+    expect(calls[1]!.args).toContain("--lid-dir"); expect(calls[0]!.args).not.toContain("--plan-json");
+  });
+  test("retains per-process selected devices for direct and planned helpers without mixing runs", async () => {
+    const runner = narrationRunner();
+    for (const flags of [[], ["--plan-json"]]) {
+      const proc = runner(process.execPath, ["-e", `console.log(JSON.stringify({diagnostics:['lid-torch-device-cpu','kokoro-onnx-provider-cuda','local-inference-failed']}))`, "--", ...flags]);
+      expect(await proc.exited).toBe(0);
+      expect(proc.devices?.()).toEqual(flags.length ? { lid: "cpu", kokoro: "gpu" } : { kokoro: "gpu" });
+    }
+    const partial = runner(process.execPath, ["-e", `console.log(JSON.stringify({diagnostics:['kokoro-onnx-provider-cpu','lid-onnx-provider-cpu','lid-torch-device-cuda']}))`]);
+    expect(await partial.exited).toBe(0);
+    expect(partial.devices?.()).toEqual({ kokoro: "cpu" });
+    const legacy = runner(process.execPath, ["-e", "void 0"]);
+    expect(await legacy.exited).toBe(0);
+    expect(legacy.devices?.()).toBeUndefined();
+  });
+  test("unknown, duplicate, conflicting and malformed diagnostics never invent devices", async () => {
+    const runner = narrationRunner();
+    const cases: [unknown, import("../src/repeat-control").ModelDevices][] = [
+      [[], {}],
+      [["unrecognized-provider-cuda", "lid-onnx-provider-metal"], {}],
+      [["kokoro-onnx-provider-cpu", "kokoro-onnx-provider-cpu"], { kokoro: "cpu" }],
+      [["kokoro-onnx-provider-cpu", "kokoro-onnx-provider-cuda", "lid-onnx-provider-cuda"], { lid: "gpu" }],
+      [["lid-onnx-provider-cpu", "lid-torch-device-cpu"], {}],
+    ];
+    for (const [diagnostics, expected] of cases) {
+      const proc = runner(process.execPath, ["-e", `console.log(${JSON.stringify(JSON.stringify({ diagnostics }))})`, "--", "--plan-json"]);
+      expect(await proc.exited).toBe(0); expect(proc.devices?.()).toEqual(expected);
+    }
+    for (const output of ['null', '{}', '{"diagnostics":[4]}', '{"diagnostics":["private prose"]}', 'x'.repeat(8193)]) {
+      const proc = runner(process.execPath, ["-e", `console.log(${JSON.stringify(output)})`]);
+      expect(await proc.exited).toBe(2); expect(proc.devices?.()).toBeUndefined();
+    }
+    const failed = runner(process.execPath, ["-e", `console.log('{"diagnostics":["kokoro-onnx-provider-cuda"]}'); process.exitCode=1`]);
+    expect(await failed.exited).toBe(1); expect(failed.devices?.()).toBeUndefined();
+    const killed = runner(process.execPath, ["-e", `console.log('{"diagnostics":["kokoro-onnx-provider-cuda"]}'); setTimeout(()=>{},1000)`]);
+    killed.kill(); await killed.exited; expect(killed.devices?.()).toBeUndefined();
+  });
   test("active tone flags follow out, precede plan flags, and sample the base language per utterance", async () => {
     const calls: string[][] = [];
     let reads = 0;

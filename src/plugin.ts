@@ -330,6 +330,7 @@ export function createOpenVox(client: Client, directory: string, sink: SpeechSin
     view: coordinator.view,
     refresh: coordinator.refresh,
     status: () => sink.status?.(), isPaused: pause.isPaused, isEnabled: pause.isEnabled,
+    devices: (sessionID) => sink.devices?.(sessionID),
     latest: () => {
       const target = coordinator.latest();
       return target && { sessionID: target.selection.sessionID, messageID: target.selection.messageID, busy: target.busy };
@@ -386,6 +387,7 @@ export function withPause(sink: SpeechSink, isPaused: () => boolean, isEnabled: 
   if (sink.pause) wrapped.pause = () => sink.pause!();
   if (sink.resume) wrapped.resume = () => sink.resume!();
   wrapped.status = () => isEnabled() ? sink.status?.() : undefined;
+  wrapped.devices = (sessionID) => isEnabled() ? sink.devices?.(sessionID) : undefined;
   wrapped.repeat = async (sessionID, revision, expires) => { if (!isPaused() && isEnabled()) await sink.repeat?.(sessionID, revision, expires); };
   if (sink.stopSession) wrapped.stopSession = (sessionID) => sink.stopSession!(sessionID);
   wrapped.removeSession = (sessionID) => sink.removeSession?.(sessionID);
@@ -429,11 +431,18 @@ export function liveEngine(
   onDiagnostic?: (code: string) => void,
 ): Engine {
   let last = "";
+  let previous: Engine | undefined;
+  let disposed = false;
+  const owned = new Set<Engine>();
   const reduced = new Set<Engine>();
   const select = () => {
+    if (disposed) throw new Error("Narration engine disposed");
     const choice = chooseEngine(wanted(), true, factories);
     if (choice.name !== last) { last = choice.name; onChoice?.(choice.name); }
-    return choice.engine ?? fallback;
+    const selected = choice.engine ?? fallback;
+    if (previous && previous !== selected) previous.release?.();
+    previous = selected; owned.add(selected);
+    return selected;
   };
   const engine: Engine = (text, language) => select()(text, language);
   engine.synthesize = (text, language, wav) => {
@@ -456,6 +465,11 @@ export function liveEngine(
     if (selected.speakPlan) return selected.speakPlan(plan);
     notify(selected);
     return selected(flattenNarrationPlan(plan), plan.defaultLanguage);
+  };
+  engine.release = () => { for (const selected of owned) selected.release?.(); };
+  engine.dispose = async () => {
+    disposed = true;
+    await Promise.all([...owned].map(selected => selected.dispose?.()));
   };
   return engine;
 }
@@ -483,6 +497,7 @@ export function createLiveSink(
     enabled,
     ...audio,
     narrationLanguage: () => config().narrationLanguage,
+    deviceIdentity: () => JSON.stringify([wanted(), config()]),
     engine: liveEngine(wanted, factories, sapiEngine(), (name) => log(`engine=${name}`), diagnostic),
     onDiagnostic: diagnostic,
     onError: (error) => log(`speech error: ${error instanceof Error ? error.message : String(error)}`),
@@ -496,8 +511,10 @@ export async function speakOnce(text: string, env: Record<string, string | undef
     if (m.startsWith("speech error")) errors.push(m);
     else if (m.startsWith("narration diagnostic")) console.warn(m);
   });
-  await sink({ sessionID: "cli", messageID: "cli", text });
-  if (errors.length > 0) throw new Error(errors.join("; "));
+  try {
+    await sink({ sessionID: "cli", messageID: "cli", text });
+    if (errors.length > 0) throw new Error(errors.join("; "));
+  } finally { await sink.dispose?.(); }
 }
 
 /** The player watches each playback by its own duration; this is only a last-resort ceiling for the sink. */
@@ -533,6 +550,7 @@ export const OpenVoxPlugin: Plugin = async ({ client, directory }) => {
   logged.resume = sink.resume;
   logged.repeat = sink.repeat;
   logged.status = sink.status;
+  logged.devices = sink.devices;
   logged.stopSession = sink.stopSession;
   logged.removeSession = sink.removeSession;
   logged.dispose = sink.dispose;
